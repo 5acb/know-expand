@@ -17,7 +17,11 @@ def _get_ss_limiter(cfg: Config) -> AsyncLimiter:
     global _ss_limiter
     if _ss_limiter is None:
         rl = cfg.rate_limits["semantic_scholar"]
-        _ss_limiter = AsyncLimiter(rl.max_rate, rl.time_period)
+        # Use 1-token bucket to serialize requests and prevent burst traffic.
+        # AsyncLimiter(N, T) starts with N tokens, so concurrent calls all
+        # get tokens immediately. Instead, use 1 token per (T/N) seconds.
+        per_request_interval = rl.time_period / max(rl.max_rate, 1)
+        _ss_limiter = AsyncLimiter(1, per_request_interval)
     return _ss_limiter
 
 _SS_BASE = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -75,8 +79,8 @@ async def _ss_search(
     params: dict = {"query": query, "fields": _SS_FIELDS, "limit": min(limit, 100)}
     if year_filter:
         params["year"] = year_filter
-    delay = 5.0
-    for attempt in range(5):
+    delay = cfg.bibliography.ss_retry_initial_delay
+    for attempt in range(cfg.bibliography.ss_max_retries):
         async with _get_ss_limiter(cfg):
             resp = await http.get(_SS_BASE, params=params)
         if resp.status_code == 429:
@@ -93,8 +97,9 @@ async def fetch_anchors(
     domain_label: str,
     http: httpx.AsyncClient,
     cfg: Config,
-    n: int = 3,
+    n: int | None = None,
 ) -> list[CitationRecord]:
+    n = n if n is not None else cfg.bibliography.ss_anchors_n
     papers = await _ss_search(domain_label, http, cfg, limit=n * 4)
     papers.sort(key=lambda p: p.get("citationCount") or 0, reverse=True)
     seen: set[str] = set()

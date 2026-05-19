@@ -11,6 +11,9 @@ class BibliographyConfig:
     depth_totals: dict[str, int] = field(default_factory=lambda: {
         "survey": 10, "standard": 30, "deep": 50
     })
+    ss_max_retries: int = 5
+    ss_retry_initial_delay: float = 5.0
+    ss_anchors_n: int = 3
 
 
 @dataclass
@@ -37,7 +40,7 @@ class LlamaCppConfig:
 @dataclass
 class ConcurrencyConfig:
     cloud_default: int = 8
-    local_default: int = 1
+    local_default: int = 2
 
 
 @dataclass

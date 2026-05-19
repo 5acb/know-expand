@@ -9,6 +9,9 @@ bibliography:
     survey: 10
     standard: 30
     deep: 50
+  ss_max_retries: 5
+  ss_retry_initial_delay: 5.0
+  ss_anchors_n: 3
 
 centrality:
   structural_weight: 2.0
@@ -30,7 +33,7 @@ rate_limits:
 
 concurrency:
   cloud_default: 8
-  local_default: 1
+  local_default: 2
 
 timeouts:
   domain_research_seconds: 2700
