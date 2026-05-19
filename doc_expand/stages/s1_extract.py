@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 
@@ -22,14 +23,20 @@ _MAP_PROMPT = """\
 You are a domain expert reading a chunk of a technical document.
 Extract every substantive concept that a domain expert would recognise as load-bearing.
 Go beyond literal text: include implicit domain concepts implied by the content.
-Exclude boilerplate structural terms (introduction, methodology, conclusion, etc.).
+
+Strict exclusions (return nothing for these):
+- Boilerplate structural terms: introduction, methodology, conclusion, etc.
+- Code fragments, variable names, function names, class names, import paths
+- JSON keys, string literals, Python tokens (str, None, True, False, etc.)
+- File paths, URLs, version numbers, numeric literals
+- Single-character tokens or generic NPs: "the user", "the output", "the default"
 
 Chunk:
 {text}
 
-For each term, provide: name, aliases (variant spellings/abbreviations), \
-co_occurring_terms (terms that appear near it), a short context_snippet, \
-and occurrence_count within this chunk.
+For each term, provide: name (clean English noun phrase, no code syntax), aliases \
+(variant spellings/abbreviations), co_occurring_terms (terms that appear near it), \
+a short context_snippet, and occurrence_count within this chunk.
 """
 
 
@@ -45,6 +52,7 @@ async def _map_chunk(
     chunk = json.loads(chunk_path.read_text())
     chunk_id = chunk["chunk_id"]
     text = chunk["text"]
+    nlp_text = _strip_code_from_text(text)  # code-free version for spaCy + KeyBERT
     t0 = time.monotonic()
 
     out_path = map_dir / f"map_{chunk_id}.json"
@@ -56,8 +64,8 @@ async def _map_chunk(
 
     emit({"event": "chunk_map_start", "chunk_id": chunk_id, "text_len": len(text)})
 
-    # Signal A — spaCy lexical
-    doc = nlp(text)
+    # Signal A — spaCy lexical (on code-stripped text)
+    doc = nlp(nlp_text)
     lexical: dict[str, int] = {}
     for chunk_span in doc.noun_chunks:
         t = chunk_span.text.lower().strip()
@@ -68,9 +76,9 @@ async def _map_chunk(
         if t and t not in BOILERPLATE:
             lexical[t] = lexical.get(t, 0) + 1
 
-    # Signal C — KeyBERT embedding
+    # Signal C — KeyBERT embedding (on code-stripped text)
     keywords = kw_model.extract_keywords(
-        text,
+        nlp_text,
         keyphrase_ngram_range=(cfg.keyword_extraction.ngram_min, cfg.keyword_extraction.ngram_max),
         stop_words="english",
         top_n=cfg.keyword_extraction.top_n,
@@ -117,7 +125,7 @@ async def _map_chunk(
     return result
 
 
-_STRIP_CHARS = "|*_#`- \t\n"
+_STRIP_CHARS = "|*_#`- \t\n→←↑↓⇒⇐•·"
 _BOX_DRAWING = set("─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋")
 _SINGLE_TOKEN_STOPWORDS = frozenset({
     "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
@@ -131,18 +139,73 @@ _SINGLE_TOKEN_STOPWORDS = frozenset({
     "also", "then", "than", "such", "very", "more", "most", "any", "some",
     "not", "no", "nor", "so", "yet", "as", "if", "because", "since",
     "while", "although", "however", "therefore", "thus", "hence",
+    # Python / code tokens
+    "str", "int", "float", "bool", "none", "true", "false", "list", "dict",
+    "tuple", "set", "type", "self", "cls", "args", "kwargs", "assert",
+    "return", "yield", "raise", "pass", "break", "continue", "import",
+    "from", "class", "def", "async", "await", "with", "lambda",
+    # Generic document NPs that are noise
+    "first", "second", "third", "last", "next", "new", "old", "same",
+    "good", "bad", "large", "small", "high", "low", "right", "left",
+    "zero", "null", "empty", "full", "default", "simple", "basic",
+    "key", "value", "name", "item", "node", "edge", "path", "file",
+    "doc", "page", "line", "text", "data", "code", "step", "stage",
+    "state", "mode", "case", "type", "kind", "way", "part", "end",
+    "note", "example", "result", "output", "input", "use", "user",
+    "time", "number", "count", "size", "level", "order", "index",
+    # Infrastructure / CLI junk
+    "url", "uri", "sdk", "api", "cli", "uid", "id", "ids", "uuid",
+    "phase", "trace", "flag", "log", "debug", "info", "warn", "error",
+    "config", "param", "arg", "env", "var", "ref", "ptr", "buf",
+    "signal", "signals", "progress", "version", "tag", "hash",
+    "task", "tasks", "event", "events", "token", "tokens",
+    "stage", "stages", "step", "steps", "run", "call", "calls",
+    "chunk", "chunks", "batch", "retry", "timeout", "limit", "cap",
+    "slot", "queue", "stack", "loop", "iter", "block", "lock",
+    "format", "scheme", "spec", "template", "pattern", "model",
+    "entry", "record", "row", "col", "field", "attr", "prop",
+    "method", "func", "fn", "op", "ops", "cmd", "msg", "req", "resp",
+    "src", "dst", "tmp", "dir", "dirs", "path", "paths",
+    "mit", "gnu", "bsd",  # license abbreviations
 })
+
+
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]{1,80}`")
+_JSON_FRAGMENT_RE = re.compile(r'^\s*[{"\[\]},:]')
+
+
+def _strip_code_from_text(text: str) -> str:
+    """Remove fenced code blocks and inline code for NLP signals (spaCy, KeyBERT)."""
+    text = _CODE_FENCE_RE.sub(" ", text)
+    text = _INLINE_CODE_RE.sub(" ", text)
+    return text
 
 
 def _clean_term(name: str) -> str | None:
     name = name.strip(_STRIP_CHARS)
+    # Reject box-drawing characters
     if any(c in _BOX_DRAWING for c in name):
         return None
+    # Reject terms that start with JSON/code fragment characters
+    if _JSON_FRAGMENT_RE.match(name):
+        return None
+    # Reject terms containing backticks, braces, angle brackets (code artifacts)
+    if any(c in name for c in "{}[]<>`\""):
+        return None
+    # Require enough alphabetic content
     alpha_count = sum(1 for c in name if c.isalpha())
     if alpha_count < 3:
         return None
-    # Reject single-token function words; multi-word phrases are fine
+    # Reject leading non-alphabetic Unicode (arrows, bullets absorbed into names)
+    if name and not name[0].isalnum():
+        return None
+    # Reject single-token stopwords and code tokens; multi-word phrases are fine
     if " " not in name and name.lower() in _SINGLE_TOKEN_STOPWORDS:
+        return None
+    # Reject "the X", "a X", "an X" — article+noun pairs are never domain concepts
+    words = name.lower().split()
+    if len(words) == 2 and words[0] in ("the", "a", "an"):
         return None
     return name
 

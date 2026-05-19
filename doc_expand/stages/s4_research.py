@@ -24,15 +24,42 @@ _logger = logging.getLogger("doc_expand.s4")
 # Prompts
 # ---------------------------------------------------------------------------
 
-_TOP_DOWN_PROMPT = """\
-You are a technical research writer. Using the provided domain knowledge graph \
-nodes, gap analysis findings, and bibliography, write a comprehensive technical \
-overview of this domain.
+_CONCEPT_PROTOCOL = """\
+CONCEPT INTRODUCTION PROTOCOL — apply to EVERY non-trivial concept:
+1. INTUITION: One plain-English paragraph using a concrete everyday analogy. \
+   No jargon allowed here.
+2. SYMBOL TABLE (required before any equation): A Markdown table:
+   | Symbol | Type | Meaning |
+   |--------|------|---------|
+   Every symbol in the equation must have a row. No exceptions.
+3. FORMAL DEFINITION: The equation or precise definition.
+4. WORKED EXAMPLE: Substitute specific numbers or a minimal code snippet. \
+   Walk through the computation step by step, line by line.
+5. WHY IT MATTERS: One sentence on the practical payoff.
+"""
 
-Work TOP-DOWN: start with the field overview and high-level paradigms, then \
-cover the key mechanisms, and finish with implementation details.
+_CLOSING_SECTION = """\
+The FINAL section must be titled "Where to Go Next" with this structure:
+- **Open problems**: 2-3 specific, unresolved questions at the research \
+  frontier of {domain_label}.
+- **Start here**: One codebase, dataset, or benchmark a reader can clone and \
+  run today to begin contributing.
+- **Essential reading**: Exactly 3 papers from the bibliography that would \
+  most accelerate a newcomer's understanding of this domain. Explain in one \
+  sentence why each paper matters.
+"""
+
+_TOP_DOWN_PROMPT = """\
+You are writing a self-contained learning chapter. The reader's goal is to \
+go from zero knowledge of {domain_label} to being able to build on and advance \
+the field — using only this chapter. They must not need to consult any other \
+source.
+
+Work TOP-DOWN: establish the mental model first, then fill in the mechanisms, \
+then show the state of the art.
 
 Domain: {domain_label} (id: {domain_id})
+Reader profile: {reader_profile}
 
 Knowledge graph nodes:
 {graph_nodes}
@@ -43,27 +70,44 @@ Gap analysis findings for this domain:
 Bibliography (cite ONLY from this list using the citation id field):
 {bibliography}
 
+STRUCTURE (follow this section order exactly):
+1. "What is {domain_label}?" — 3–5 paragraphs. One-sentence definition. \
+   One concrete real-world example. Why it exists and what problem it solves. \
+   What a practitioner can do AFTER mastering it that they could not do before.
+2. "Prerequisites and Notation" — Any math or CS concepts this domain \
+   builds on that a practitioner might not know. Derive them briefly from \
+   scratch. Do NOT assume the reader knows them; do NOT link out.
+3. "Core Concepts" — The 5–10 load-bearing ideas. Apply the CONCEPT \
+   INTRODUCTION PROTOCOL to each.
+4. "Key Methods and Algorithms" — The main algorithms with pseudocode or \
+   code. Derive from first principles where possible.
+5. "State of the Art" — Current best approaches and their trade-offs, grounded \
+   in bibliography citations.
+6. "Where to Go Next" — see closing section spec below.
+
+{concept_protocol}
+{closing_section}
+
 ANTI-HALLUCINATION RULES:
-- Cite only from the provided bibliography JSON using [@citation_id] notation.
-- If a claim needs a citation not in the list, write the claim and mark it \
-[NEEDS_CITATION].
-- Tag speculative or inferred claims with [INFERRED].
+- Cite only from the bibliography using [@citation_id] notation.
+- Mark unciteable claims [NEEDS_CITATION].
+- Tag speculative claims [INFERRED].
 - Do not invent paper titles, authors, or results.
 
 Write a DomainSummary with domain_id="{domain_id}" and \
-domain_label="{domain_label}". Include at least 4 sections covering: \
-overview, core mechanisms, key methods/algorithms, and open questions.
+domain_label="{domain_label}".
 """
 
 _BOTTOM_UP_PROMPT = """\
-You are a technical research writer. Using the provided domain knowledge graph \
-nodes, gap analysis findings, and bibliography, write a comprehensive technical \
-analysis of this domain.
+You are writing a self-contained learning chapter. The reader's goal is to \
+go from zero knowledge of {domain_label} to being able to build on and advance \
+the field — using only this chapter.
 
-Work BOTTOM-UP: start from concrete implementation details and worked examples, \
-then build up to the theoretical foundations and first principles.
+Work BOTTOM-UP: start with the minimal runnable thing, then build upward to \
+theory and frontier.
 
 Domain: {domain_label} (id: {domain_id})
+Reader profile: {reader_profile}
 
 Knowledge graph nodes:
 {graph_nodes}
@@ -74,22 +118,39 @@ Gap analysis findings for this domain:
 Bibliography (cite ONLY from this list using the citation id field):
 {bibliography}
 
+STRUCTURE (follow this section order exactly):
+1. "Minimal Working Example" — The simplest possible demonstration of \
+   {domain_label} doing one useful thing. Complete, runnable code or concrete \
+   step-by-step walkthrough. No prerequisites, no "first install X". \
+   A reader who runs this should say "I understand what this is."
+2. "Building the Intuition" — Explain WHY the minimal example works. \
+   Use analogies. Work backwards from the example to the underlying idea.
+3. "Foundations from Scratch" — Derive the theoretical underpinnings of \
+   what was just demonstrated. Apply the CONCEPT INTRODUCTION PROTOCOL \
+   to every mathematical concept. Never assume prior knowledge.
+4. "Worked Examples with Increasing Complexity" — Three examples: trivial \
+   → practical → research-grade. Show the full progression explicitly.
+5. "Implementation Guide" — How to build a real system. What to watch out for. \
+   Common failure modes and how to diagnose them.
+6. "Where to Go Next" — see closing section spec below.
+
+{concept_protocol}
+{closing_section}
+
 ANTI-HALLUCINATION RULES:
-- Cite only from the provided bibliography JSON using [@citation_id] notation.
-- If a claim needs a citation not in the list, write the claim and mark it \
-[NEEDS_CITATION].
-- Tag speculative or inferred claims with [INFERRED].
+- Cite only from the bibliography using [@citation_id] notation.
+- Mark unciteable claims [NEEDS_CITATION].
+- Tag speculative claims [INFERRED].
 - Do not invent paper titles, authors, or results.
 
 Write a DomainSummary with domain_id="{domain_id}" and \
-domain_label="{domain_label}". Include at least 4 sections covering: \
-concrete implementations, algorithms/pseudocode, theoretical underpinnings, \
-and first-principles derivations.
+domain_label="{domain_label}".
 """
 
 _CRITIC_PROMPT = """\
-You are an adversarial research critic. Review the two drafts below and the \
-provided bibliography. Identify flaws in both drafts.
+You are an adversarial research critic. The goal of these documents is to take \
+a reader from zero knowledge to being able to build on and advance {domain_label}. \
+Identify every way they fall short of that goal.
 
 Domain: {domain_label} (id: {domain_id})
 
@@ -102,15 +163,24 @@ TOP-DOWN DRAFT:
 BOTTOM-UP DRAFT:
 {bottom_up_narrative}
 
-Check for:
-1. Unsupported claims not in the bibliography and not tagged [NEEDS_CITATION]
-2. Missing implementation details that should be present
-3. Citation keys that do not appear in the provided bibliography
-4. [INFERRED] tags that appear to be citable from the bibliography
-5. Logical gaps or contradictions between the two drafts
+Check EVERY item below. For each issue found, quote the exact sentence and \
+explain what is wrong:
+1. Citations: unsupported claims not tagged [NEEDS_CITATION]; invalid keys
+2. Pedagogy — symbol tables: any equation lacking a preceding symbol table
+3. Pedagogy — worked examples: any abstract concept without a concrete \
+   numerical or code example with specific values
+4. Pedagogy — intuition: formal definitions without a plain-English intuition \
+   paragraph preceding them
+5. Pedagogy — undefined terms: jargon used before it is defined
+6. Pedagogy — assumed knowledge: concepts that require prerequisites the \
+   reader was not given
+7. Pedagogy — missing "What is {domain_label}?" accessible intro section
+8. Missing "Where to Go Next" section with open problems, start-here \
+   codebase/dataset, and 3 essential papers
+9. Logical gaps or contradictions between the two drafts
 
 Return a CritiqueResult with domain_id="{domain_id}".
-verdict must be "accept" if both drafts are high quality, "revise" otherwise.
+verdict must be "accept" ONLY if all 9 checks pass. Otherwise "revise".
 """
 
 _REVISE_PROMPT = """\
@@ -197,6 +267,40 @@ def _bib_summary(bibliography: list[dict]) -> str:
 # Core per-domain research
 # ---------------------------------------------------------------------------
 
+def _reader_profile_strings(profile: dict) -> tuple[str, str]:
+    """Return (profile_summary, calibration_note) for prompt injection."""
+    level = profile.get("familiarity_level", "practitioner")
+    field = profile.get("background_field", "unknown")
+    goal = profile.get("learning_goal", "apply")
+    math = profile.get("math_comfort", "engage")
+
+    summary = f"familiarity={level}, background={field}, goal={goal}, math={math}"
+
+    notes = {
+        "novice": "Write for someone encountering this field for the first time. "
+                  "Use analogies liberally. Every term must be defined. Avoid acronyms "
+                  "without expansion. Prefer plain language over technical precision.",
+        "aware": "The reader has heard of this field but has not worked in it. "
+                 "Define specialist terms, skip basic general computing concepts. "
+                 "Analogies are welcome but don't over-explain fundamentals.",
+        "practitioner": "The reader uses these tools day-to-day. Define specialist "
+                        "academic terms but skip obvious practitioner knowledge. "
+                        "Prefer concrete examples and code over abstract descriptions.",
+        "expert": "The reader is a domain expert. Focus on nuance, open problems, "
+                  "and non-obvious connections. Minimal hand-holding on fundamentals.",
+    }
+    calibration = notes.get(level, notes["practitioner"])
+
+    goal_notes = {
+        "explain": " Prioritise clear explanations over exhaustive coverage.",
+        "apply": " Emphasise implementation guidance and worked examples.",
+        "critique": " Include limitations, failure modes, and counterarguments.",
+        "research": " Highlight open questions, reproducibility gaps, and future directions.",
+    }
+    calibration += goal_notes.get(goal, "")
+    return summary, calibration
+
+
 async def _research_domain(
     domain: dict,
     audit_dir: Path,
@@ -207,6 +311,7 @@ async def _research_domain(
     depth: str,
     cfg: Config,
     router,
+    user_profile: dict | None = None,
 ) -> DomainSummary:
     domain_id = domain["id"]
     domain_label = domain["label"]
@@ -249,6 +354,10 @@ async def _research_domain(
         indent=2,
     )
 
+    reader_profile_str, reader_profile_note = _reader_profile_strings(user_profile or {})
+
+    closing_section = _CLOSING_SECTION.format(domain_label=domain_label)
+
     # Parallel top-down + bottom-up
     top_down_msg = [{
         "role": "user",
@@ -258,6 +367,10 @@ async def _research_domain(
             graph_nodes=nodes_str,
             gap_analysis=gap_context,
             bibliography=bib_str,
+            reader_profile=reader_profile_str,
+            reader_profile_note=reader_profile_note,
+            concept_protocol=_CONCEPT_PROTOCOL,
+            closing_section=closing_section,
         ),
     }]
     bottom_up_msg = [{
@@ -268,6 +381,10 @@ async def _research_domain(
             graph_nodes=nodes_str,
             gap_analysis=gap_context,
             bibliography=bib_str,
+            reader_profile=reader_profile_str,
+            reader_profile_note=reader_profile_note,
+            concept_protocol=_CONCEPT_PROTOCOL,
+            closing_section=closing_section,
         ),
     }]
 
@@ -398,6 +515,11 @@ async def run(state: PipelineState, cfg: Config) -> None:
     depth = state["depth"]
     router = make_router("researcher", cfg)
 
+    profile_path = state_dir / "user_profile.json"
+    user_profile: dict = {}
+    if profile_path.exists():
+        user_profile = json.loads(profile_path.read_text())
+
     coros = [
         _research_domain(
             domain=domain,
@@ -409,6 +531,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
             depth=depth,
             cfg=cfg,
             router=router,
+            user_profile=user_profile,
         )
         for domain in domains
     ]

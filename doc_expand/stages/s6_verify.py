@@ -21,8 +21,14 @@ _NEEDS_CITATION_RE = re.compile(r"\[NEEDS_CITATION\]")
 # Pattern for citation keys: [@key] or [key] where key looks like an identifier
 # (contains letters, digits, underscores, hyphens; at least 3 chars)
 _CITATION_KEY_RE = re.compile(r"\[@?([\w\-]{3,})\]")
+# Strip fenced code blocks before scanning (avoids [@variable] false positives)
+_FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]{1,80}`")
 
 _SENTENCE_RE = re.compile(r"[^.!?\n]{0,120}(?:\[[@\w\-]{3,}\]|\[NEEDS_CITATION\])[^.!?\n]{0,120}")
+
+# Pipeline artifact markers that should never appear as citation keys
+_PIPELINE_MARKERS = frozenset({"NEEDS_CITATION", "INFERRED", "UNVALIDATED", "VERIFIED"})
 
 
 def _extract_context(text: str, pos: int, window: int = 120) -> str:
@@ -35,12 +41,16 @@ def _audit_section_file(
     section_path: Path,
     valid_citation_ids: set[str],
 ) -> list[CitationAuditItem]:
-    items: list[CitationAuditItem]= []
+    items: list[CitationAuditItem] = []
     text = section_path.read_text()
     fname = section_path.name
 
+    # Strip code blocks before scanning to avoid false positives on [@variable] patterns
+    scan_text = _FENCED_CODE_RE.sub("", text)
+    scan_text = _INLINE_CODE_RE.sub("", scan_text)
+
     # Find [NEEDS_CITATION] markers
-    for match in _NEEDS_CITATION_RE.finditer(text):
+    for match in _NEEDS_CITATION_RE.finditer(scan_text):
         context = _extract_context(text, match.start())
         items.append(CitationAuditItem(
             section_file=fname,
@@ -50,11 +60,12 @@ def _audit_section_file(
         ))
 
     # Find citation keys [@key] or [key]
-    for match in _CITATION_KEY_RE.finditer(text):
+    for match in _CITATION_KEY_RE.finditer(scan_text):
         key = match.group(1)
-        # Skip keys that are clearly not citation IDs (e.g. single words that are
-        # common markdown constructs like "x", "NEEDS_CITATION", "INFERRED")
-        if key in ("NEEDS_CITATION", "INFERRED"):
+        if key in _PIPELINE_MARKERS:
+            continue
+        # Skip single lowercase words — likely markdown link syntax, not citations
+        if key.islower() and "_" not in key and "-" not in key:
             continue
         context = _extract_context(text, match.start())
         if key in valid_citation_ids:

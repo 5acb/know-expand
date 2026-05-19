@@ -1,37 +1,43 @@
 roles:
+  # Tool-calling agent role: frontier first, local Qwen fallback.
+  # For llamacpp fallback load a Qwen2.5-Instruct GGUF and start the server
+  # with --chat-template qwen to enable native function calling.
+  agent:
+    - "gemini/gemini-2.5-pro"
+    - "llamacpp/qwen2.5-7b-instruct"
   researcher:
     - "claude-opus-4-7"
     - "claude-sonnet-4-6"
     - "gpt-4o"
-    - "gemini/gemini-3.5-flash"
+    - "gemini/gemini-2.5-pro"
     - "ollama/qwen2.5:14b"
   synthesizer:
     - "claude-opus-4-7"
     - "claude-sonnet-4-6"
     - "gpt-4o"
-    - "gemini/gemini-3.5-flash"
+    - "gemini/gemini-2.5-pro"
     - "ollama/qwen2.5:14b"
   critic:
     - "claude-sonnet-4-6"
     - "gpt-4o-mini"
-    - "gemini/gemini-3.5-flash"
+    - "gemini/gemini-2.5-pro"
     - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
     - "ollama/llama3.2:3b"
   extractor:
     - "claude-sonnet-4-6"
     - "gpt-4o-mini"
-    - "gemini/gemini-3.5-flash"
+    - "gemini/gemini-2.5-pro"
     - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
     - "ollama/llama3.2:3b"
   classifier:
     - "claude-sonnet-4-6"
     - "gpt-4o-mini"
-    - "gemini/gemini-3.5-flash"
+    - "gemini/gemini-2.5-pro"
     - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
     - "ollama/llama3.2:3b"
   assembler:
     - "claude-sonnet-4-6"
     - "gpt-4o-mini"
-    - "gemini/gemini-3.5-flash"
+    - "gemini/gemini-2.5-pro"
     - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
     - "ollama/llama3.2:3b"

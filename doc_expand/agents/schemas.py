@@ -45,6 +45,10 @@ class TaxonomyProposal(BaseModel):
     rationale: str
 
 
+class TaxonomyExplanation(BaseModel):
+    body: str                # plain-text explanation for the user
+
+
 class TermClassification(BaseModel):
     term_name: str
     domain_id: str
