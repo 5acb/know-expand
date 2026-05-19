@@ -4,14 +4,14 @@ from langgraph.graph import StateGraph, END
 
 from doc_expand.config import Config, load_config
 from doc_expand.state import PipelineState, emit, load_pipeline_json
-from doc_expand.stages import s0_ingest, s0_5_assess, s1_extract, s2_graph
+from doc_expand.stages import s0_ingest, s0_5_assess, s1_extract, s2_graph, s3_audit
 
 
 def build_graph(cfg: Config, interactive: bool, auto_taxonomy: bool) -> StateGraph:
     graph = StateGraph(PipelineState)
 
     async def node_ingest(state: PipelineState) -> PipelineState:
-        await s0_ingest.run(state)
+        await s0_ingest.run(state, cfg)
         return state
 
     async def node_assess(state: PipelineState) -> PipelineState:
@@ -26,16 +26,22 @@ def build_graph(cfg: Config, interactive: bool, auto_taxonomy: bool) -> StateGra
         await s2_graph.run(state, cfg, auto_taxonomy=auto_taxonomy)
         return state
 
+    async def node_audit(state: PipelineState) -> PipelineState:
+        await s3_audit.run(state, cfg)
+        return state
+
     graph.add_node("ingest", node_ingest)
     graph.add_node("assess", node_assess)
     graph.add_node("extract", node_extract)
     graph.add_node("graph", node_graph)
+    graph.add_node("audit", node_audit)
 
     graph.set_entry_point("ingest")
     graph.add_edge("ingest", "assess")
     graph.add_edge("assess", "extract")
     graph.add_edge("extract", "graph")
-    graph.add_edge("graph", END)
+    graph.add_edge("graph", "audit")
+    graph.add_edge("audit", END)
 
     return graph
 
