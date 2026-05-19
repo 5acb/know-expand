@@ -23,6 +23,23 @@ def _find_in_chain(exc: BaseException, *types) -> BaseException | None:
         current = current.__cause__ or current.__context__
     return None
 
+
+def _is_auth_error(exc: BaseException) -> BaseException | None:
+    """Return the root auth exception if exc (or its chain) is a credentials failure."""
+    import openai
+    root = _find_in_chain(exc, litellm.AuthenticationError)
+    if root:
+        return root
+    root = _find_in_chain(exc, openai.AuthenticationError, openai.PermissionDeniedError)
+    if root:
+        return root
+    # openai raises a generic OpenAIError *before* the request when credentials
+    # are missing (client init fails), so it never becomes a litellm error.
+    root = _find_in_chain(exc, openai.OpenAIError)
+    if root and any(kw in str(root).lower() for kw in ("credential", "api_key", "missing")):
+        return root
+    return None
+
 T = TypeVar("T", bound=BaseModel)
 
 _CLOUD_SEMAPHORE: asyncio.Semaphore | None = None
@@ -99,27 +116,35 @@ class QuotaAwareRouter:
         self.role = role
         self.models = models
         self.cfg = cfg
-        self.current_index = 0
-        self.exhausted: set[str] = set()
+        # _skip is shared across concurrent callers; _lock guards mutations only.
+        # Using a skip-set (not an advancing index) means concurrent tasks don't
+        # race past valid models: they each independently discover the same model
+        # is bad and add it to the set, then all land on the same next candidate.
+        self._skip: set[str] = set()
+        self._lock = asyncio.Lock()
+
+    def _next_model(self) -> str | None:
+        for m in self.models:
+            if m not in self._skip:
+                return m
+        return None
 
     async def call(self, messages: list[dict], schema: type[T]) -> T:
-        while self.current_index < len(self.models):
-            model = self.models[self.current_index]
+        while True:
+            model = self._next_model()
+            if model is None:
+                break
             sem = _get_semaphore(model, self.cfg)
             try:
                 async with sem:
                     return await _do_call(model, messages, schema, self.cfg, role=self.role)
             except Exception as e:
-                auth_err = _find_in_chain(e, litellm.AuthenticationError)
+                auth_err = _is_auth_error(e)
                 rate_err = _find_in_chain(e, litellm.RateLimitError)
                 if auth_err:
-                    self.exhausted.add(model)
-                    self.current_index += 1
-                    next_model = (
-                        self.models[self.current_index]
-                        if self.current_index < len(self.models)
-                        else None
-                    )
+                    async with self._lock:
+                        self._skip.add(model)
+                        next_model = self._next_model()
                     emit({
                         "event": "model_auth_skip",
                         "role": self.role,
@@ -135,13 +160,9 @@ class QuotaAwareRouter:
                     if retry_after:
                         await asyncio.sleep(int(retry_after))
                         continue
-                    self.exhausted.add(model)
-                    self.current_index += 1
-                    next_model = (
-                        self.models[self.current_index]
-                        if self.current_index < len(self.models)
-                        else None
-                    )
+                    async with self._lock:
+                        self._skip.add(model)
+                        next_model = self._next_model()
                     emit({
                         "event": "model_quota_switch",
                         "role": self.role,
@@ -155,7 +176,7 @@ class QuotaAwareRouter:
         emit({
             "event": "quota_exhausted",
             "role": self.role,
-            "all_models_tried": list(self.exhausted),
+            "all_models_tried": list(self._skip),
         })
         raise RuntimeError(f"All models exhausted for role: {self.role}")
 
