@@ -4,10 +4,25 @@ from langgraph.graph import StateGraph, END
 
 from doc_expand.config import Config, load_config
 from doc_expand.state import PipelineState, emit, load_pipeline_json
-from doc_expand.stages import s0_ingest, s0_5_assess, s1_extract, s2_graph, s3_audit
+from doc_expand.stages import (
+    s0_ingest,
+    s0_5_assess,
+    s1_extract,
+    s2_graph,
+    s3_audit,
+    s4_research,
+    s5_synthesize,
+    s6_verify,
+    s7_assemble,
+)
 
 
-def build_graph(cfg: Config, interactive: bool, auto_taxonomy: bool) -> StateGraph:
+def build_graph(
+    cfg: Config,
+    interactive: bool,
+    auto_taxonomy: bool,
+    no_pdf: bool = False,
+) -> StateGraph:
     graph = StateGraph(PipelineState)
 
     async def node_ingest(state: PipelineState) -> PipelineState:
@@ -30,18 +45,42 @@ def build_graph(cfg: Config, interactive: bool, auto_taxonomy: bool) -> StateGra
         await s3_audit.run(state, cfg)
         return state
 
+    async def node_research(state: PipelineState) -> PipelineState:
+        await s4_research.run(state, cfg)
+        return state
+
+    async def node_synthesize(state: PipelineState) -> PipelineState:
+        await s5_synthesize.run(state, cfg)
+        return state
+
+    async def node_verify(state: PipelineState) -> PipelineState:
+        await s6_verify.run(state, cfg)
+        return state
+
+    async def node_assemble(state: PipelineState) -> PipelineState:
+        await s7_assemble.run(state, cfg, no_pdf=no_pdf)
+        return state
+
     graph.add_node("ingest", node_ingest)
     graph.add_node("assess", node_assess)
     graph.add_node("extract", node_extract)
     graph.add_node("graph", node_graph)
     graph.add_node("audit", node_audit)
+    graph.add_node("research", node_research)
+    graph.add_node("synthesize", node_synthesize)
+    graph.add_node("verify", node_verify)
+    graph.add_node("assemble", node_assemble)
 
     graph.set_entry_point("ingest")
     graph.add_edge("ingest", "assess")
     graph.add_edge("assess", "extract")
     graph.add_edge("extract", "graph")
     graph.add_edge("graph", "audit")
-    graph.add_edge("audit", END)
+    graph.add_edge("audit", "research")
+    graph.add_edge("research", "synthesize")
+    graph.add_edge("synthesize", "verify")
+    graph.add_edge("verify", "assemble")
+    graph.add_edge("assemble", END)
 
     return graph
 
@@ -54,6 +93,7 @@ async def run_pipeline(
     cfg: Config,
     interactive: bool = False,
     auto_taxonomy: bool = False,
+    no_pdf: bool = False,
     resume_stage: int | None = None,
 ) -> None:
     import uuid
@@ -78,6 +118,6 @@ async def run_pipeline(
         "state_dir": str(state_dir),
     })
 
-    graph = build_graph(cfg, interactive=interactive, auto_taxonomy=auto_taxonomy)
+    graph = build_graph(cfg, interactive=interactive, auto_taxonomy=auto_taxonomy, no_pdf=no_pdf)
     compiled = graph.compile()
     await compiled.ainvoke(state)

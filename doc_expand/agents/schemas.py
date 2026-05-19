@@ -125,3 +125,102 @@ class GapFinding(BaseModel):
 class GapAnalysisResult(BaseModel):
     domain_id: str
     gaps: list[GapFinding]
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 — Research
+# ---------------------------------------------------------------------------
+
+class CitationUse(BaseModel):
+    citation_id: str            # must match a CitationRecord.id from bibliography
+    quote_or_claim: str         # the specific claim being cited
+    relevance: str              # why this citation supports the claim
+
+
+class ResearchSection(BaseModel):
+    heading: str
+    body: str                   # Markdown prose
+    citations: list[CitationUse] = Field(default_factory=list)
+    confidence: str = "medium"  # high | medium | low
+
+
+class DomainSummary(BaseModel):
+    domain_id: str
+    domain_label: str
+    overview: str               # 1–2 sentence domain overview
+    sections: list[ResearchSection]
+    key_open_questions: list[str] = Field(default_factory=list)
+    citation_ids_used: list[str] = Field(default_factory=list)
+
+
+class ResearchPlan(BaseModel):
+    domain_id: str
+    strategy: str               # "top_down" | "bottom_up"
+    outline: list[str]          # ordered section headings to pursue
+    priority_citation_ids: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class CritiqueResult(BaseModel):
+    domain_id: str
+    issues: list[str]           # specific problems found
+    suggested_additions: list[str]
+    verdict: str                # "accept" | "revise" | "reject"
+    revised_summary: DomainSummary | None = None
+
+
+# ---------------------------------------------------------------------------
+# Stage 5 — Synthesize
+# ---------------------------------------------------------------------------
+
+class SynthesisInsight(BaseModel):
+    insight: str
+    domains_involved: list[str]
+    evidence: str               # graph edge path or summary field reference
+    confidence: str = "medium"
+
+
+class SynthesisDraft(BaseModel):
+    insights: list[SynthesisInsight]
+    reading_roadmap: list[str]  # ordered domain sequence for a reader
+    boss_nodes: list[str]       # 3-5 key synthesis concepts (new nodes)
+    narrative: str              # full Markdown section
+
+
+class SynthesisCritique(BaseModel):
+    trivial_connections: list[str]    # connections that are just prerequisite edges
+    unsupported_connections: list[str]
+    missing_cross_domain: list[str]
+    verdict: str                      # "accept" | "revise"
+    revised_narrative: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Stage 6 — Verify
+# ---------------------------------------------------------------------------
+
+class CitationAuditItem(BaseModel):
+    section_file: str
+    marker: str                 # the [NEEDS_CITATION] text or citation key
+    context: str                # surrounding sentence
+    status: str                 # "needs_citation" | "verified" | "unknown_key"
+
+
+class CitationAuditResult(BaseModel):
+    items: list[CitationAuditItem]
+    total_needs_citation: int
+    total_unknown_keys: int
+    total_verified: int
+
+
+# ---------------------------------------------------------------------------
+# Stage 7 — Assemble
+# ---------------------------------------------------------------------------
+
+class AssemblyManifest(BaseModel):
+    domain_order: list[str]
+    section_files: list[str]
+    bibliography_count: int
+    total_words: int
+    output_md: str
+    output_pdf: str | None = None

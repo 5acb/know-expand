@@ -1,5 +1,6 @@
 import asyncio
-import json
+import logging
+import time
 from typing import TypeVar
 
 import litellm
@@ -7,6 +8,8 @@ from pydantic import BaseModel
 
 from doc_expand.config import Config
 from doc_expand.state import emit
+
+_logger = logging.getLogger("doc_expand.router")
 
 
 def _find_in_chain(exc: BaseException, *types) -> BaseException | None:
@@ -38,21 +41,57 @@ def _get_semaphore(model: str, cfg: Config) -> asyncio.Semaphore:
         return _CLOUD_SEMAPHORE
 
 
-async def _do_call(model: str, messages: list[dict], schema: type[T], cfg: Config) -> T:
+async def _do_call(
+    model: str,
+    messages: list[dict],
+    schema: type[T],
+    cfg: Config,
+    role: str = "?",
+) -> T:
     import instructor
     client = instructor.from_litellm(litellm.acompletion)
     extra: dict = {}
+    display_model = model
     if model.startswith("llamacpp/"):
         extra["api_base"] = cfg.llamacpp.base_url
         extra["api_key"] = "not-needed"
         extra["max_tokens"] = cfg.llamacpp.max_tokens
         model = "openai/" + model[len("llamacpp/"):]
-    return await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        response_model=schema,
-        **extra,
-    )
+    t0 = time.monotonic()
+    emit({
+        "event": "llm_call_start",
+        "role": role,
+        "model": display_model,
+        "schema": schema.__name__,
+        "msg_chars": sum(len(m.get("content", "")) for m in messages),
+    })
+    try:
+        result = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            response_model=schema,
+            **extra,
+        )
+        elapsed = time.monotonic() - t0
+        emit({
+            "event": "llm_call_done",
+            "role": role,
+            "model": display_model,
+            "schema": schema.__name__,
+            "elapsed_s": round(elapsed, 2),
+        })
+        return result
+    except Exception as exc:
+        elapsed = time.monotonic() - t0
+        emit({
+            "event": "llm_call_error",
+            "role": role,
+            "model": display_model,
+            "schema": schema.__name__,
+            "elapsed_s": round(elapsed, 2),
+            "error": str(exc)[:200],
+        })
+        raise
 
 
 class QuotaAwareRouter:
@@ -69,7 +108,7 @@ class QuotaAwareRouter:
             sem = _get_semaphore(model, self.cfg)
             try:
                 async with sem:
-                    return await _do_call(model, messages, schema, self.cfg)
+                    return await _do_call(model, messages, schema, self.cfg, role=self.role)
             except Exception as e:
                 auth_err = _find_in_chain(e, litellm.AuthenticationError)
                 rate_err = _find_in_chain(e, litellm.RateLimitError)

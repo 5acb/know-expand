@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -44,11 +45,16 @@ async def _map_chunk(
     chunk = json.loads(chunk_path.read_text())
     chunk_id = chunk["chunk_id"]
     text = chunk["text"]
+    t0 = time.monotonic()
 
     out_path = map_dir / f"map_{chunk_id}.json"
     done_path = out_path.with_suffix(".json.done")
     if done_path.exists():
-        return json.loads(out_path.read_text())
+        cached = json.loads(out_path.read_text())
+        emit({"event": "chunk_map_cached", "chunk_id": chunk_id, "term_count": len(cached)})
+        return cached
+
+    emit({"event": "chunk_map_start", "chunk_id": chunk_id, "text_len": len(text)})
 
     # Signal A — spaCy lexical
     doc = nlp(text)
@@ -102,6 +108,12 @@ async def _map_chunk(
     result = list(merged.values())
     out_path.write_text(json.dumps([t.model_dump() for t in result], indent=2))
     done_path.touch()
+    emit({
+        "event": "chunk_map_done",
+        "chunk_id": chunk_id,
+        "term_count": len(result),
+        "elapsed_s": round(time.monotonic() - t0, 2),
+    })
     return result
 
 

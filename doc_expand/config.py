@@ -12,7 +12,8 @@ class BibliographyConfig:
         "survey": 10, "standard": 30, "deep": 50
     })
     ss_max_retries: int = 5
-    ss_retry_initial_delay: float = 5.0
+    ss_retry_initial_delay: float = 30.0
+    ss_max_backoff: float = 120.0
     ss_anchors_n: int = 3
 
 
