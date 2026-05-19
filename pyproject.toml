@@ -21,6 +21,8 @@ dependencies = [
     "pydantic>=2.7.0",
     # Pipeline orchestration + agent loops
     "langgraph>=0.2.0",
+    # Observability (serve renders markdown in browser)
+    "markdown>=3.6",
     # Rate limiting
     "aiolimiter>=1.1.0",
     # HTTP
