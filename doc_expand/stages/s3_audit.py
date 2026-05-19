@@ -171,8 +171,12 @@ async def _process_domain(
 
     emit({"event": "domain_start", "domain_id": domain_id, "label": domain_label})
 
-    anchors = await fetch_anchors(domain_label, http, cfg, n=3)
-    anchors_dicts = [a.model_dump() for a in anchors]
+    anchors_list, bibliography = await asyncio.gather(
+        fetch_anchors(domain_label, http, cfg),
+        fetch_bibliography(domain_label, depth, cfg, http),
+    )
+
+    anchors_dicts = [a.model_dump() for a in anchors_list]
     anchors_path = audit_dir / f"anchors_{domain_id}.json"
     anchors_path.write_text(json.dumps(anchors_dicts, indent=2))
     emit({
@@ -182,7 +186,6 @@ async def _process_domain(
         "artifact": str(anchors_path),
     })
 
-    bibliography = await fetch_bibliography(domain_label, depth, cfg, http)
     bib_path.write_text(json.dumps([b.model_dump() for b in bibliography], indent=2))
     emit({
         "event": "bibliography_fetched",
