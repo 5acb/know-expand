@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime
 
@@ -11,6 +12,8 @@ from aiolimiter import AsyncLimiter
 from doc_expand.agents.schemas import CitationRecord
 from doc_expand.config import Config
 from doc_expand.state import emit
+
+_SS_API_KEY: str = os.environ.get("SS_API_KEY", "")
 
 _logger = logging.getLogger("doc_expand.bibliography")
 _ss_limiter: AsyncLimiter | None = None
@@ -97,6 +100,7 @@ async def _ss_search(
     params: dict = {"query": query, "fields": _SS_FIELDS, "limit": min(limit, 100)}
     if year_filter:
         params["year"] = year_filter
+    headers = {"x-api-key": _SS_API_KEY} if _SS_API_KEY else {}
     delay = cfg.bibliography.ss_retry_initial_delay
     limiter = _get_ss_limiter(cfg)
 
@@ -127,7 +131,7 @@ async def _ss_search(
                 "year_filter": year_filter,
                 "attempt": attempt,
             })
-            resp = await http.get(_SS_BASE, params=params)
+            resp = await http.get(_SS_BASE, params=params, headers=headers)
 
         emit({
             "event": "ss_response",
