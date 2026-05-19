@@ -15,6 +15,84 @@ from doc_expand.agents.schemas import (
 from doc_expand.config import Config
 from doc_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
 
+_BOLD  = "\033[1m"
+_CYAN  = "\033[36m"
+_GREEN = "\033[32m"
+_RESET = "\033[0m"
+
+
+def _print_proposal(label: str, proposal: TaxonomyProposal) -> None:
+    print(f"\n{_CYAN}::{_RESET} {_BOLD}{label}{_RESET} ({len(proposal.domains)} domains)")
+    for i, d in enumerate(proposal.domains, 1):
+        oa = f"  openalex L{d.openalex_level}" if d.openalex_level is not None else ""
+        print(f"   {i:2}.  {d.label}{oa}")
+
+
+async def _prompt_taxonomy(
+    lumper: TaxonomyProposal,
+    splitter: TaxonomyProposal,
+    taxonomy_path: Path,
+    router,
+    issues: list[str],
+    cfg,
+) -> dict:
+    """
+    yay-style stdin prompt. Returns an approved taxonomy dict.
+    Falls back to auto-merge if stdin is not a TTY.
+    """
+    if not sys.stdin.isatty():
+        return await _auto_merge(lumper, splitter, issues, router, cfg)
+
+    _print_proposal("Lumper  — broad domains", lumper)
+    _print_proposal("Splitter — fine-grained", splitter)
+
+    print(f"\n{_BOLD}==>{_RESET} Accept a proposal, edit, or auto-merge?")
+    print(f"    {_GREEN}[L]{_RESET}umper  {_GREEN}[s]{_RESET}plitter  {_GREEN}[e]{_RESET}dit  {_GREEN}[m]{_RESET}erge auto  (default: L)")
+    print(" -> ", end="", flush=True)
+
+    loop = asyncio.get_event_loop()
+    choice = (await loop.run_in_executor(None, sys.stdin.readline)).strip().lower() or "l"
+
+    if choice in ("s", "splitter"):
+        domains = splitter.domains
+        mode = "splitter"
+    elif choice in ("e", "edit"):
+        taxonomy_path.write_text(json.dumps(
+            {"status": "pending", "domains": [d.model_dump() for d in lumper.domains]},
+            indent=2,
+        ))
+        editor = os.environ.get("EDITOR", "vi")
+        subprocess.call([editor, str(taxonomy_path)])
+        data = json.loads(taxonomy_path.read_text())
+        data["status"] = "approved"
+        data.setdefault("mode", "edited")
+        return data
+    elif choice in ("m", "merge"):
+        return await _auto_merge(lumper, splitter, issues, router, cfg)
+    else:
+        domains = lumper.domains
+        mode = "lumper"
+
+    print(f"{_GREEN}==>{_RESET} Approved ({mode}, {len(domains)} domains)\n", flush=True)
+    return {"status": "approved", "mode": mode, "domains": [d.model_dump() for d in domains]}
+
+
+async def _auto_merge(lumper, splitter, issues, router, cfg) -> dict:
+    merge_msg = [{
+        "role": "user",
+        "content": _AUTO_TAXONOMY_PROMPT.format(
+            lumper=lumper.model_dump_json(),
+            splitter=splitter.model_dump_json(),
+            issues=json.dumps(issues),
+        ),
+    }]
+
+    class _DomainList(TaxonomyProposal):
+        pass
+
+    merged = await router.call(merge_msg, _DomainList)
+    return {"status": "approved", "mode": "auto", "domains": [d.model_dump() for d in merged.domains]}
+
 _LUMPER_PROMPT = """\
 You are a domain ontologist. Given these core terms from a technical document, \
 propose the FEWEST domains that cleanly partition all terms.
@@ -133,54 +211,22 @@ async def run(
         (audit_dir / "taxonomy_b.json").write_text(splitter_result.model_dump_json(indent=2))
 
         if auto_taxonomy:
-            # Orchestrating LLM merges proposals
-            merge_msg = [{
-                "role": "user",
-                "content": _AUTO_TAXONOMY_PROMPT.format(
-                    lumper=lumper_result.model_dump_json(),
-                    splitter=splitter_result.model_dump_json(),
-                    issues=json.dumps(issues),
-                ),
-            }]
-
-            class _DomainList(TaxonomyProposal):
-                pass
-
-            merged = await router.call(merge_msg, _DomainList)
-            taxonomy = {
-                "status": "approved",
-                "mode": "auto",
-                "domains": [d.model_dump() for d in merged.domains],
-            }
-            (state_dir / "taxonomy.json").write_text(json.dumps(taxonomy, indent=2))
-            emit({
-                "event": "taxonomy_approved",
-                "mode": "auto",
-                "domain_count": len(merged.domains),
-            })
+            taxonomy = await _auto_merge(
+                lumper_result, splitter_result, issues, router, cfg
+            )
         else:
-            # Write pending taxonomy and pause for human review
-            taxonomy = {
-                "status": "pending",
-                "domains": [d.model_dump() for d in lumper_result.domains],
-            }
-            (state_dir / "taxonomy.json").write_text(json.dumps(taxonomy, indent=2))
+            taxonomy = await _prompt_taxonomy(
+                lumper_result, splitter_result,
+                state_dir / "taxonomy.json",
+                router, issues, cfg,
+            )
 
-            editor = os.environ.get("EDITOR", "vi")
-            subprocess.call([editor, str(state_dir / "taxonomy.json")])
-
-            # Re-read — do not assume approval
-            taxonomy = json.loads((state_dir / "taxonomy.json").read_text())
-            if taxonomy.get("status") != "approved":
-                emit({
-                    "event": "pipeline_paused",
-                    "reason": "taxonomy_not_approved",
-                    "instructions": (
-                        'Set "status": "approved" in state/taxonomy.json, '
-                        "then run: doc-expand --resume 2b"
-                    ),
-                })
-                sys.exit(0)
+        (state_dir / "taxonomy.json").write_text(json.dumps(taxonomy, indent=2))
+        emit({
+            "event": "taxonomy_approved",
+            "mode": taxonomy.get("mode", "manual"),
+            "domain_count": len(taxonomy["domains"]),
+        })
 
     taxonomy = json.loads((state_dir / "taxonomy.json").read_text())
     domains = taxonomy["domains"]
