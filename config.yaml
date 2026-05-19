@@ -1,0 +1,55 @@
+bibliography:
+  foundational_fraction: 0.65
+  frontier_months: 24
+  depth_totals:
+    survey: 10
+    standard: 30
+    deep: 50
+
+centrality:
+  structural_weight: 2.0
+  core_effective_threshold: 5.0
+  core_chunk_fraction: 0.3
+  supporting_effective_threshold: 2.0
+  alias_cosine_threshold: 0.92
+
+rate_limits:
+  semantic_scholar:
+    max_rate: 100
+    time_period: 300
+  crossref:
+    max_rate: 1
+    time_period: 1
+  openalex:
+    max_rate: 10
+    time_period: 1
+
+concurrency:
+  cloud_default: 8
+  local_default: 1
+
+timeouts:
+  domain_research_seconds: 2700
+
+adversarial_rounds:
+  survey: 1
+  standard: 2
+  deep: 3
+
+boilerplate_stop_list:
+  - introduction
+  - methodology
+  - conclusion
+  - figure
+  - table
+  - theorem
+  - proof
+  - lemma
+  - et al
+  - appendix
+  - section
+  - related work
+  - abstract
+  - references
+  - background
+  - overview
