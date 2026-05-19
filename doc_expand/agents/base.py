@@ -69,7 +69,7 @@ async def _probe_one(model: str, cfg: Config) -> bool:
     if "gpt" in model or "openai" in model:
         return bool(os.environ.get("OPENAI_API_KEY"))
     if "gemini" in model:
-        return bool(os.environ.get("GEMINI_API_KEY"))
+        return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
     # Unknown provider — optimistically assume available
     return True
 
