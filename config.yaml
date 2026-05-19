@@ -10,7 +10,8 @@ bibliography:
     standard: 30
     deep: 50
   ss_max_retries: 5
-  ss_retry_initial_delay: 5.0
+  ss_retry_initial_delay: 30.0   # first 429 cooldown: 30s, then doubles
+  ss_max_backoff: 120.0           # cap backoff at 2 min
   ss_anchors_n: 3
 
 centrality:
@@ -22,8 +23,8 @@ centrality:
 
 rate_limits:
   semantic_scholar:
-    max_rate: 10
-    time_period: 60
+    max_rate: 1
+    time_period: 20   # 1 req/20s = 3/min; SS unauthenticated is ~5/min but be conservative
   crossref:
     max_rate: 1
     time_period: 1

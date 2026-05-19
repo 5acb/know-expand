@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from doc_expand.config import load_config
-from doc_expand.state import emit, load_pipeline_json
+from doc_expand.state import emit, load_pipeline_json, new_run_id, setup_logging
 
 
 def _status(state_dir: Path) -> None:
@@ -40,10 +40,22 @@ def main() -> None:
     # Paths
     parser.add_argument("--output-dir", type=Path, default=Path("output"))
     parser.add_argument("--state-dir", type=Path, default=Path("state"))
+    parser.add_argument(
+        "--log-dir", type=Path, default=Path("logs"),
+        help="Base directory for run logs (default: logs/)",
+    )
 
-    # Concurrency
-    parser.add_argument("--cloud-concurrency", type=int, default=8)
-    parser.add_argument("--local-concurrency", type=int, default=1)
+    # Concurrency overrides (defaults come from config.yaml)
+    parser.add_argument("--cloud-concurrency", type=int, default=None,
+                        help="Override config concurrency.cloud_default")
+    parser.add_argument("--local-concurrency", type=int, default=None,
+                        help="Override config concurrency.local_default")
+
+    # Run identity
+    parser.add_argument(
+        "--run-id", type=str, default=None,
+        help="Reuse an existing run ID (for --resume); a new UUID is generated otherwise",
+    )
 
     args = parser.parse_args()
 
@@ -52,15 +64,21 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.status:
+        run_id = args.run_id or new_run_id()
+        log_dir = setup_logging(run_id, log_base=args.log_dir)
+        print(f"logs → {log_dir}", flush=True)
         _status(state_dir)
         return
 
     if not args.input:
         parser.error("input is required unless --status is passed")
 
+    run_id = args.run_id or new_run_id()
+    log_dir = setup_logging(run_id, log_base=args.log_dir)
+    print(f"run  {run_id}", flush=True)
+    print(f"logs {log_dir}", flush=True)
+
     if args.input == "-":
-        input_path = "-"
-        # Write stdin to a temp file so downstream stages can reference a path
         content = sys.stdin.read()
         tmp = state_dir / "stdin_input.txt"
         tmp.write_text(content)
@@ -70,9 +88,10 @@ def main() -> None:
 
     cfg = load_config()
 
-    # Apply concurrency overrides
-    cfg.concurrency.cloud_default = args.cloud_concurrency
-    cfg.concurrency.local_default = args.local_concurrency
+    if args.cloud_concurrency is not None:
+        cfg.concurrency.cloud_default = args.cloud_concurrency
+    if args.local_concurrency is not None:
+        cfg.concurrency.local_default = args.local_concurrency
 
     from doc_expand.pipeline import run_pipeline
 

@@ -2,15 +2,19 @@
 
 import asyncio
 import json
+import logging
+import time
 from pathlib import Path
 
 import httpx
 
 from doc_expand.agents.base import make_router
 from doc_expand.agents.schemas import GapAnalysisResult, GapFinding
-from doc_expand.bibliography import fetch_anchors, fetch_bibliography
+from doc_expand.bibliography import fetch_anchors, fetch_bibliography, reset_ss_limiter
 from doc_expand.config import Config
 from doc_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
+
+_logger = logging.getLogger("doc_expand.s3")
 
 _GAP_FINDER_PROMPT = """\
 You are a research gap analyst. Given the terms from a domain's knowledge graph and \
@@ -83,6 +87,7 @@ async def _run_gap_loop(
     terms_str = ", ".join(graph_terms)
     anchor_str = _anchor_summaries(anchors)
 
+    emit({"event": "gap_finder_start", "domain_id": domain_id, "term_count": len(graph_terms), "anchor_count": len(anchors)})
     finder_msg = [{
         "role": "user",
         "content": _GAP_FINDER_PROMPT.format(
@@ -105,6 +110,7 @@ async def _run_gap_loop(
     gap_findings_str = json.dumps(
         [g.model_dump() for g in finder_result.gaps], indent=2
     )
+    emit({"event": "gap_defender_start", "domain_id": domain_id, "gap_count": len(finder_result.gaps)})
     defender_msg = [{
         "role": "user",
         "content": _GAP_DEFENDER_PROMPT.format(
@@ -124,6 +130,7 @@ async def _run_gap_loop(
     defended_str = json.dumps(
         [g.model_dump() for g in defended_gaps], indent=2
     )
+    emit({"event": "gap_rebuttal_start", "domain_id": domain_id})
     rebuttal_msg = [{
         "role": "user",
         "content": _GAP_FINDER_REBUTTAL_PROMPT.format(
@@ -154,6 +161,7 @@ async def _process_domain(
 ) -> GapAnalysisResult:
     domain_id = domain["id"]
     domain_label = domain["label"]
+    t0 = time.monotonic()
 
     bib_path = audit_dir / f"bibliography_{domain_id}.json"
     if bib_path.exists() and bib_path.stat().st_size > 0:
@@ -169,12 +177,23 @@ async def _process_domain(
         )
         return gap_result
 
-    emit({"event": "domain_start", "domain_id": domain_id, "label": domain_label})
+    emit({
+        "event": "domain_start",
+        "domain_id": domain_id,
+        "label": domain_label,
+        "term_count": len(graph_terms),
+    })
 
+    emit({"event": "domain_fetch_start", "domain_id": domain_id, "depth": depth})
     anchors_list, bibliography = await asyncio.gather(
         fetch_anchors(domain_label, http, cfg),
         fetch_bibliography(domain_label, depth, cfg, http),
     )
+    emit({
+        "event": "domain_fetch_done",
+        "domain_id": domain_id,
+        "elapsed_s": round(time.monotonic() - t0, 2),
+    })
 
     anchors_dicts = [a.model_dump() for a in anchors_list]
     anchors_path = audit_dir / f"anchors_{domain_id}.json"
@@ -197,6 +216,12 @@ async def _process_domain(
     gap_result = await _run_gap_loop(
         domain_id, domain_label, graph_terms, anchors_dicts, router
     )
+    emit({
+        "event": "domain_complete",
+        "domain_id": domain_id,
+        "elapsed_s": round(time.monotonic() - t0, 2),
+        "real_gaps": sum(1 for g in gap_result.gaps if g.verdict == "real_gap"),
+    })
     return gap_result
 
 
@@ -246,6 +271,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
         return
 
     emit({"event": "stage_start", "stage": 3})
+    reset_ss_limiter()
 
     input_path = state["input_path"]
     if not input_path.lower().endswith(".pdf"):
@@ -278,8 +304,12 @@ async def run(state: PipelineState, cfg: Config) -> None:
         "conflict_count": len(conflicts),
     })
 
+    gap_results: list[GapAnalysisResult] = []
     async with httpx.AsyncClient(timeout=cfg.timeouts.get("http_async_seconds", 30)) as http:
-        coros = []
+        # Process domains serially: concurrent SS fetches from multiple domains
+        # trigger 429 storms because all coroutines share the global rate limiter
+        # and pile up retries in lock-step.  One domain at a time keeps the SS
+        # request queue shallow and avoids the retry thundering-herd.
         for domain in domains:
             domain_id = domain["id"]
             graph_terms = [
@@ -291,20 +321,17 @@ async def run(state: PipelineState, cfg: Config) -> None:
                 if any(n["name"] == t and n.get("domain") == domain_id for n in nodes)
             ]
             all_terms = list(dict.fromkeys(graph_terms + gap_candidates))
-            coros.append(_process_domain(domain, all_terms, audit_dir, depth, cfg, router, http))
-
-        raw_results = await asyncio.gather(*coros, return_exceptions=True)
-
-    gap_results: list[GapAnalysisResult] = []
-    for domain, result in zip(domains, raw_results):
-        if isinstance(result, Exception):
-            emit({
-                "event": "domain_failed",
-                "domain_id": domain["id"],
-                "error": str(result)[:200],
-            })
-        else:
-            gap_results.append(result)
+            try:
+                result = await _process_domain(
+                    domain, all_terms, audit_dir, depth, cfg, router, http
+                )
+                gap_results.append(result)
+            except Exception as exc:
+                emit({
+                    "event": "domain_failed",
+                    "domain_id": domain_id,
+                    "error": str(exc)[:200],
+                })
 
     gap_md = _build_gap_markdown(gap_results, domains_by_id)
     corrections_md = _build_corrections_markdown(gap_results, domains_by_id)
