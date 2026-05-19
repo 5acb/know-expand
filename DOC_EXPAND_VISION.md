@@ -1,7 +1,6 @@
 # doc-expand — Vision, Architecture & Plan
 
-> **Status:** Pre-implementation design document. Derived from the LLM Knowledge Graph project (this repository) as the reference implementation.
-> **Future home:** This file becomes `CLAUDE.md` in the new `doc-expand/` project directory.
+> **Status:** Living implementation document. v1 shipped. Sections marked `[PLANNED]` describe intended but not-yet-implemented features. All other sections reflect current code.
 
 ---
 
@@ -251,6 +250,14 @@ Input Document (text / file / URL / PDF)
                             │  state/summaries/summary_{domain}.json
                             ▼
 ┌───────────────────────────────────────────────────────┐
+│ Stage 4.5: ALIGN (langgraph ReAct per domain)         │
+│ Pedagogy checklist agent: what-is intro, symbol       │
+│ tables, worked examples, Where-to-Go-Next, citations  │
+│ Sentinel: section_{domain}.aligned                    │
+└───────────────────────────┬───────────────────────────┘
+                            │  state/sections/section_{domain}.md (patched)
+                            ▼
+┌───────────────────────────────────────────────────────┐
 │ Stage 5: SYNTHESIZE                                   │
 │ Inputs: graph.json + summary_*.json ONLY              │
 │ Structural agent + Semantic agent                     │
@@ -264,6 +271,14 @@ Input Document (text / file / URL / PDF)
 │ Crossref → Semantic Scholar → arXiv (CS/Math only)    │
 └───────────────────────────┬───────────────────────────┘
                             │  state/audit/needs_citation.md
+                            ▼
+┌───────────────────────────────────────────────────────┐
+│ Stage 6.5: PREREQ (single langgraph ReAct pass)       │
+│ Threading agent: scan all sections for forward        │
+│ references; insert inline primers for opaque terms    │
+│ Format: > **Primer:** *term* — explanation            │
+└───────────────────────────┬───────────────────────────┘
+                            │  state/sections/*.md (patched)
                             ▼
 ┌───────────────────────────────────────────────────────┐
 │ Stage 7: ASSEMBLE + BUILD                             │
@@ -311,32 +326,31 @@ External arbiter applies hard veto
 | Stage 2 — Graph | No | Taxonomy decision handled by human review or `--auto-taxonomy`; critic loop would be redundant |
 | Stage 3 — Audit | **Yes** | Gap Finder vs. Defender — the sharpest epistemic step; gaps must survive rebuttal |
 | Stage 4 — Research | **Yes** | Logical leaps and citation discipline; top-down and bottom-up agents produce divergent claims |
+| Stage 4.5 — Align | **ReAct** | langgraph ReAct agent per domain; self-directed tool use against pedagogy checklist; no separate critic — agent reads its own output and decides what to fix |
 | Stage 5 — Synthesize | **Yes** | Cross-domain connections are the most hallucination-prone output in the pipeline |
 | Stage 6 — Verify | No | Structural audit; deterministic bibliography key lookup |
+| Stage 6.5 — Prereq | **ReAct** | Single langgraph ReAct pass over all sections; agent identifies and inserts primers autonomously |
 | Stage 7 — Assemble | No | Mechanical stitching |
 
-**Implementation — DSPy `dspy.Refine`:**
+**Implementation — litellm structured calls + intermediate file checkpointing:**
 
-Adversarial loops use `dspy.Refine(module, reward_fn, threshold, N)`. The `reward_fn` wraps the Critic agent plus its external truth anchor; `N` is the depth-scaled max rounds (1/2/3 for survey/standard/deep). DSPy handles the Generator→Critic→Generator cycle, early exit when the reward exceeds threshold, and structured Signature definitions for both agents.
+Adversarial loops use direct `litellm.acompletion` calls with `instructor`-validated structured outputs (Pydantic schemas). Each round: Generator produces output → persisted to disk → Critic reads it and produces a `CritiqueResult` → if verdict is `accept` or max rounds reached, loop exits. This runs inside a single LangGraph node.
 
-**Intermediate round checkpointing:** DSPy's loop runs inside a single LangGraph node. LangGraph cannot checkpoint intermediate rounds — it only checkpoints at node boundaries. A crash at round 2 of 3 would restart the node from round 1, burning real money and wall-clock time at Opus pricing across 8 domains. To prevent this, the `reward_fn` closure writes the generator output to disk before scoring it:
+LangGraph checkpoints at node boundaries only. A crash at round 2 of 3 restarts from round 1. The intermediate round file on disk avoids regenerating the generator output; the loop reads the existing file instead:
 
 ```python
-def make_reward_fn(stage: str, domain_id: str, critic: dspy.Module,
-                   external_truth: dict, state_dir: Path):
-    def reward_fn(output, round_num: int) -> float:
-        # Persist before scoring — survives a crash at any round
-        round_path = state_dir / "audit" / f"critique_{stage}_{domain_id}_round{round_num}.md"
-        round_path.write_text(output.narrative)
+# Each round write before scoring — survives crash at any round
+round_path = audit_dir / f"critique_{stage}_{domain_id}_round{rnd}.md"
+round_path.write_text(narrative)
 
-        score = critic(output=output, truth=external_truth).score
-        return score
-    return reward_fn
+critique: CritiqueResult = await router.call(critic_messages, CritiqueResult)
+if critique.verdict == "accept":
+    break
 ```
 
-On resume, if a round file exists, the refine loop reads it as `initial_output` rather than regenerating. This costs ~20 lines and does not require unrolling the loop into separate LangGraph nodes.
+`CritiqueResult` is a Pydantic model with `verdict: Literal["accept", "revise"]`, `issues: list[str]`, `suggested_additions: list[str]`. On resume, existing round files are detected and re-used, skipping regeneration.
 
-**`dspy.Assert` is deprecated as of DSPy 2.6.** Use `dspy.Refine(module, reward_fn, threshold, N)` — not `Assert`. Simple replacement fails with TypeError; explicit `reward_fn`, `threshold`, and `N` are required.
+**For agentic stages (S4.5 and S6.5):** these use a **langgraph ReAct graph** (`StateGraph(MessagesState)` + `ToolNode`) rather than the Generator→Critic pattern. Tools are defined as `@tool` async closures capturing per-domain context (section path, bibliography, http client). The agent decides what to fix and calls tools until it calls `finish_domain` / `finish_threading`. A context window of 20 messages is maintained to prevent overflow.
 
 ---
 
@@ -931,6 +945,36 @@ if resume:
 
 ---
 
+#### Stage 4.5 — Align (Pedagogical Alignment)
+
+**Position:** After Stage 4, before Stage 5. Runs once per domain, sequentially.
+
+**Purpose:** Stage 4 produces accurate, deep content, but often in dense academic prose that assumes background the reader may not have. Stage 4.5 runs an autonomous alignment agent that checks a five-item pedagogy checklist against each domain section and surgically adds missing elements.
+
+**Checklist:**
+1. "What is {domain}?" — plain-English intro accessible to a newcomer
+2. Symbol tables — every equation preceded by a Markdown table defining every symbol
+3. Worked examples — every major concept followed by a concrete numerical or code example
+4. "Where to Go Next" — open problems, start-here resource, 3 essential papers
+5. `[NEEDS_CITATION]` markers — resolved via Semantic Scholar search and bibliography append
+
+**Implementation:** langgraph `StateGraph(MessagesState)` + `ToolNode` ReAct graph. Tools defined as `@tool` async closures capturing per-domain state:
+- `read_section(section_domain_id)` — reads current section text
+- `search_papers(query)` — Semantic Scholar search, rate-limited
+- `insert_content(section_domain_id, after_pattern, content)` — surgical insert
+- `add_to_bibliography(domain_id, citation_data)` — appends citation
+- `finish_domain(domain_id, summary)` — emits `"ALIGNMENT_COMPLETE"` sentinel; stops the graph
+
+**Constraints:** only ADD content; never delete or rewrite existing text. Max 12 tool calls per domain. Context window: last 20 messages per turn.
+
+**Known limitation:** when the `insert_content` tool cannot locate the target pattern in the section text, the agent may append content to the end of the document instead of inserting it inline. This produces orphaned "Editor's Note" blocks and duplicate worked examples in the assembled output. **Fix (planned):** represent the document as a named-section node list rather than a flat string; insertion tools target section nodes by name rather than string patterns (see Improvement O-3 in the roadmap).
+
+**Resumability:** sentinel file `state/sections/section_{domain_id}.aligned`. On resume, domains with this file are skipped.
+
+**Output:** `state/sections/section_{domain}.md` (patched in-place), `state/sections/section_{domain}.aligned` (sentinel)
+
+---
+
 #### Stage 5 — Synthesize
 
 **Inputs: `state/graph.json` + `state/summaries/summary_*.json` ONLY.**
@@ -969,6 +1013,30 @@ Structural citation audit, not a verification grind.
 **Acceptance criterion for build:** 0 `[UNVERIFIED]` tags. `[NEEDS_CITATION]` tags are acceptable and logged.
 
 **Output:** `state/audit/needs_citation.md`, verified citation index
+
+---
+
+#### Stage 6.5 — Prereq (Prerequisite Threading)
+
+**Position:** After Stage 6, before Stage 7.
+
+**Purpose:** A multi-domain document accumulates forward references — terms used in one domain section that aren't defined until a later section, or concepts assumed without introduction. A first-time reader hits these as dead ends. Stage 6.5 threads primers inline so no reader encounters an unexplained term.
+
+**Implementation:** single langgraph ReAct graph pass over all sections. Tools:
+- `list_sections()` — returns domain IDs and labels
+- `read_section(domain_id)` — reads current section text
+- `insert_primer(domain_id, term, primer_text)` — inserts a blockquote primer before the first use of `term`
+- `finish_threading(summary)` — emits `"THREADING_COMPLETE"` sentinel; stops the graph
+
+**Primer format:** `> **Primer:** *{term}* — {2-4 sentence explanation: what it is, why it exists, one analogy}`
+
+**Agent rules:**
+- Only primer terms that are genuinely opaque to a newcomer; skip common CS/English terms
+- Never duplicate a primer for the same term in the same section
+- Budget: max 30 tool calls total across all sections; prioritize the most technical sections
+- Primers enable continuation; they are not full definitions
+
+**Output:** `state/sections/*.md` (patched in-place)
 
 ---
 
@@ -1100,8 +1168,9 @@ state/
 ├── taxonomy.json                               Human-approved locked taxonomy (status: approved)
 ├── graph.json                                  Stage 2 knowledge graph
 ├── sections/
-│   ├── section_{domain_id}.md                  Stage 4 narrative output
-│   ├── section_{domain_id}.done                ← sentinel
+│   ├── section_{domain_id}.md                  Stage 4 narrative output; patched by S4.5 + S6.5
+│   ├── section_{domain_id}.done                ← S4 completion sentinel
+│   ├── section_{domain_id}.aligned             ← S4.5 completion sentinel
 │   └── section_synthesis.md                    Stage 5 output
 └── summaries/
     ├── summary_{domain_id}.json               Stage 4 → Stage 5 JSON contract
@@ -1114,38 +1183,49 @@ state/
 
 ```
 doc-expand <input> [options]
+doc-expand tail [run_id] [--log-dir DIR]
+doc-expand serve [--state-dir DIR] [--port PORT]
+
+Subcommands:
+  tail [run_id]             Stream pipeline events to stdout as plain text.
+                            Reads logs/<run_id>/events.jsonl; uses latest run if
+                            run_id omitted. Pipe-friendly, greppable. Exits when
+                            stage 7 completes or Ctrl-C.
+  serve                     Launch HTTP tool dashboard at localhost:7842.
+                            Tabs: Pipeline (stage cards), Domains (alignment
+                            checklists, section preview), Events (filterable log),
+                            Gaps (S3 gap analysis). ETag-based 2s polling.
 
 Arguments:
   <input>                   File path (.txt .md .pdf), URL, or - (stdin)
 
 Output / mode:
-  --human                   Rich terminal output (default: JSON Lines for LLM consumption)
   --no-pdf                  Skip PDF build, output Markdown only
   --renderer                xelatex | typst  (default: xelatex)
 
 Pipeline control:
   --depth                   survey | standard | deep  (default: standard)
   --status                  Emit pipeline_status event from pipeline.json; no work runs
-  --resume                  Stage to resume from (0-7); uses LangGraph checkpoint
-  --stage                   Run only this stage (0-7), then stop
+  --resume STAGE            Resume from stage N (integer; e.g. --resume 4)
+  --stage STAGE             Run only stage N then stop
   --interactive             Run Stage 0.5 user calibration interactively (default: skipped)
-  --user-profile <path>     Load pre-computed UserProfile JSON; activates Stage 0.5 output without questions
-  --auto-taxonomy           Skip $EDITOR; let orchestrating LLM decide taxonomy (fully autonomous)
-  --no-bibliography-fetch   Skip external API fetch; use GROBID+AnyStyle extraction only
+  --user-profile <path>     Load pre-computed UserProfile JSON; skips Stage 0.5
+  --auto-taxonomy           Skip $EDITOR; orchestrating LLM decides taxonomy (fully autonomous)
 
 Paths:
   --output-dir              Path for final output  (default: ./output)
   --state-dir               Path for pipeline state  (default: ./state)
+  --log-dir                 Base directory for run logs  (default: ./logs)
 
 Concurrency:
-  --cloud-concurrency N     Max concurrent cloud API calls (default: 8; Anthropic tier-dependent)
-  --local-concurrency N     Max concurrent Ollama calls (default: 1; increase for high-VRAM workstations)
+  --cloud-concurrency N     Override config concurrency.cloud_default
+  --local-concurrency N     Override config concurrency.local_default
 
-Model overrides (also settable via env vars):
-  --model-researcher        LiteLLM model string for domain research agents
-  --model-extractor         LiteLLM model string for extraction/classification
-  --model-critic            LiteLLM model string for adversarial critic agents
+Run identity:
+  --run-id ID               Reuse an existing run ID (for --resume); new UUID generated otherwise
 ```
+
+**[PLANNED]** flags not yet implemented: `--human` (Rich output; Rich removed from deps), `--no-bibliography-fetch`, `--model-researcher`, `--model-extractor`, `--model-critic`.
 
 `--resume` is backed by LangGraph checkpointing — not a hand-rolled directory scan. The pipeline graph is defined once; resuming replays from the checkpointed state with full context intact.
 
@@ -1265,16 +1345,10 @@ services:
     ports:
       - "4567:4567"
 
-  phoenix:
-    image: arizephoenix/phoenix:latest
-    profiles: ["observability"]    # only starts with: docker compose --profile observability up
-    ports:
-      - "6006:6006"    # Web UI
-      - "4317:4317"    # OTLP gRPC ingest
-    volumes:
-      - phoenix_data:/mnt/data
-    environment:
-      - PHOENIX_WORKING_DIR=/mnt/data
+  # phoenix:  [PLANNED] Phoenix observability profile not yet wired
+  #   image: arizephoenix/phoenix:latest
+  #   profiles: ["observability"]
+  #   ports: ["6006:6006", "4317:4317"]
 
   ollama:
     image: ollama/ollama:latest
@@ -1298,13 +1372,15 @@ volumes:
 
 **Service roles:**
 
-| Service | Role | Port | Profile |
-|---|---|---|---|
-| `app` | doc-expand pipeline | — | default |
-| `grobid` | Reference extraction from source PDF | 8070 | default |
-| `anystyle` | Citation parsing (second extractor) | 4567 | default |
-| `phoenix` | Observability UI + OTLP trace ingest | 6006 / 4317 | `observability` |
-| `ollama` | Local LLM inference | 11434 | `local` |
+| Service | Role | Port | Profile | Status |
+|---|---|---|---|---|
+| `app` | doc-expand pipeline | — | default | ✓ Implemented |
+| `grobid` | Reference extraction from source PDF | 8070 | default | [PLANNED] |
+| `anystyle` | Citation parsing (second extractor) | 4567 | default | [PLANNED] |
+| `phoenix` | Observability UI + OTLP trace ingest | 6006 / 4317 | `observability` | [PLANNED] |
+| `ollama` | Local LLM inference | 11434 | `local` | ✓ Supported via LiteLLM |
+
+**Actual observability (implemented):** `doc-expand tail` (plain text event stream, pipe-friendly) and `doc-expand serve` (HTTP tool dashboard at :7842 with Pipeline/Domains/Events/Gaps tabs). All output from JSONL event log in `logs/<run_id>/events.jsonl`.
 
 **Usage:**
 ```bash
@@ -1345,13 +1421,49 @@ async def call_agent(role: str, prompt: str, schema: type[BaseModel]) -> BaseMod
 **Model configuration** — `models.yaml` (committed, safe defaults):
 ```yaml
 roles:
-  researcher:   "claude-opus-4-7"       # heaviest lifting: domain expansion
-  synthesizer:  "claude-opus-4-7"       # cross-domain synthesis
-  critic:       "claude-sonnet-4-6"     # adversarial loops
-  extractor:    "claude-sonnet-4-6"     # map-reduce term extraction
-  classifier:   "claude-sonnet-4-6"     # taxonomy classification
-  assembler:    "claude-sonnet-4-6"     # document assembly
+  # Tool-calling agent role (S4.5, S6.5 ReAct graphs)
+  agent:
+    - "gemini/gemini-2.5-pro"
+    - "llamacpp/qwen2.5-7b-instruct"
+  researcher:
+    - "claude-opus-4-7"
+    - "claude-sonnet-4-6"
+    - "gpt-4o"
+    - "gemini/gemini-2.5-pro"
+    - "ollama/qwen2.5:14b"
+  synthesizer:
+    - "claude-opus-4-7"
+    - "claude-sonnet-4-6"
+    - "gpt-4o"
+    - "gemini/gemini-2.5-pro"
+    - "ollama/qwen2.5:14b"
+  critic:
+    - "claude-sonnet-4-6"
+    - "gpt-4o-mini"
+    - "gemini/gemini-2.5-pro"
+    - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
+    - "ollama/llama3.2:3b"
+  extractor:
+    - "claude-sonnet-4-6"
+    - "gpt-4o-mini"
+    - "gemini/gemini-2.5-pro"
+    - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
+    - "ollama/llama3.2:3b"
+  classifier:
+    - "claude-sonnet-4-6"
+    - "gpt-4o-mini"
+    - "gemini/gemini-2.5-pro"
+    - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
+    - "ollama/llama3.2:3b"
+  assembler:
+    - "claude-sonnet-4-6"
+    - "gpt-4o-mini"
+    - "gemini/gemini-2.5-pro"
+    - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
+    - "ollama/llama3.2:3b"
 ```
+
+The `agent` role is used exclusively by the langgraph ReAct graphs in S4.5 and S6.5, which require native tool-calling support. The `llamacpp` fallback requires a Qwen2.5-Instruct GGUF started with `--chat-template qwen`.
 
 **Environment variable overrides** — any role can be overridden at runtime:
 ```bash
@@ -1749,13 +1861,11 @@ KeyBERT with BGE-M3 embeddings (BAAI, strong MTEB performer for multilingual and
 
 **What it replaces:** pure LLM extraction, which shares the same weight-space biases across both agents. BGE-M3 is an entirely independent signal source.
 
-#### DSPy → adversarial loop implementation + automatic prompt optimization
+#### ~~DSPy~~ → adversarial loop implementation **[NOT USED]**
 
-DSPy's `dspy.Refine` module is the adversarial Generator→Critic→Generator loop. `Refine` runs a submodule up to N times, scoring each output via a `reward_fn` closure (which wraps the Critic agent + external truth), accepting when the score exceeds a threshold. Defining Generator and Critic as DSPy `Signature`s enables teleprompter-based prompt tuning over accumulated runs.
+DSPy was removed from the dependency list. The adversarial loop is implemented directly via `litellm.acompletion` with `instructor`-validated Pydantic schemas (`CritiqueResult`). DSPy's `dspy.Refine` API changed significantly (breaking `dspy.Assert` deprecation in 2.6); the direct litellm approach is simpler to maintain, gives full control over critic prompts, and has no heavy dependency.
 
-**Critical:** `dspy.Assert` is **deprecated as of DSPy 2.6** (mid-2025). Do not use it. The correct API is `dspy.Refine(module, reward_fn, threshold, N)`. Migration from Assert to Refine requires explicit `reward_fn`, `threshold`, and `N` parameters — simple replacement fails with TypeError.
-
-**What it replaces:** hand-rolled retry loops with manually written critic prompts. DSPy makes the loop structured, testable, and improvable.
+**Remaining value:** DSPy's teleprompter-based automatic prompt optimization could improve critic quality over accumulated runs. This is a future enhancement, not a current priority. If re-introduced, use `dspy.Refine(module, reward_fn, threshold, N)` — never `dspy.Assert` (deprecated 2.6).
 
 #### LangGraph → pipeline orchestration + checkpointing
 
@@ -1785,15 +1895,14 @@ Typst (v0.14+, pre-1.0 but production-ready, actively maintained, millisecond in
 | 1 | Semantic extraction (Signal C) | `KeyBERT` + `BGE-M3` | Embedding-based keyphrase centrality; non-LLM; strong divergence signal vs. Agent B |
 | 1 | Term deduplication | `numpy` cosine + Union-Find | BGE-M3 cosine finds near-duplicate pairs; Union-Find (stdlib, ~30 lines) clusters aliases; no library dependency |
 | 2 | Taxonomy validation | OpenAlex concept API | ~65k hierarchical concepts; L0-L5 depth validates lumper/splitter proposals |
-| 3 | Source doc reference extraction | `GROBID` + `AnyStyle` | Two independent extractors; cross-validated confidence scoring |
-| 3 | Bibliography fetch | OpenAlex + Semantic Scholar + Crossref | OpenAlex primary (domain-agnostic); SS secondary (CS/ML); Crossref tertiary |
-| 3 | arXiv fallback | arXiv Export API | CS/Math/Physics domains only |
-| 3 | External API rate limiting | `aiolimiter` (MIT) | Async token bucket per API; Semantic Scholar (100 req/5 min), Crossref (Polite Pool + `mailto:`), OpenAlex (10 req/s); prevents IP bans in Stage 3 |
-| 4/5 | Agent design patterns | STORM perspective framework | Persona-driven expert agents at domain concept depth level |
-| 4/5 | Adversarial loops | `DSPy` `dspy.Refine` | Generator→Critic loops; `reward_fn` wraps critic + external truth; early exit when threshold exceeded. Note: loop runs inside a LangGraph node — resume restarts from round 1 on crash (accepted marginal cost). |
-| All | LLM routing | `LiteLLM` | Provider-agnostic: Claude, GPT-4o, Gemini, Ollama local — provider is config not code |
-| All | LLM agents (default) | `anthropic` SDK via LiteLLM | Opus 4.7 for research/synthesis; Sonnet 4.6 for extraction/classification |
-| All | Pipeline orchestration | `LangGraph` | Stateful graph execution, fan-out/fan-in, checkpointing for `--resume` |
+| 3 | Source doc reference extraction | `GROBID` + `AnyStyle` | **[PLANNED]** Two independent extractors; cross-validated confidence scoring |
+| 3 | Bibliography fetch | Semantic Scholar + Crossref | SS primary (CS/ML); Crossref secondary. Circuit breaker + `aiolimiter` rate limiting (1 req/s SS, configurable). |
+| 3 | External API rate limiting | `aiolimiter` (MIT) | Async token bucket per API. SS circuit breaker: global `_ss_cooldown_until` timestamp on burst 429s |
+| 4/5 | Adversarial loops | litellm structured calls + `instructor` | Generator→Critic loop via `litellm.acompletion` with Pydantic `CritiqueResult` schema; intermediate round files prevent crash rework |
+| 4.5/6.5 | Agentic alignment | `langgraph` `StateGraph` + `ToolNode` | ReAct graphs with `@tool` async closures; FINISH_SENTINEL string detection stops the graph; context trimmed to last 20 messages per turn |
+| All | LLM routing | `LiteLLM` + `QuotaAwareRouter` | Provider-agnostic fallback chains from `models.yaml`. Retry-After header distinguishes burst 429 (sleep+retry) from quota exhaustion (next model) |
+| All | LLM agents (default) | `gemini/gemini-2.5-pro` (agent role) | Frontier cloud model. `llamacpp/qwen2.5-7b-instruct` as local tool-calling fallback. Researcher/synthesizer: claude-opus-4-7 primary with gemini-2.5-pro fallback. |
+| All | Pipeline orchestration | `LangGraph` | Stateful graph execution, fan-out/fan-in, `--resume` via stage-complete sentinel files |
 | 7 | Preprocessing | `style/preprocess.py` | Reused from LLM KG project |
 | 7 | LaTeX style | `style/llm_paper_style.tex` | Reused from LLM KG project |
 | 7 | PDF build (default) | `pandoc` + `xelatex` ×2 | Proven pipeline; complex math support |
