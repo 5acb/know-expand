@@ -8,6 +8,18 @@ from pydantic import BaseModel
 from doc_expand.config import Config
 from doc_expand.state import emit
 
+
+def _find_in_chain(exc: BaseException, *types) -> BaseException | None:
+    """Walk __cause__ / __context__ chain; return first match for any of types."""
+    seen = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, types):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
+
 T = TypeVar("T", bound=BaseModel)
 
 _CLOUD_SEMAPHORE: asyncio.Semaphore | None = None
@@ -16,7 +28,7 @@ _LOCAL_SEMAPHORE: asyncio.Semaphore | None = None
 
 def _get_semaphore(model: str, cfg: Config) -> asyncio.Semaphore:
     global _CLOUD_SEMAPHORE, _LOCAL_SEMAPHORE
-    if model.startswith("ollama/"):
+    if model.startswith("ollama/") or model.startswith("llamacpp/"):
         if _LOCAL_SEMAPHORE is None:
             _LOCAL_SEMAPHORE = asyncio.Semaphore(cfg.concurrency.local_default)
         return _LOCAL_SEMAPHORE
@@ -26,13 +38,20 @@ def _get_semaphore(model: str, cfg: Config) -> asyncio.Semaphore:
         return _CLOUD_SEMAPHORE
 
 
-async def _do_call(model: str, messages: list[dict], schema: type[T]) -> T:
+async def _do_call(model: str, messages: list[dict], schema: type[T], cfg: Config) -> T:
     import instructor
     client = instructor.from_litellm(litellm.acompletion)
+    extra: dict = {}
+    if model.startswith("llamacpp/"):
+        extra["api_base"] = cfg.llamacpp.base_url
+        extra["api_key"] = "not-needed"
+        extra["max_tokens"] = cfg.llamacpp.max_tokens
+        model = "openai/" + model[len("llamacpp/"):]
     return await client.chat.completions.create(
         model=model,
         messages=messages,
         response_model=schema,
+        **extra,
     )
 
 
@@ -50,29 +69,49 @@ class QuotaAwareRouter:
             sem = _get_semaphore(model, self.cfg)
             try:
                 async with sem:
-                    return await _do_call(model, messages, schema)
-            except litellm.RateLimitError as e:
-                retry_after = (
-                    getattr(e, "response", None)
-                    and e.response.headers.get("retry-after")
-                )
-                if retry_after:
-                    await asyncio.sleep(int(retry_after))
-                    continue
-                self.exhausted.add(model)
-                self.current_index += 1
-                next_model = (
-                    self.models[self.current_index]
-                    if self.current_index < len(self.models)
-                    else None
-                )
-                emit({
-                    "event": "model_quota_switch",
-                    "role": self.role,
-                    "exhausted_model": model,
-                    "next_model": next_model,
-                    "reason": str(e),
-                })
+                    return await _do_call(model, messages, schema, self.cfg)
+            except Exception as e:
+                auth_err = _find_in_chain(e, litellm.AuthenticationError)
+                rate_err = _find_in_chain(e, litellm.RateLimitError)
+                if auth_err:
+                    self.exhausted.add(model)
+                    self.current_index += 1
+                    next_model = (
+                        self.models[self.current_index]
+                        if self.current_index < len(self.models)
+                        else None
+                    )
+                    emit({
+                        "event": "model_auth_skip",
+                        "role": self.role,
+                        "skipped_model": model,
+                        "next_model": next_model,
+                        "reason": str(auth_err)[:120],
+                    })
+                elif rate_err:
+                    retry_after = (
+                        getattr(rate_err, "response", None)
+                        and rate_err.response.headers.get("retry-after")
+                    )
+                    if retry_after:
+                        await asyncio.sleep(int(retry_after))
+                        continue
+                    self.exhausted.add(model)
+                    self.current_index += 1
+                    next_model = (
+                        self.models[self.current_index]
+                        if self.current_index < len(self.models)
+                        else None
+                    )
+                    emit({
+                        "event": "model_quota_switch",
+                        "role": self.role,
+                        "exhausted_model": model,
+                        "next_model": next_model,
+                        "reason": str(rate_err),
+                    })
+                else:
+                    raise
 
         emit({
             "event": "quota_exhausted",

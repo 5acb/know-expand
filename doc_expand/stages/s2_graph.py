@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import subprocess
@@ -8,7 +9,7 @@ import httpx
 
 from doc_expand.agents.base import make_router
 from doc_expand.agents.schemas import (
-    TaxonomyProposal, TermClassification, KnowledgeGraph,
+    TaxonomyProposal, KnowledgeGraph,
     GraphNode, GraphEdge, DomainProposal,
 )
 from doc_expand.config import Config
@@ -59,12 +60,12 @@ the terms cleanly. Validate that each domain maps to a real academic field.
 """
 
 
-def _validate_openalex(domain_label: str) -> dict | None:
+def _validate_openalex(domain_label: str, timeout: int = 10) -> dict | None:
     try:
         resp = httpx.get(
             "https://api.openalex.org/concepts",
             params={"search": domain_label, "per-page": "1"},
-            timeout=10,
+            timeout=timeout,
         )
         data = resp.json()
         results = data.get("results", [])
@@ -111,7 +112,6 @@ async def run(
         lumper_msg = [{"role": "user", "content": _LUMPER_PROMPT.format(terms=core_terms_str)}]
         splitter_msg = [{"role": "user", "content": _SPLITTER_PROMPT.format(terms=core_terms_str)}]
 
-        import asyncio
         lumper_result, splitter_result = await asyncio.gather(
             router.call(lumper_msg, TaxonomyProposal),
             router.call(splitter_msg, TaxonomyProposal),
@@ -119,8 +119,9 @@ async def run(
 
         # OpenAlex validation
         issues = []
+        openalex_timeout = cfg.timeouts.get("openalex_seconds", 10)
         for domain in lumper_result.domains + splitter_result.domains:
-            openalex = _validate_openalex(domain.label)
+            openalex = _validate_openalex(domain.label, timeout=openalex_timeout)
             if openalex:
                 domain.openalex_concept_id = openalex["id"]
                 domain.openalex_level = openalex["level"]
@@ -222,8 +223,8 @@ async def run(
             id=f"n_{name.replace(' ', '_').replace('-', '_')[:40]}",
             name=name,
             domain=domain_a,
-            tier="journeyman",
-            xp=100,
+            tier=cfg.graph_defaults.node_tier,
+            xp=cfg.graph_defaults.node_xp,
             from_source_doc=True,
             centrality=term["centrality"],
         )

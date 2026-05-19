@@ -39,6 +39,7 @@ async def _map_chunk(
     kw_model: KeyBERT,
     router,
     structural_zones: set[str],
+    cfg: Config,
 ) -> list[TermOccurrence]:
     chunk = json.loads(chunk_path.read_text())
     chunk_id = chunk["chunk_id"]
@@ -63,12 +64,15 @@ async def _map_chunk(
 
     # Signal C — KeyBERT embedding
     keywords = kw_model.extract_keywords(
-        text, keyphrase_ngram_range=(1, 3), stop_words="english", top_n=20
+        text,
+        keyphrase_ngram_range=(cfg.keyword_extraction.ngram_min, cfg.keyword_extraction.ngram_max),
+        stop_words="english",
+        top_n=cfg.keyword_extraction.top_n,
     )
     keybert_terms = {kw.lower() for kw, _ in keywords}
 
     # Signal B — LLM conceptual
-    messages = [{"role": "user", "content": _MAP_PROMPT.format(text=text[:6000])}]
+    messages = [{"role": "user", "content": _MAP_PROMPT.format(text=text[:cfg.chunking.llm_map_char_limit])}]
     llm_result: TermInventory = await router.call(messages, TermInventory)
 
     # Merge: lexical + keybert into base set; LLM adds conceptual terms
@@ -99,6 +103,36 @@ async def _map_chunk(
     out_path.write_text(json.dumps([t.model_dump() for t in result], indent=2))
     done_path.touch()
     return result
+
+
+_STRIP_CHARS = "|*_#`- \t\n"
+_BOX_DRAWING = set("─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋")
+_SINGLE_TOKEN_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+    "being", "have", "has", "had", "do", "does", "did", "will", "would",
+    "could", "should", "may", "might", "must", "can", "it", "its", "this",
+    "that", "these", "those", "they", "them", "their", "we", "our", "you",
+    "your", "he", "she", "him", "her", "what", "which", "who", "how",
+    "when", "where", "why", "all", "each", "every", "both", "one", "two",
+    "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "also", "then", "than", "such", "very", "more", "most", "any", "some",
+    "not", "no", "nor", "so", "yet", "as", "if", "because", "since",
+    "while", "although", "however", "therefore", "thus", "hence",
+})
+
+
+def _clean_term(name: str) -> str | None:
+    name = name.strip(_STRIP_CHARS)
+    if any(c in _BOX_DRAWING for c in name):
+        return None
+    alpha_count = sum(1 for c in name if c.isalpha())
+    if alpha_count < 3:
+        return None
+    # Reject single-token function words; multi-word phrases are fine
+    if " " not in name and name.lower() in _SINGLE_TOKEN_STOPWORDS:
+        return None
+    return name
 
 
 def _alias_clusters(
@@ -137,8 +171,8 @@ async def run(state: PipelineState, cfg: Config) -> None:
         json.loads((state_dir / "structural_zones.json").read_text())
     )
 
-    nlp = spacy.load("en_core_web_sm")
-    embedding_model = SentenceTransformer("BAAI/bge-m3")
+    nlp = spacy.load(cfg.nlp_models.spacy)
+    embedding_model = SentenceTransformer(cfg.nlp_models.embedding)
     kw_model = KeyBERT(model=embedding_model)
     router = make_router("extractor", cfg)
 
@@ -149,7 +183,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
     async with asyncio.TaskGroup() as tg:
         tasks = [
             tg.create_task(
-                _map_chunk(cp, map_dir, nlp, kw_model, router, structural_zones)
+                _map_chunk(cp, map_dir, nlp, kw_model, router, structural_zones, cfg)
             )
             for cp in chunk_paths
         ]
@@ -167,7 +201,9 @@ async def run(state: PipelineState, cfg: Config) -> None:
     # Aggregate occurrence counts across chunks
     aggregated: dict[str, TermOccurrence] = {}
     for t in all_occurrences:
-        name = t.name.lower()
+        name = _clean_term(t.name.lower())
+        if name is None:
+            continue
         if name not in aggregated:
             aggregated[name] = TermOccurrence(
                 name=name, aliases=t.aliases[:],

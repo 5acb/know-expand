@@ -7,6 +7,7 @@ from docling.datamodel.document import DocItemLabel
 from docling.document_converter import DocumentConverter
 from docling.chunking import HybridChunker
 
+from doc_expand.config import Config
 from doc_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
 
 _STRUCTURAL_LABELS = {DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE}
@@ -22,14 +23,14 @@ def _extract_structural_zones(doc, nlp) -> set[str]:
     return zones
 
 
-def _fetch_url(url: str) -> str:
-    with httpx.Client(timeout=30, follow_redirects=True) as client:
+def _fetch_url(url: str, timeout: int = 30) -> str:
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
         resp = client.get(url)
         resp.raise_for_status()
         return resp.text
 
 
-async def run(state: PipelineState) -> None:
+async def run(state: PipelineState, cfg: Config) -> None:
     state_dir = Path(state["state_dir"])
 
     if stage_is_complete(state_dir, 0):
@@ -42,21 +43,19 @@ async def run(state: PipelineState) -> None:
     chunks_dir = state_dir / "chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
-    nlp = spacy.load("en_core_web_sm")
+    nlp = spacy.load(cfg.nlp_models.spacy)
 
     # --- Ingest source ---
     if input_path.startswith("http://") or input_path.startswith("https://"):
-        raw_text = _fetch_url(input_path)
+        raw_text = _fetch_url(input_path, timeout=cfg.timeouts["http_fetch_seconds"])
         source_txt = state_dir / "source.txt"
         source_txt.write_text(raw_text)
         meta = {"source_type": "url", "url": input_path, "title": input_path}
         structural_zones: set[str] = set()
-        # For URLs, extract noun chunks from the full text as a proxy
-        parsed = nlp(raw_text[:50_000])
+        parsed = nlp(raw_text[:cfg.chunking.spacy_char_limit])
         structural_zones = {chunk.text.lower() for chunk in parsed.noun_chunks}
-        # Split into synthetic chunks of ~4000 chars
         words = raw_text.split()
-        chunk_size = 800  # words
+        chunk_size = cfg.chunking.word_size
         raw_chunks = [
             " ".join(words[i:i + chunk_size])
             for i in range(0, len(words), chunk_size)
@@ -79,8 +78,8 @@ async def run(state: PipelineState) -> None:
             structural_zones = _extract_structural_zones(doc, nlp)
 
             chunker = HybridChunker(
-                tokenizer="cl100k_base",
-                max_tokens=4000,
+                tokenizer=cfg.nlp_models.tokenizer,
+                max_tokens=cfg.chunking.max_tokens,
                 merge_peers=True,
             )
             raw_chunks = list(chunker.chunk(doc))
@@ -102,13 +101,21 @@ async def run(state: PipelineState) -> None:
                 "\n\n".join(c.text for c in raw_chunks)
             )
         else:
-            # Plain text / markdown
+            # Plain text / markdown — extract structural zones from header lines only
             raw_text = source_path.read_text()
             (state_dir / "source.txt").write_text(raw_text)
-            parsed = nlp(raw_text[:50_000])
+            header_text = " ".join(
+                line.lstrip("#").strip()
+                for line in raw_text.splitlines()
+                if line.startswith("#")
+            )
+            parsed = nlp(header_text[:cfg.chunking.spacy_char_limit]) if header_text else nlp("")
             structural_zones = {chunk.text.lower() for chunk in parsed.noun_chunks}
+            structural_zones.update(
+                tok.text.lower() for tok in parsed if tok.pos_ == "NOUN"
+            )
             words = raw_text.split()
-            chunk_size = 800
+            chunk_size = cfg.chunking.word_size
             raw_chunks_text = [
                 " ".join(words[i:i + chunk_size])
                 for i in range(0, len(words), chunk_size)

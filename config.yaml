@@ -1,3 +1,7 @@
+llamacpp:
+  base_url: "http://192.168.1.117:8080"
+  max_tokens: 8192
+
 bibliography:
   foundational_fraction: 0.65
   frontier_months: 24
@@ -30,11 +34,34 @@ concurrency:
 
 timeouts:
   domain_research_seconds: 2700
+  http_fetch_seconds: 30
+  openalex_seconds: 10
+  http_async_seconds: 30
 
 adversarial_rounds:
   survey: 1
   standard: 2
   deep: 3
+
+nlp_models:
+  spacy: "en_core_web_sm"
+  embedding: "BAAI/bge-m3"
+  tokenizer: "cl100k_base"
+
+chunking:
+  word_size: 800
+  max_tokens: 4000
+  spacy_char_limit: 50000
+  llm_map_char_limit: 6000
+
+keyword_extraction:
+  top_n: 20
+  ngram_min: 1
+  ngram_max: 3
+
+graph_defaults:
+  node_tier: "journeyman"
+  node_xp: 100
 
 boilerplate_stop_list:
   - introduction

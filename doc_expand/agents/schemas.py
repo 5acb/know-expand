@@ -95,3 +95,33 @@ class UserProfile(BaseModel):
     effective_depth: str         # survey | standard | deep
     math_mode: str               # intuition | equations_explained | full_derivations
     reading_goal_note: str
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 — Audit
+# ---------------------------------------------------------------------------
+
+class CitationRecord(BaseModel):
+    id: str                           # CSL-JSON key, e.g. "kwon_2023_vllm"
+    type: str = "article-journal"
+    title: str
+    author: list[dict]                # [{"given": ..., "family": ...}]
+    issued: dict                      # {"date-parts": [[year]]}
+    DOI: str | None = None
+    URL: str | None = None
+    abstract: str = ""
+    bucket: str                       # foundational | frontier | anchor
+    citation_count: int = 0
+
+
+class GapFinding(BaseModel):
+    gap_description: str
+    evidence_anchor_ids: list[str]    # which anchor paper IDs support this gap
+    defender_argument: str = ""
+    finder_rebuttal: str = ""
+    verdict: str = "pending"          # real_gap | ambiguous | not_a_gap | pending
+
+
+class GapAnalysisResult(BaseModel):
+    domain_id: str
+    gaps: list[GapFinding]

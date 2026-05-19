@@ -1,0 +1,58 @@
+services:
+  grobid:
+    image: lfoppiano/grobid:0.8.1
+    ports:
+      - "8070:8070"
+    networks:
+      - doc_expand
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8070/api/isalive"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  anystyle:
+    image: nicowillis/anystyle-api:latest
+    ports:
+      - "4567:4567"
+    networks:
+      - doc_expand
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4567/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "6006:6006"
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+    volumes:
+      - phoenix_data:/mnt/data
+    networks:
+      - doc_expand
+
+  app:
+    build: .
+    env_file: .env
+    depends_on:
+      grobid:
+        condition: service_healthy
+      anystyle:
+        condition: service_healthy
+      phoenix:
+        condition: service_started
+    volumes:
+      - ./state:/app/state
+      - ./output:/app/output
+    networks:
+      - doc_expand
+
+networks:
+  doc_expand:
+    driver: bridge
+
+volumes:
+  phoenix_data:
