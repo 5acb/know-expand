@@ -276,28 +276,32 @@ async def run(state: PipelineState, cfg: Config) -> None:
     })
 
     async with httpx.AsyncClient(timeout=cfg.timeouts.get("http_async_seconds", 30)) as http:
-        async with asyncio.TaskGroup() as tg:
-            domain_tasks = []
-            for domain in domains:
-                domain_id = domain["id"]
-                graph_terms = [
-                    n["name"] for n in nodes
-                    if n.get("domain") == domain_id
-                ]
-                gap_candidates = [
-                    t for t in conflict_term_names
-                    if any(n["name"] == t and n.get("domain") == domain_id for n in nodes)
-                ]
-                all_terms = list(dict.fromkeys(graph_terms + gap_candidates))
+        coros = []
+        for domain in domains:
+            domain_id = domain["id"]
+            graph_terms = [
+                n["name"] for n in nodes
+                if n.get("domain") == domain_id
+            ]
+            gap_candidates = [
+                t for t in conflict_term_names
+                if any(n["name"] == t and n.get("domain") == domain_id for n in nodes)
+            ]
+            all_terms = list(dict.fromkeys(graph_terms + gap_candidates))
+            coros.append(_process_domain(domain, all_terms, audit_dir, depth, cfg, router, http))
 
-                task = tg.create_task(
-                    _process_domain(
-                        domain, all_terms, audit_dir, depth, cfg, router, http
-                    )
-                )
-                domain_tasks.append(task)
+        raw_results = await asyncio.gather(*coros, return_exceptions=True)
 
-    gap_results: list[GapAnalysisResult] = [t.result() for t in domain_tasks]
+    gap_results: list[GapAnalysisResult] = []
+    for domain, result in zip(domains, raw_results):
+        if isinstance(result, Exception):
+            emit({
+                "event": "domain_failed",
+                "domain_id": domain["id"],
+                "error": str(result)[:200],
+            })
+        else:
+            gap_results.append(result)
 
     gap_md = _build_gap_markdown(gap_results, domains_by_id)
     corrections_md = _build_corrections_markdown(gap_results, domains_by_id)
