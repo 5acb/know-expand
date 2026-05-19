@@ -162,7 +162,7 @@ At "deep" depth, 10 domain section files easily exceed 150k tokens. A synthesis 
 ### 7. Structural semantics over lexical frequency
 A paper uses "Theorem" 80 times. It introduces its core mechanism "Speculative Chunking" exactly 4 times. Pure frequency-based centrality flags the boilerplate as core and demotes the science. Centrality must be grounded in document structure (abstract, headers, bold/italic), not just occurrence counts.
 
-**Consequence:** PyMuPDF structural extraction runs before chunking. Centrality fuses structural signals with frequency, filtered through a boilerplate stop-list.
+**Consequence:** Docling's `SECTION_HEADER`/`TITLE` labels drive structural zone extraction before chunking. Centrality fuses structural signals with frequency, filtered through a boilerplate stop-list.
 
 ### 8. Adversarial quality where logical leaps occur
 A single agent producing an output with no challenge has no error-correction mechanism. But critics at every step is redundancy theater — it burns tokens to resolve artificially introduced non-determinism in stages where a deterministic check or structural reconciliation is sufficient. Critics are applied only where logical leaps happen: Stage 3 (gap analysis), Stage 4 (domain research), Stage 5 (cross-domain synthesis). Stages 1 and 2 use structural reconciliation instead.
@@ -405,21 +405,7 @@ chunks = list(chunker.chunk(doc))
 
 Overlap at the semantic level: if a paragraph doesn't fit in the remaining token budget, the chunk boundary falls at the end of the last complete paragraph. The next chunk opens at the beginning of that paragraph — natural overlap, zero structural noise.
 
-**Structural extraction (PyMuPDF pass, before chunking):**
-```python
-STRUCTURAL_ZONES = set()  # terms in abstract, headers, bold, italic
-for span in page.get_text("dict")["blocks"][...]["spans"]:
-    flags = span["flags"]   # bold=16, italic=2
-    size  = span["size"]
-    if flags & 16 or flags & 2 or size > body_size * 1.2:
-        STRUCTURAL_ZONES.update(extract_terms(span["text"]))
-```
-
 **Output:** `state/source.txt`, `state/source_meta.json`, `state/chunks/chunk_{N:04d}.json`, `state/structural_zones.json`
-
-**Why PyMuPDF:** font weight and size metadata is the ground truth for structural importance. `pdfplumber` can extract this but it requires more parsing work; `fitz` exposes it natively via `span["flags"]` and `span["size"]`.
-
-**Why not extract structure during chunking:** once text is chunked, span-level font metadata is lost. Structural extraction must precede chunking.
 
 ---
 
@@ -1089,7 +1075,7 @@ state/
 ├── pipeline.json                               Run state: per-stage status + timestamps + model_consistency
 ├── source.txt                                  Stage 0 output
 ├── source_meta.json
-├── structural_zones.json                       PyMuPDF structural pass
+├── structural_zones.json                       Docling SECTION_HEADER/TITLE extraction (Stage 0)
 ├── user_profile.json                           Stage 0.5 output (also acts as sentinel)
 ├── chunks/
 │   ├── chunk_{N:04d}.json
@@ -1412,25 +1398,7 @@ Both semaphores are global singletons — they bound total concurrent calls acro
 
 **QuotaAwareRouter — distinguishing rate limits from quota exhaustion:**
 
-HTTP 429 from cloud providers can mean two different things:
-- **Transient rate limit** (`Retry-After` header present): the account has quota; this request hit a per-minute ceiling. Back off and retry on the same model.
-- **True quota exhaustion** (no `Retry-After`, or balance depleted): switch to the next model.
-
-```python
-except RateLimitError as e:
-    retry_after = getattr(e, 'response', None) and e.response.headers.get('retry-after')
-    if retry_after:
-        # Transient rate limit — back off, retry same model
-        await asyncio.sleep(int(retry_after))
-        continue
-    else:
-        # True quota exhaustion — switch model
-        self.exhausted.add(model)
-        self.current_index += 1
-        emit({"event": "model_quota_switch", ...})
-```
-
-Without this distinction, a burst of 429s from concurrent fan-out (which all carry `Retry-After`) would drain the fallback list and degrade the run to local models within seconds of Stage 4 starting.
+HTTP 429 with a `Retry-After` header is a transient burst; the router sleeps and retries the same model. HTTP 429 without `Retry-After` is true quota exhaustion; the router downgrades to the next model in the list. This distinction is implemented inside `QuotaAwareRouter.call()` — see the class definition below. Without it, a burst of 429s from concurrent fan-out would drain the entire fallback list in milliseconds.
 
 **Supported provider strings (LiteLLM format):**
 ```
@@ -1609,7 +1577,7 @@ def clear_partial_outputs(stage_id: int, state: PipelineState) -> None:
 
 #### The Human Checkpoint Is Idempotent
 
-Stage 2 Phase 1 (taxonomy review) pauses for `$EDITOR`. If the pipeline resumes after this checkpoint, it checks whether `state/taxonomy.json` has been approved (`"status": "approved"` field written by the editor exit hook). If approved, Phase 2 classification runs. If not, the editor reopens.
+Stage 2 Phase 1 (taxonomy review) pauses for `$EDITOR`. After the editor exits, the pipeline re-reads `state/taxonomy.json` and checks for an explicit `"status": "approved"` field set by the human. Quitting without saving (`:q!` in vi) leaves the field as `"pending"` — the pipeline detects this and pauses cleanly rather than launching an 8-domain Opus fan-out on unreviewed taxonomy.
 
 ```python
 def taxonomy_checkpoint(state: PipelineState) -> None:
@@ -1617,7 +1585,19 @@ def taxonomy_checkpoint(state: PipelineState) -> None:
         write_taxonomy_proposals(state)
         editor = os.environ.get("EDITOR", "vi")
         subprocess.call([editor, str(state.dir / "taxonomy.json")])
-        # User saves and exits — pipeline continues
+
+        # Re-read after editor exits — do not assume approval
+        taxonomy = json.loads((state.dir / "taxonomy.json").read_text())
+        if taxonomy.get("status") != "approved":
+            emit({
+                "event": "pipeline_paused",
+                "reason": "taxonomy_not_approved",
+                "instructions": (
+                    'Set "status": "approved" in state/taxonomy.json, '
+                    "then run: doc-expand --resume 2b"
+                )
+            })
+            sys.exit(0)
         mark_taxonomy_approved(state)
 ```
 
@@ -1668,7 +1648,17 @@ class QuotaAwareRouter:
             model = self.models[self.current_index]
             try:
                 return await litellm.acompletion(model=model, ...)
-            except (RateLimitError, QuotaExceededError) as e:
+            except RateLimitError as e:
+                # Inspect Retry-After before deciding whether to downgrade.
+                # 429 + Retry-After = transient burst; back off and retry the same model.
+                # 429 without Retry-After = true quota exhaustion; switch to next model.
+                retry_after = (
+                    getattr(e, "response", None)
+                    and e.response.headers.get("retry-after")
+                )
+                if retry_after:
+                    await asyncio.sleep(int(retry_after))
+                    continue   # retry same model
                 self.exhausted.add(model)
                 self.current_index += 1
                 emit({
@@ -1749,7 +1739,7 @@ OpenAlex (~297M works, 65,000 hierarchical concepts, 2B+ citation edges, free AP
 
 #### Docling (IBM) → Stage 0 primary document parser
 
-Docling (MIT license, ~30k stars, integrated into LangChain/LlamaIndex, DocLayNet layout model + TableFormer table model) produces richly structured document representations from PDF, DOCX, PPTX, HTML — tables, equations, figures, section hierarchy. PyMuPDF is still used in parallel specifically for `span["flags"]` and `span["size"]` (font weight/size metadata for structural zone extraction) since Docling's layout representation doesn't expose raw span typography in the same form.
+Docling (MIT license, ~30k stars, integrated into LangChain/LlamaIndex, DocLayNet layout model + TableFormer table model) produces richly structured document representations from PDF, DOCX, PPTX, HTML — tables, equations, figures, section hierarchy. Docling is the sole PDF parser. Structural zone extraction uses Docling's `SECTION_HEADER`/`TITLE` element labels — a semantically richer signal than font-flag heuristics, trained on academic layout patterns.
 
 **What it replaces:** raw `pdfplumber` text extraction. Docling understands document semantics; pdfplumber extracts characters.
 
@@ -1842,7 +1832,7 @@ Typst (v0.14+, pre-1.0 but production-ready, actively maintained, millisecond in
 | Direct `anthropic` SDK calls (bypassing LiteLLM) | Locks the pipeline to one provider; defeats the LLM-agnostic architecture |
 | `LangChain` | Heavy abstraction layer; LangGraph is sufficient and lighter |
 | `AutoGen` / `CrewAI` | Alternative multi-agent frameworks; LangGraph + Anthropic SDK is cleaner |
-| `pdfplumber` as primary parser | Less accurate than Docling for layout; use PyMuPDF for font metadata only |
+| `pdfplumber` as primary parser | Less accurate than Docling for layout; Docling's `SECTION_HEADER`/`TITLE` labels are the structural signal |
 | `Redis` | Requires external process; DiskCache is sufficient for CLI-local caching |
 | `Ray` / `Celery` | Distributed compute overkill; `asyncio.TaskGroup()` handles CLI parallelism |
 | `anyio` | AnyIO was justified before `asyncio.TaskGroup` (Python 3.11). Mixing `anyio.create_task_group()` with `asyncio.Semaphore` causes cancellation propagation mismatches and silent deadlocks under 429 backoff pressure. Use native asyncio throughout. |
@@ -1912,6 +1902,8 @@ This project is the reference implementation. Every pattern below was validated 
 - **Adding `--interactive` to LLM-orchestrated invocations:** an orchestrating LLM has no terminal. The default autonomous mode already skips Stage 0.5. `--interactive` is for direct human use only.
 - **Requiring `--auto-taxonomy` explicitly for LLM-driven runs:** when the orchestrating LLM is driving the pipeline end-to-end, `--auto-taxonomy` should be the default invocation. The `$EDITOR` path is a convenience for direct human use, not the canonical operating mode.
 - **Leaving parallel domain tasks without a hard timeout:** `asyncio.TaskGroup` waits for all tasks. A domain agent stuck in exponential API backoff will idle the entire group indefinitely at 99% completion. Wrap each domain task with `asyncio.timeout(2700)` and emit a clean `domain_timeout` event on expiry so the group can finish and the stage can be resumed.
+- **Calling `mark_taxonomy_approved` unconditionally after editor exit:** `subprocess.call` returns when the user closes the editor — it does not indicate they saved. If the user quits without saving (`:q!`), the taxonomy file is unchanged and still has `"status": "pending"`. Always re-read the file after editor exit and verify the status field before proceeding. Unconditional approval launches an 8-domain Opus fan-out on unreviewed garbage.
+- **Checking HTTP 429 at the wrong level:** inspecting `Retry-After` must happen inside `QuotaAwareRouter.call()`, not in separate prose or a disconnected code block. A plain `except RateLimitError` that immediately downgrades the model will drain the fallback list on a single transient burst.
 
 ---
 
