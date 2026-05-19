@@ -75,10 +75,18 @@ async def _ss_search(
     params: dict = {"query": query, "fields": _SS_FIELDS, "limit": min(limit, 100)}
     if year_filter:
         params["year"] = year_filter
-    async with _get_ss_limiter(cfg):
-        resp = await http.get(_SS_BASE, params=params)
+    delay = 5.0
+    for attempt in range(5):
+        async with _get_ss_limiter(cfg):
+            resp = await http.get(_SS_BASE, params=params)
+        if resp.status_code == 429:
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)
+            continue
+        resp.raise_for_status()
+        return resp.json().get("data") or []
     resp.raise_for_status()
-    return resp.json().get("data") or []
+    return []
 
 
 async def fetch_anchors(

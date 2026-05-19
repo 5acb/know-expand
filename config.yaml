@@ -1,6 +1,6 @@
 llamacpp:
   base_url: "http://127.0.0.1:8080"
-  max_tokens: 8192
+  max_tokens: 1024
 
 bibliography:
   foundational_fraction: 0.65
@@ -19,8 +19,8 @@ centrality:
 
 rate_limits:
   semantic_scholar:
-    max_rate: 100
-    time_period: 300
+    max_rate: 10
+    time_period: 60
   crossref:
     max_rate: 1
     time_period: 1
