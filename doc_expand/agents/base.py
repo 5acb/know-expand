@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import os
 import time
 from typing import TypeVar
 
+import httpx
 import litellm
 from pydantic import BaseModel
 
@@ -10,6 +12,10 @@ from doc_expand.config import Config
 from doc_expand.state import emit
 
 _logger = logging.getLogger("doc_expand.router")
+
+# Populated once by probe_models() at pipeline startup.
+# Every new QuotaAwareRouter copies this as its initial skip set.
+_PROBED_UNAVAILABLE: set[str] = set()
 
 
 def _find_in_chain(exc: BaseException, *types) -> BaseException | None:
@@ -39,6 +45,57 @@ def _is_auth_error(exc: BaseException) -> BaseException | None:
     if root and any(kw in str(root).lower() for kw in ("credential", "api_key", "missing")):
         return root
     return None
+
+
+async def _probe_one(model: str, cfg: Config) -> bool:
+    """Return True if model appears usable. No LLM call — credential/health check only."""
+    if model.startswith("llamacpp/"):
+        try:
+            async with httpx.AsyncClient(timeout=3) as c:
+                r = await c.get(f"{cfg.llamacpp.base_url}/health")
+                return r.status_code == 200
+        except Exception:
+            return False
+    if model.startswith("ollama/"):
+        try:
+            async with httpx.AsyncClient(timeout=3) as c:
+                r = await c.get("http://localhost:11434/api/tags")
+                return r.status_code == 200
+        except Exception:
+            return False
+    # Cloud providers: check for the relevant env var
+    if "claude" in model or "anthropic" in model:
+        return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if "gpt" in model or "openai" in model:
+        return bool(os.environ.get("OPENAI_API_KEY"))
+    if "gemini" in model:
+        return bool(os.environ.get("GEMINI_API_KEY"))
+    # Unknown provider — optimistically assume available
+    return True
+
+
+async def probe_models(cfg: Config) -> None:
+    """
+    Check every model across all roles once at startup.
+    Unavailable models are added to _PROBED_UNAVAILABLE so routers skip them
+    immediately without a noisy auth-fail-and-skip cascade on every call.
+    """
+    global _PROBED_UNAVAILABLE
+    all_models: set[str] = set()
+    for models in cfg.models.values():
+        all_models.update(models)
+
+    results = await asyncio.gather(*[_probe_one(m, cfg) for m in all_models])
+    unavailable = {m for m, ok in zip(all_models, results) if not ok}
+    available = all_models - unavailable
+    _PROBED_UNAVAILABLE = unavailable
+
+    emit({
+        "event": "model_probe_done",
+        "available": sorted(available),
+        "unavailable": sorted(unavailable),
+    })
+
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -83,19 +140,26 @@ async def _do_call(
         "msg_chars": sum(len(m.get("content", "")) for m in messages),
     })
     try:
-        result = await client.chat.completions.create(
+        result, completion = await client.chat.completions.create_with_completion(
             model=model,
             messages=messages,
             response_model=schema,
             **extra,
         )
         elapsed = time.monotonic() - t0
+        usage = getattr(completion, "usage", None)
+        tok_out = getattr(usage, "completion_tokens", None)
+        tok_in = getattr(usage, "prompt_tokens", None)
+        tok_s = round(tok_out / elapsed, 1) if tok_out and elapsed > 0 else None
         emit({
             "event": "llm_call_done",
             "role": role,
             "model": display_model,
             "schema": schema.__name__,
             "elapsed_s": round(elapsed, 2),
+            "tok_in": tok_in,
+            "tok_out": tok_out,
+            "tok_s": tok_s,
         })
         return result
     except Exception as exc:
@@ -116,11 +180,8 @@ class QuotaAwareRouter:
         self.role = role
         self.models = models
         self.cfg = cfg
-        # _skip is shared across concurrent callers; _lock guards mutations only.
-        # Using a skip-set (not an advancing index) means concurrent tasks don't
-        # race past valid models: they each independently discover the same model
-        # is bad and add it to the set, then all land on the same next candidate.
-        self._skip: set[str] = set()
+        # Seed from probe results so unavailable models are never attempted.
+        self._skip: set[str] = set(_PROBED_UNAVAILABLE)
         self._lock = asyncio.Lock()
 
     def _next_model(self) -> str | None:

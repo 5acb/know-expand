@@ -118,6 +118,9 @@ async def run_pipeline(
         "state_dir": str(state_dir),
     })
 
+    from doc_expand.agents.base import probe_models
+    await probe_models(cfg)
+
     graph = build_graph(cfg, interactive=interactive, auto_taxonomy=auto_taxonomy, no_pdf=no_pdf)
     compiled = graph.compile()
     await compiled.ainvoke(state)
