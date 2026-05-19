@@ -18,6 +18,18 @@ def main() -> None:
         prog="doc-expand",
         description="Expand a technical document into a research-grade knowledge document.",
     )
+    subparsers = parser.add_subparsers(dest="command")
+
+    # --- tail subcommand ---
+    tail_p = subparsers.add_parser("tail", help="Stream pipeline events to stdout")
+    tail_p.add_argument("run_id", nargs="?", default=None, help="Run ID (default: latest)")
+    tail_p.add_argument("--log-dir", type=Path, default=Path("logs"))
+
+    # --- serve subcommand ---
+    serve_p = subparsers.add_parser("serve", help="Serve completed sections at localhost")
+    serve_p.add_argument("--port", type=int, default=7842)
+    serve_p.add_argument("--state-dir", type=Path, default=Path("state"))
+
     parser.add_argument("input", nargs="?", help="File path, URL, or - for stdin")
 
     # Output / mode
@@ -58,6 +70,17 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    # Handle subcommands first
+    if args.command == "tail":
+        from doc_expand.observe import cmd_tail
+        cmd_tail(args.run_id, args.log_dir)
+        return
+
+    if args.command == "serve":
+        from doc_expand.observe import cmd_serve
+        cmd_serve(args.state_dir, port=args.port)
+        return
 
     state_dir: Path = args.state_dir
     state_dir.mkdir(parents=True, exist_ok=True)

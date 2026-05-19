@@ -144,6 +144,13 @@ def make_lc_model(router: Any) -> RouterChatModel:
     return model
 
 
+# Sentinel strings returned by finish tools to signal the agent loop should stop.
+FINISH_SENTINELS = {"ALIGNMENT_COMPLETE", "THREADING_COMPLETE"}
+
+# How many recent messages to keep in context (trims oldest non-system messages).
+_CONTEXT_WINDOW = 20
+
+
 def build_react_graph(
     model: RouterChatModel,
     tools: list,
@@ -154,25 +161,44 @@ def build_react_graph(
 
     Returns a compiled graph that accepts {"messages": [...]} input and
     returns {"messages": [...]} output.
+
+    Termination: the graph stops when either the model emits no tool calls,
+    or the last ToolMessage content is a FINISH_SENTINEL value.
+    Context trimming: only the most recent _CONTEXT_WINDOW messages are sent
+    to the model each turn to avoid context overflow on long agent runs.
     """
-    from langchain_core.messages import SystemMessage as _SM
+    from langchain_core.messages import SystemMessage as _SM, ToolMessage as _TM
 
     tool_node = ToolNode(tools)
     bound_model = model.bind_tools(tools)
 
     async def call_model(state: MessagesState) -> dict:
-        messages = state["messages"]
-        # Prepend system message on the first call only
-        if not any(isinstance(m, _SM) for m in messages):
-            messages = [_SM(content=system_prompt)] + list(messages)
+        messages = list(state["messages"])
+
+        # Ensure system message is always first
+        if not messages or not isinstance(messages[0], _SM):
+            messages = [_SM(content=system_prompt)] + messages
+
+        # Trim: keep system message + last _CONTEXT_WINDOW messages
+        if len(messages) > _CONTEXT_WINDOW + 1:
+            messages = messages[:1] + messages[-(  _CONTEXT_WINDOW):]
+
         response = await bound_model.ainvoke(messages)
         return {"messages": [response]}
 
     def should_continue(state: MessagesState) -> str:
-        last = state["messages"][-1]
-        if isinstance(last, AIMessage) and last.tool_calls:
-            return "tools"
-        return END
+        msgs = state["messages"]
+        last = msgs[-1]
+        # Stop if model emitted no tool calls
+        if isinstance(last, AIMessage) and not last.tool_calls:
+            return END
+        # Stop if the most recent tool result was a finish sentinel
+        last_tool = next(
+            (m for m in reversed(msgs) if isinstance(m, _TM)), None
+        )
+        if last_tool and any(s in (last_tool.content or "") for s in FINISH_SENTINELS):
+            return END
+        return "tools"
 
     graph = StateGraph(MessagesState)
     graph.add_node("agent", call_model)
