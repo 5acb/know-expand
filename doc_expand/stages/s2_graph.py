@@ -46,9 +46,7 @@ async def _prompt_taxonomy(
     _print_proposal("Lumper  — broad domains", lumper)
     _print_proposal("Splitter — fine-grained", splitter)
 
-    print(f"\n{_BOLD}==>{_RESET} Accept a proposal, edit, or auto-merge?")
-    print(f"    {_GREEN}[L]{_RESET}umper  {_GREEN}[s]{_RESET}plitter  {_GREEN}[e]{_RESET}dit  {_GREEN}[m]{_RESET}erge auto  (default: L)")
-    print(" -> ", end="", flush=True)
+    print(f"\n{_BOLD}==>{_RESET} l/s/m/e (lumper/splitter/merge/edit) [l]: ", end="", flush=True)
 
     loop = asyncio.get_event_loop()
     choice = (await loop.run_in_executor(None, sys.stdin.readline)).strip().lower() or "l"
