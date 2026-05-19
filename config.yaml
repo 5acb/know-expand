@@ -16,9 +16,9 @@ bibliography:
 
 centrality:
   structural_weight: 2.0
-  core_effective_threshold: 5.0
-  core_chunk_fraction: 0.3
-  supporting_effective_threshold: 2.0
+  core_effective_threshold: 10.0
+  core_chunk_fraction: 0.4
+  supporting_effective_threshold: 4.0
   alias_cosine_threshold: 0.92
 
 rate_limits:

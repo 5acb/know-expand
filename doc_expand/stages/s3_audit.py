@@ -28,6 +28,12 @@ Graph terms: {graph_terms}
 Anchor papers:
 {anchor_summaries}
 
+Look especially for gaps in these categories:
+- Methodological gaps: approaches described in the papers but absent from the graph
+- Citation graph gaps: the papers cite foundational work or datasets not present in the graph
+- Snowballing gaps: if the anchor papers reference key sub-fields that the graph does not cover
+- Evaluation gaps: benchmarks, metrics, or reproducibility practices mentioned in papers but missing
+
 For each gap, provide a gap_description and list the evidence_anchor_ids (paper IDs \
 from the anchor list) that reveal the gap. Return a GapAnalysisResult with \
 domain_id="{domain_id}".
@@ -45,6 +51,11 @@ Graph terms: {graph_terms}
 
 Gap findings:
 {gap_findings}
+
+CRITICAL: You MUST provide a non-empty defender_argument for EVERY gap, even if \
+you believe the gap is real. If you cannot argue it is already covered, write: \
+"Conceded: this gap is genuine and not covered by any existing graph term." \
+Never leave defender_argument blank or null.
 
 Fill in defender_argument for each gap. Return a GapAnalysisResult with \
 domain_id="{domain_id}".

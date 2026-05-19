@@ -11,8 +11,10 @@ from doc_expand.stages import (
     s2_graph,
     s3_audit,
     s4_research,
+    s4_5_align,
     s5_synthesize,
     s6_verify,
+    s6_5_prereq,
     s7_assemble,
 )
 
@@ -49,12 +51,20 @@ def build_graph(
         await s4_research.run(state, cfg)
         return state
 
+    async def node_align(state: PipelineState) -> PipelineState:
+        await s4_5_align.run(state, cfg)
+        return state
+
     async def node_synthesize(state: PipelineState) -> PipelineState:
         await s5_synthesize.run(state, cfg)
         return state
 
     async def node_verify(state: PipelineState) -> PipelineState:
         await s6_verify.run(state, cfg)
+        return state
+
+    async def node_prereq(state: PipelineState) -> PipelineState:
+        await s6_5_prereq.run(state, cfg)
         return state
 
     async def node_assemble(state: PipelineState) -> PipelineState:
@@ -67,8 +77,10 @@ def build_graph(
     graph.add_node("graph", node_graph)
     graph.add_node("audit", node_audit)
     graph.add_node("research", node_research)
+    graph.add_node("align", node_align)
     graph.add_node("synthesize", node_synthesize)
     graph.add_node("verify", node_verify)
+    graph.add_node("prereq", node_prereq)
     graph.add_node("assemble", node_assemble)
 
     graph.set_entry_point("ingest")
@@ -77,9 +89,11 @@ def build_graph(
     graph.add_edge("extract", "graph")
     graph.add_edge("graph", "audit")
     graph.add_edge("audit", "research")
-    graph.add_edge("research", "synthesize")
+    graph.add_edge("research", "align")
+    graph.add_edge("align", "synthesize")
     graph.add_edge("synthesize", "verify")
-    graph.add_edge("verify", "assemble")
+    graph.add_edge("verify", "prereq")
+    graph.add_edge("prereq", "assemble")
     graph.add_edge("assemble", END)
 
     return graph

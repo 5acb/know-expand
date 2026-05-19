@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -106,21 +107,25 @@ def _merge_bibliographies(audit_dir: Path) -> list[dict]:
 # Document assembly
 # ---------------------------------------------------------------------------
 
-def _load_title(state_dir: Path) -> str:
+def _load_title(state_dir: Path, input_path: str | None = None) -> str:
     """Try to extract document title from source_meta.json or taxonomy.json."""
     meta_path = state_dir / "source_meta.json"
     if meta_path.exists():
         meta = json.loads(meta_path.read_text())
         title = meta.get("title", "")
-        if title:
+        if title and not _is_slug_title(title):
             return title
 
     tax_path = state_dir / "taxonomy.json"
     if tax_path.exists():
         tax = json.loads(tax_path.read_text())
         title = tax.get("title", "")
-        if title:
+        if title and not _is_slug_title(title):
             return title
+
+    if input_path:
+        stem = Path(input_path).stem
+        return stem.replace("_", " ").replace("-", " ").title()
 
     return "Expanded Knowledge Document"
 
@@ -159,6 +164,36 @@ def _bibliography_to_markdown(bibliography: list[dict]) -> str:
         lines.append(f"- [{bib_id}] {' '.join(ref_parts)}")
 
     return "\n".join(lines)
+
+
+_UNVALIDATED_RE = re.compile(r"\s*\[UNVALIDATED\]\s*", re.IGNORECASE)
+_NEEDS_CITATION_RE = re.compile(r"\s*\[NEEDS_CITATION\]\s*", re.IGNORECASE)
+_CITATION_NEEDED_RE = re.compile(r"\s*\[citation needed\]\s*", re.IGNORECASE)
+_INFERRED_MARKER_RE = re.compile(r"\s*\[INFERRED\]\s*", re.IGNORECASE)
+_INFERRED_COMMENT_RE = re.compile(r"[ \t]*#[ \t]*INFERRED:[^\n]*", re.IGNORECASE)
+_CITE_SYNTAX_RE = re.compile(r'\[cite:\s*([^\]]+)\]')
+_ORPHAN_SPACE_PUNCT_RE = re.compile(r' +([.,;:!?])')
+
+
+def _convert_cite_syntax(keys_str: str) -> str:
+    keys = [k.strip() for k in keys_str.split(',')]
+    return '[@' + '; @'.join(keys) + ']'
+
+
+def _is_slug_title(title: str) -> bool:
+    return bool(re.match(r'^[A-Z0-9_\-]+$', title))
+
+
+def _clean_section_text(text: str) -> str:
+    """Strip internal pipeline markers before writing final output."""
+    text = _UNVALIDATED_RE.sub(" ", text)
+    text = _NEEDS_CITATION_RE.sub(" ", text)
+    text = _CITATION_NEEDED_RE.sub(" ", text)
+    text = _INFERRED_MARKER_RE.sub(" ", text)
+    text = _INFERRED_COMMENT_RE.sub("", text)
+    text = _CITE_SYNTAX_RE.sub(lambda m: _convert_cite_syntax(m.group(1)), text)
+    text = _ORPHAN_SPACE_PUNCT_RE.sub(r'\1', text)
+    return text
 
 
 def _word_count(text: str) -> int:
@@ -202,7 +237,7 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
     })
 
     # Assemble sections in order
-    doc_title = _load_title(state_dir)
+    doc_title = _load_title(state_dir, state.get("input_path"))
     doc_parts: list[str] = [f"# {doc_title}\n"]
 
     section_files_used: list[str] = []
@@ -210,7 +245,7 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
     for domain_id in ordered_domain_ids:
         section_path = sections_dir / f"section_{domain_id}.md"
         if section_path.exists():
-            doc_parts.append(section_path.read_text())
+            doc_parts.append(_clean_section_text(section_path.read_text()))
             section_files_used.append(section_path.name)
         else:
             emit({
@@ -222,7 +257,7 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
     # Add synthesis section
     synthesis_path = sections_dir / "section_synthesis.md"
     if synthesis_path.exists():
-        doc_parts.append(synthesis_path.read_text())
+        doc_parts.append(_clean_section_text(synthesis_path.read_text()))
         section_files_used.append(synthesis_path.name)
 
     # Add bibliography section

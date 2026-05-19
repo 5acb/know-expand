@@ -242,5 +242,85 @@ class QuotaAwareRouter:
         raise RuntimeError(f"All models exhausted for role: {self.role}")
 
 
+    async def call_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> dict:
+        """Single LLM call with tool definitions. Returns the raw message dict
+        (which may contain tool_calls). Handles model fallback like call()."""
+        while True:
+            model = self._next_model()
+            if model is None:
+                break
+            sem = _get_semaphore(model, self.cfg)
+            display_model = model
+            extra: dict = {}
+            if model.startswith("llamacpp/"):
+                extra["api_base"] = self.cfg.llamacpp.base_url
+                extra["api_key"] = "not-needed"
+                extra["max_tokens"] = self.cfg.llamacpp.max_tokens
+                model = "openai/" + model[len("llamacpp/"):]
+            t0 = time.monotonic()
+            emit({
+                "event": "agent_tool_call_start",
+                "role": self.role,
+                "model": display_model,
+            })
+            try:
+                async with sem:
+                    response = await litellm.acompletion(
+                        model=model,
+                        messages=messages,
+                        tools=tools,
+                        tool_choice="auto",
+                        **extra,
+                    )
+                msg = response.choices[0].message
+                elapsed = time.monotonic() - t0
+                emit({
+                    "event": "agent_tool_call_done",
+                    "role": self.role,
+                    "model": display_model,
+                    "elapsed_s": round(elapsed, 2),
+                    "tool_calls": len(msg.tool_calls) if msg.tool_calls else 0,
+                })
+                # Normalise to plain dict for message history
+                return {
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in (msg.tool_calls or [])
+                    ] or None,
+                }
+            except Exception as e:
+                auth_err = _is_auth_error(e)
+                rate_err = _find_in_chain(e, litellm.RateLimitError)
+                if auth_err:
+                    async with self._lock:
+                        self._skip.add(display_model)
+                elif rate_err:
+                    retry_after = (
+                        getattr(rate_err, "response", None)
+                        and rate_err.response.headers.get("retry-after")
+                    )
+                    if retry_after:
+                        await asyncio.sleep(int(retry_after))
+                        continue
+                    async with self._lock:
+                        self._skip.add(display_model)
+                else:
+                    raise
+        raise RuntimeError(f"All models exhausted for agent role: {self.role}")
+
+
 def make_router(role: str, cfg: Config) -> QuotaAwareRouter:
     return QuotaAwareRouter(role=role, models=cfg.models[role], cfg=cfg)

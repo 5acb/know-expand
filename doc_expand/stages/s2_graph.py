@@ -28,6 +28,26 @@ def _print_proposal(label: str, proposal: TaxonomyProposal) -> None:
         print(f"   {i:2}.  {d.label}{oa}")
 
 
+async def _explain_taxonomy(
+    lumper: TaxonomyProposal,
+    splitter: TaxonomyProposal,
+    router,
+) -> None:
+    from doc_expand.agents.schemas import TaxonomyExplanation
+    msg = [{
+        "role": "user",
+        "content": _EXPLAIN_PROMPT.format(
+            lumper=lumper.model_dump_json(),
+            splitter=splitter.model_dump_json(),
+        ),
+    }]
+    explanation = await router.call(msg, TaxonomyExplanation)
+    print(f"\n{_CYAN}{'─' * 60}{_RESET}")
+    print(f"{_BOLD}What each option means for this document:{_RESET}\n")
+    print(explanation.body)
+    print(f"{_CYAN}{'─' * 60}{_RESET}\n")
+
+
 async def _prompt_taxonomy(
     lumper: TaxonomyProposal,
     splitter: TaxonomyProposal,
@@ -46,33 +66,40 @@ async def _prompt_taxonomy(
     _print_proposal("Lumper  — broad domains", lumper)
     _print_proposal("Splitter — fine-grained", splitter)
 
-    print(f"\n{_BOLD}==>{_RESET} l/s/m/e (lumper/splitter/merge/edit) [l]: ", end="", flush=True)
-
     loop = asyncio.get_event_loop()
-    choice = (await loop.run_in_executor(None, sys.stdin.readline)).strip().lower() or "l"
+    while True:
+        print(f"\n{_BOLD}==>{_RESET} l/s/m/e/x (lumper/splitter/merge/edit/explain) [l]: ", end="", flush=True)
+        choice = (await loop.run_in_executor(None, sys.stdin.readline)).strip().lower() or "l"
 
-    if choice in ("s", "splitter"):
-        domains = splitter.domains
-        mode = "splitter"
-    elif choice in ("e", "edit"):
-        taxonomy_path.write_text(json.dumps(
-            {"status": "pending", "domains": [d.model_dump() for d in lumper.domains]},
-            indent=2,
-        ))
-        editor = os.environ.get("EDITOR", "vi")
-        subprocess.call([editor, str(taxonomy_path)])
-        data = json.loads(taxonomy_path.read_text())
-        data["status"] = "approved"
-        data.setdefault("mode", "edited")
-        return data
-    elif choice in ("m", "merge"):
-        return await _auto_merge(lumper, splitter, issues, router, cfg)
-    else:
-        domains = lumper.domains
-        mode = "lumper"
+        if choice in ("x", "explain"):
+            print(f"{_CYAN}==>{_RESET} Asking LLM to explain...", flush=True)
+            await _explain_taxonomy(lumper, splitter, router)
+            _print_proposal("Lumper  — broad domains", lumper)
+            _print_proposal("Splitter — fine-grained", splitter)
+            continue
 
-    print(f"{_GREEN}==>{_RESET} Approved ({mode}, {len(domains)} domains)\n", flush=True)
-    return {"status": "approved", "mode": mode, "domains": [d.model_dump() for d in domains]}
+        if choice in ("s", "splitter"):
+            domains = splitter.domains
+            mode = "splitter"
+        elif choice in ("e", "edit"):
+            taxonomy_path.write_text(json.dumps(
+                {"status": "pending", "domains": [d.model_dump() for d in lumper.domains]},
+                indent=2,
+            ))
+            editor = os.environ.get("EDITOR", "vi")
+            subprocess.call([editor, str(taxonomy_path)])
+            data = json.loads(taxonomy_path.read_text())
+            data["status"] = "approved"
+            data.setdefault("mode", "edited")
+            return data
+        elif choice in ("m", "merge"):
+            return await _auto_merge(lumper, splitter, issues, router, cfg)
+        else:
+            domains = lumper.domains
+            mode = "lumper"
+
+        print(f"{_GREEN}==>{_RESET} Approved ({mode}, {len(domains)} domains)\n", flush=True)
+        return {"status": "approved", "mode": mode, "domains": [d.model_dump() for d in domains]}
 
 
 async def _auto_merge(lumper, splitter, issues, router, cfg) -> dict:
@@ -135,6 +162,24 @@ Prefer domains that are broad enough to be meaningful but specific enough to par
 the terms cleanly. Validate that each domain maps to a real academic field.
 """
 
+_EXPLAIN_PROMPT = """\
+You are helping a user decide how to organize a knowledge expansion pipeline for a technical document.
+Two taxonomy strategies were proposed — lumper (broad) and splitter (fine-grained).
+
+Lumper proposal: {lumper}
+Splitter proposal: {splitter}
+
+Write a plain-English explanation (no JSON, no headers) covering:
+1. What each proposed domain actually covers, in 1-2 sentences each.
+2. The practical difference between lumper and splitter for this specific document:
+   what does the user gain or lose by choosing broad vs. fine-grained domains?
+3. Downstream impact: how does the choice affect the research depth, bibliography, \
+   and the final knowledge document the pipeline produces?
+4. Your recommendation and why.
+
+Keep it concise — around 200-300 words. Write directly to the user as "you".
+"""
+
 
 def _validate_openalex(domain_label: str, timeout: int = 10) -> dict | None:
     try:
@@ -193,7 +238,8 @@ async def run(
             router.call(splitter_msg, TaxonomyProposal),
         )
 
-        # OpenAlex validation
+        # OpenAlex validation — record issues but do NOT mutate domain labels
+        # (labels propagate into section headings; [UNVALIDATED] pollutes the output)
         issues = []
         openalex_timeout = cfg.timeouts.get("openalex_seconds", 10)
         for domain in lumper_result.domains + splitter_result.domains:
@@ -202,8 +248,7 @@ async def run(
                 domain.openalex_concept_id = openalex["id"]
                 domain.openalex_level = openalex["level"]
             else:
-                issues.append(f"{domain.label} [UNVALIDATED]")
-                domain.label = f"{domain.label} [UNVALIDATED]"
+                issues.append(f"{domain.label} (no OpenAlex match)")
 
         (audit_dir / "taxonomy_a.json").write_text(lumper_result.model_dump_json(indent=2))
         (audit_dir / "taxonomy_b.json").write_text(splitter_result.model_dump_json(indent=2))
@@ -231,23 +276,63 @@ async def run(
     domain_ids = [d["id"] for d in domains]
 
     # --- Phase 2: Classification ---
-    # TODO Phase 6: replace stub with proper TermClassification structured output.
-    # Two parallel classifiers (lumper vs splitter strategy) will vote per-term;
-    # conflicts go into classification_conflicts.json for the audit stage.
     emit({"event": "stage2_phase2_start", "domain_count": len(domains)})
+
+    # Build per-domain keyword sets from example_terms + label words for scoring
+    domain_keywords: list[tuple[str, set[str]]] = []
+    for d in domains:
+        kws: set[str] = set()
+        for t in d.get("example_terms", []):
+            kws.update(t.lower().split())
+            kws.add(t.lower())
+        for word in d["label"].lower().split():
+            if len(word) > 3:
+                kws.add(word)
+        for word in d.get("definition", "").lower().split():
+            if len(word) > 4:
+                kws.add(word)
+        domain_keywords.append((d["id"], kws))
+
+    def _classify_term(name: str) -> str | None:
+        name_lower = name.lower()
+        name_tokens = set(name_lower.split())
+        scores: dict[str, int] = {}
+        for did, kws in domain_keywords:
+            score = 0
+            # Full phrase match scores highest
+            if name_lower in kws:
+                score += 5
+            # Token overlap
+            score += len(name_tokens & kws)
+            # Substring match on multi-word example terms
+            for kw in kws:
+                if " " in kw and kw in name_lower:
+                    score += 2
+            scores[did] = score
+        best_id = max(scores, key=lambda d: scores[d])
+        if scores[best_id] > 0:
+            return best_id
+        # No keyword match — fall back to least-populated domain to avoid catch-all
+        # bias (a domain with zero matches shouldn't absorb all unclassified terms)
+        if domain_counts:
+            return min(domain_counts, key=lambda did: domain_counts.get(did, 0))
+        return domains[0]["id"] if domains else None
 
     nodes: list[GraphNode] = []
     conflicts = []
-    default_domain = domains[0]["id"] if domains else "general"
+    domain_counts: dict[str, int] = {d["id"]: 0 for d in domains}
 
     for term in terms_data:
         name = term["name"]
-        domain_a = default_domain
+        domain_id = _classify_term(name)
+        if domain_id is None:
+            continue
+        domain_counts[domain_id] = domain_counts.get(domain_id, 0) + 1
 
         node = GraphNode(
             id=f"n_{name.replace(' ', '_').replace('-', '_')[:40]}",
             name=name,
-            domain=domain_a,
+            domain=domain_id,
             tier=cfg.graph_defaults.node_tier,
             xp=cfg.graph_defaults.node_xp,
             from_source_doc=True,
@@ -274,5 +359,6 @@ async def run(
         "node_count": len(nodes),
         "domain_count": len(domains),
         "conflict_count": len(conflicts),
+        "domain_term_counts": domain_counts,
         "artifact": str(state_dir / "graph.json"),
     })
