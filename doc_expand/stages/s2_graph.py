@@ -10,7 +10,7 @@ import httpx
 from doc_expand.agents.base import make_router
 from doc_expand.agents.schemas import (
     TaxonomyProposal, KnowledgeGraph,
-    GraphNode, GraphEdge, DomainProposal,
+    GraphNode, DomainProposal,
 )
 from doc_expand.config import Config
 from doc_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
@@ -187,37 +187,18 @@ async def run(
     domain_ids = [d["id"] for d in domains]
 
     # --- Phase 2: Classification ---
+    # TODO Phase 6: replace stub with proper TermClassification structured output.
+    # Two parallel classifiers (lumper vs splitter strategy) will vote per-term;
+    # conflicts go into classification_conflicts.json for the audit stage.
     emit({"event": "stage2_phase2_start", "domain_count": len(domains)})
 
-    all_term_names = [t["name"] for t in terms_data]
-    classify_msg = [{
-        "role": "user",
-        "content": _CLASSIFIER_PROMPT.format(
-            domains=json.dumps([{"id": d["id"], "label": d["label"]} for d in domains]),
-            terms=json.dumps(all_term_names),
-        ),
-    }]
-
-    class _ClassificationList(TaxonomyProposal):
-        pass
-
-    # Run two classifiers in parallel (fundamental vs. applied strategy)
-    classify_a, classify_b = await asyncio.gather(
-        router.call(classify_msg, TaxonomyProposal),
-        router.call(classify_msg, TaxonomyProposal),
-    )
-
-    # Build graph nodes from terms, using classifier A as primary
-    classifications_a = {t["name"]: t for t in terms_data}  # fallback
     nodes: list[GraphNode] = []
     conflicts = []
+    default_domain = domains[0]["id"] if domains else "general"
 
     for term in terms_data:
         name = term["name"]
-        # Find classification from agent A's proposal by matching term names
-        domain_a = domains[0]["id"] if domains else "general"
-        domain_b = domains[0]["id"] if domains else "general"
-        # (In Phase 6 this becomes a proper structured output per-term classification)
+        domain_a = default_domain
 
         node = GraphNode(
             id=f"n_{name.replace(' ', '_').replace('-', '_')[:40]}",

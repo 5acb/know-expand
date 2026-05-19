@@ -31,7 +31,7 @@ class RateLimitConfig:
 @dataclass
 class LlamaCppConfig:
     base_url: str = "http://localhost:8080"
-    max_tokens: int = 8192
+    max_tokens: int = 1024
 
 
 @dataclass
