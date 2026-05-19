@@ -176,11 +176,11 @@ def emit(event: dict) -> None:
 def _route_to_log(name: str, ev: dict) -> None:
     """Send event to the Python logger at the appropriate level."""
     error_events = {"domain_failed", "quota_exhausted", "ss_exhausted", "llm_call_error"}
-    warn_events = {"ss_429_retry", "model_auth_skip", "model_quota_switch", "pipeline_paused"}
+    warn_events = {"ss_429_retry", "pipeline_paused"}
     debug_events = {
         "ss_rate_wait", "ss_request", "ss_response",
         "llm_call_start", "chunk_map_start", "chunk_map_cached",
-        "source_refs_skipped",
+        "source_refs_skipped", "model_auth_skip", "model_quota_switch",
     }
 
     if name in error_events:
@@ -252,8 +252,18 @@ def _progress_line(ts: str, name: str, ev: dict) -> str | None:
                 f"retry {ev.get('attempt')}/{ev.get('max_retries')} in {ev.get('sleep_s')}s "
                 f"(global cooldown set)"
             )
+        case "model_probe_done":
+            avail = ev.get("available", [])
+            unavail = ev.get("unavailable", [])
+            parts = [f"available: {', '.join(avail)}"]
+            if unavail:
+                parts.append(f"skipping: {', '.join(unavail)}")
+            return f"{ts}     probe  {' | '.join(parts)}"
         case "llm_call_done":
-            return f"{ts}     LLM [{ev.get('role')}] {ev.get('schema')} done ({ev.get('elapsed_s')}s)"
+            tok_s = ev.get("tok_s")
+            tok_out = ev.get("tok_out")
+            throughput = f"  {tok_out}tok @ {tok_s}tok/s" if tok_s else ""
+            return f"{ts}     LLM [{ev.get('role')}] {ev.get('schema')} done ({ev.get('elapsed_s')}s){throughput}"
         case "llm_call_error":
             return f"{ts}  ✗  LLM [{ev.get('role')}] {ev.get('schema')} error: {ev.get('error')}"
         case "model_auth_skip":
