@@ -90,13 +90,35 @@ def _get_document_context(state_dir: Path) -> str:
     return f"Title: {title}\n\nDocument excerpt:\n{text}"
 
 
-def _get_key_concepts(state_dir: Path) -> list[str]:  # kept for import compat, prefer _identify_key_concepts
+def _get_key_concepts(state_dir: Path) -> list[str]:
+    """Load key concepts from terms.json (produced by S2).
+
+    Sorts core terms first, then supporting, each group by occurrence count.
+    Prefers multi-word phrases and skips very short tokens that make poor
+    interview options.
+    """
     terms_path = state_dir / "terms.json"
     if not terms_path.exists():
         return []
     try:
         terms = json.loads(terms_path.read_text())
-        return [t["name"] for t in sorted(terms, key=lambda t: t.get("occurrence_count", 0), reverse=True)[:15]]
+        # Tier ordering: core → supporting → incidental
+        tier_rank = {"core": 0, "supporting": 1, "incidental": 2}
+        sorted_terms = sorted(
+            terms,
+            key=lambda t: (tier_rank.get(t.get("centrality", "incidental"), 2),
+                           -t.get("occurrence_count", 0)),
+        )
+        result = []
+        for t in sorted_terms:
+            name = t["name"]
+            # Prefer multi-word concepts or meaningful single words (≥5 chars)
+            if " " not in name and len(name) < 5:
+                continue
+            result.append(name)
+            if len(result) >= 20:
+                break
+        return result
     except Exception:
         return []
 
@@ -624,9 +646,18 @@ async def run(state: PipelineState, cfg: Config) -> None:
     else:
         router = make_router("agent", cfg)
 
-        # Identify key concepts from the actual document before the interview starts
-        doc_text = _get_raw_document_text(state_dir)
-        key_concepts = await _identify_key_concepts(doc_text, router)
+        # S2 (extract) now runs before S1, so terms.json already exists with
+        # centrality-ranked concepts. Use it directly — no LLM call needed.
+        # Fall back to LLM extraction only if terms.json is absent (e.g. resume
+        # starting at S1 after clearing S2, or future pipeline variants).
+        key_concepts = _get_key_concepts(state_dir)
+        if not key_concepts:
+            doc_text = _get_raw_document_text(state_dir)
+            key_concepts = await _identify_key_concepts(doc_text, router)
+            emit({"event": "stage1_concepts_from_llm", "key_concept_count": len(key_concepts)})
+        else:
+            emit({"event": "stage1_concepts_from_terms", "key_concept_count": len(key_concepts)})
+
         emit({"event": "stage1_interview_start", "use_web_ipc": use_web_ipc,
               "key_concept_count": len(key_concepts), "key_concepts": key_concepts})
 
