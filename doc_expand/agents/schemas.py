@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -83,23 +85,41 @@ class KnowledgeGraph(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Stage 0.5 — User profile
+# Stage 0.5 — User profile + interview models
 # ---------------------------------------------------------------------------
+
+class InterviewQuestion(BaseModel):
+    text: str
+    question_type: Literal["mc", "open"]  # mc = multiple choice, open = free text
+    options: list[str] = []               # non-empty for mc
+
+
+class InterviewDecision(BaseModel):
+    next_question: InterviewQuestion | None = None  # None means interview is complete
+    reasoning: str = ""                             # internal — why ask this / why done
+    interview_complete: bool = False
+
 
 class UserProfile(BaseModel):
     familiarity_level: str       # novice | aware | practitioner | expert
     background_field: str
-    q3_correct: bool
+    q3_correct: bool = True
     math_comfort: str            # intuition_only | skim | engage | formal
     learning_goal: str           # explain | critique | apply | research
-    q6_response: str
-    q6_known: bool | str         # True | False | "partial"
-    q7_correct: bool | str
+    q6_response: str = ""
+    q6_known: bool | str = "partial"  # True | False | "partial"
+    q7_correct: bool | str = "partial"
     known_concepts: list[str]
     unknown_concepts: list[str]
     effective_depth: str         # survey | standard | deep
     math_mode: str               # intuition | equations_explained | full_derivations
     reading_goal_note: str
+    # Extended profile fields (populated by LLM-driven interview)
+    primary_use_case: str = ""            # what they'll do with this knowledge
+    time_available: str = ""              # "skim" | "study" | "deep_dive"
+    prior_exposure: list[str] = []        # specific techniques/papers they've seen before
+    preferred_analogy_domain: str = ""    # their field — used for cross-domain analogies
+    frustration_points: list[str] = []   # what usually confuses them in this area
 
 
 # ---------------------------------------------------------------------------
