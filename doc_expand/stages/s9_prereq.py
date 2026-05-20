@@ -1,8 +1,9 @@
 """Stage 9 — Prerequisite Threading Agent.
 
-Uses langgraph.prebuilt.create_react_agent to scan all domain sections for
-forward references — concepts used before they are defined — and inserts
-inline primers so a reader never hits an unexplained term.
+Uses a single structured-output call per section (no ReAct loops).
+The LLM reads the section text and returns a PrimerPlan listing primers to
+insert. Python applies the primers deterministically via _apply_patch() from
+s6_align, using "before:<phrase>" position matching.
 """
 
 import json
@@ -11,120 +12,153 @@ import re
 import time
 from pathlib import Path
 
-from langchain_core.tools import tool
-
 from doc_expand.agents.base import make_router
-from doc_expand.agents.lc_adapter import build_react_graph, make_lc_model
+from doc_expand.agents.schemas import PrimerPlan
 from doc_expand.config import Config
 from doc_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
+from doc_expand.stages.s6_align import _apply_patch
 
-_logger = logging.getLogger("doc_expand.s6_5")
-
-_MAX_TOOL_CALLS = 30
+_logger = logging.getLogger("doc_expand.s9_prereq")
 
 _SYSTEM_PROMPT = """\
-You are a prerequisite threading agent. Your mission: ensure that every section \
-of this multi-domain learning document is self-contained — a reader must never \
-encounter a technical term that hasn't been explained yet.
+You are a prerequisite threading agent reviewing one section of a multi-domain document.
+Domain sections in this document: {domain_labels}
+User profile: background={background_field}, unknown_concepts={unknown_concepts}
 
-The document covers {domain_count} domains: {domain_labels}.
+Section text ({section_id}):
+---
+{section_text}
+---
 
-TASK:
-1. Call list_sections to see the document structure.
-2. For each section that seems technically dense, call read_section, then \
-   identify terms used before definition within that section.
-3. For each blocking forward reference, call insert_primer to add a brief \
-   inline explanation.
-4. When done (or budget is low), call finish_threading with a summary.
+Identify terms used before they are defined that would block a reader with this background.
+For each, provide a primer patch:
+- term: the exact term
+- position: "before:<short phrase from the paragraph where term first appears>"
+- primer_text: "**Primer:** [2-4 sentences: what it is, why it exists, one analogy]"
 
-PRIMER RULES:
-- Only add a primer if the term is genuinely opaque to someone with no background.
-  Don't primer common English words or extremely general CS concepts like "array".
-- Keep primers to 2-4 sentences: what the term IS, why it exists, one analogy.
-- A primer enables the reader to continue — it is not a full definition.
-- Never duplicate a primer for the same term in the same section.
-
-BUDGET: you have at most {max_calls} total tool calls across all sections.
-Prioritise the most technical sections and the most blocking forward references.
+Rules:
+- Only primer genuinely opaque technical terms. Skip common words, obvious concepts.
+- Do not primer terms from unknown_concepts that are already explained in the section.
+- Max 5 primers per section.
+- section_id must match the section id provided above.
 """
 
 
-def _make_tools(sections_dir: Path) -> list:
-    """Create tool functions closed over sections_dir."""
+def _load_user_profile(state_dir: Path) -> dict:
+    """Load user_profile.json; return empty dict on any error."""
+    path = state_dir / "user_profile.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
 
-    @tool
-    def list_sections() -> str:
-        """List all available section files and their opening headings.
-        Call this first to understand the document structure."""
-        files = sorted(sections_dir.glob("section_*.md"))
-        if not files:
-            return "No section files found."
-        lines = []
-        for f in files:
-            sid = f.stem[len("section_"):]
-            text = f.read_text()
-            heading = next((ln.lstrip("#").strip() for ln in text.splitlines() if ln.startswith("#")), "(no heading)")
-            lines.append(f"{sid}: {heading}")
-        return "\n".join(lines)
 
-    @tool
-    def read_section(section_id: str) -> str:
-        """Read the full text of a named section."""
-        path = sections_dir / f"section_{section_id}.md"
-        if not path.exists():
-            return f"Section not found: {section_id}"
-        text = path.read_text()
-        if len(text) > 10000:
-            text = text[:10000] + f"\n\n... [truncated, {len(text)} chars total]"
-        return text
+def _insert_primer_by_position(section_path: Path, term: str, position: str, primer_text: str) -> str:
+    """Insert a primer blockquote using the position string from PrimerPatch.
 
-    @tool
-    def insert_primer(section_id: str, term: str, primer_text: str) -> str:
-        """Insert a short inline primer for a term, placed as a Markdown blockquote
-        immediately before the paragraph that first uses the term.
-        primer_text should be 2-4 plain-English sentences — the "> **Primer:**" prefix
-        is added automatically. Never include it in primer_text."""
-        path = sections_dir / f"section_{section_id}.md"
-        if not path.exists():
-            return f"Section not found: {section_id}"
+    If position is "before:<phrase>", delegates to _apply_patch.
+    Otherwise falls back to term-based paragraph insertion.
+    """
+    if not section_path.exists():
+        return f"Section file not found: {section_path}"
 
-        existing = path.read_text()
-        marker = f"> **Primer:** *{term}*"
-        if marker.lower() in existing.lower():
-            return f"Primer for '{term}' already exists in section '{section_id}' — skipped."
+    existing = section_path.read_text()
 
-        # Find the first occurrence of the term (case-insensitive)
-        m = re.search(re.escape(term), existing, re.IGNORECASE)
-        if m is None:
-            return f"Term '{term}' not found in section '{section_id}'."
+    # Deduplicate: don't insert a primer for the same term twice
+    marker = f"> **Primer:**"
+    term_marker = f"*{term}*"
+    if marker.lower() in existing.lower() and term_marker.lower() in existing.lower():
+        return f"Primer for '{term}' already exists — skipped."
 
-        # Find the start of the paragraph containing the first use
-        para_break = existing.rfind("\n\n", 0, m.start())
-        para_start = para_break + 2 if para_break != -1 else 0
+    # Format the primer block (blockquote style matching old insert_primer tool)
+    primer_block = f"> **Primer:** *{term}* — {primer_text.strip()}\n\n"
 
-        primer_block = f"{marker} — {primer_text.strip()}\n\n"
-        new_text = existing[:para_start] + primer_block + existing[para_start:]
-        path.write_text(new_text)
+    if position.startswith("before:"):
+        # Use _apply_patch with the before:<phrase> position
+        # Write primer_block content (strip trailing \n\n for _apply_patch which adds spacing)
+        content_for_patch = primer_block.rstrip("\n")
+        result = _apply_patch(section_path, position, content_for_patch)
+        return result
 
+    # Fallback: find first occurrence of the term in the text
+    m = re.search(re.escape(term), existing, re.IGNORECASE)
+    if m is None:
+        return f"Term '{term}' not found in section."
+
+    para_break = existing.rfind("\n\n", 0, m.start())
+    para_start = para_break + 2 if para_break != -1 else 0
+    new_text = existing[:para_start] + primer_block + existing[para_start:]
+    section_path.write_text(new_text)
+    return f"Primer for '{term}' inserted (term-search fallback)."
+
+
+# ---------------------------------------------------------------------------
+# Per-section structured call
+# ---------------------------------------------------------------------------
+
+async def _thread_section(
+    section_id: str,
+    sections_dir: Path,
+    domain_labels: str,
+    background_field: str,
+    unknown_concepts: list[str],
+    router,
+) -> int:
+    """Process one section. Returns number of primers inserted."""
+    section_path = sections_dir / f"section_{section_id}.md"
+    if not section_path.exists():
+        emit({"event": "s9_prereq_section_missing", "section_id": section_id})
+        return 0
+
+    raw_text = section_path.read_text()
+    section_text = raw_text[:8000]
+    if len(raw_text) > 8000:
+        section_text += f"\n\n... [truncated, {len(raw_text)} chars total]"
+
+    system = _SYSTEM_PROMPT.format(
+        domain_labels=domain_labels,
+        background_field=background_field or "general",
+        unknown_concepts=", ".join(unknown_concepts) if unknown_concepts else "none listed",
+        section_id=section_id,
+        section_text=section_text,
+    )
+    messages: list[dict] = [{"role": "system", "content": system}]
+
+    t0 = time.monotonic()
+    try:
+        plan: PrimerPlan = await router.call(messages, PrimerPlan)
+    except Exception as exc:
+        emit({
+            "event": "s9_prereq_section_error",
+            "section_id": section_id,
+            "error": str(exc)[:200],
+            "elapsed_s": round(time.monotonic() - t0, 2),
+        })
+        return 0
+
+    primers_inserted = 0
+    for patch in plan.primers:
+        result = _insert_primer_by_position(
+            section_path, patch.term, patch.position, patch.primer_text
+        )
+        if "already exists" not in result and "not found" not in result.lower():
+            primers_inserted += 1
         emit({
             "event": "s6_5_primer_inserted",
             "section_id": section_id,
-            "term": term,
+            "term": patch.term,
+            "result": result,
         })
-        return f"Primer for '{term}' inserted in section '{section_id}'."
 
-    @tool
-    def finish_threading(primers_inserted: int, sections_processed: list[str] | None = None) -> str:
-        """Signal that prerequisite threading is complete.
-        Call when all forward references have been addressed or budget is nearly exhausted."""
-        emit({
-            "event": "s6_5_finish",
-            "primers_inserted": primers_inserted,
-            "sections_processed": sections_processed or [],
-        })
-        return "THREADING_COMPLETE"
-
-    return [list_sections, read_section, insert_primer, finish_threading]
+    emit({
+        "event": "s9_prereq_section_done",
+        "section_id": section_id,
+        "primers_inserted": primers_inserted,
+        "elapsed_s": round(time.monotonic() - t0, 2),
+    })
+    return primers_inserted
 
 
 # ---------------------------------------------------------------------------
@@ -148,61 +182,49 @@ async def run(state: PipelineState, cfg: Config) -> None:
 
     taxonomy = json.loads((state_dir / "taxonomy.json").read_text())
     domains = taxonomy["domains"]
-    domain_count = len(domains)
     domain_labels = ", ".join(d["label"] for d in domains)
 
+    profile = _load_user_profile(state_dir)
+    background_field = profile.get("background_field", "")
+    unknown_concepts: list[str] = profile.get("unknown_concepts", [])
+
     router = make_router("agent", cfg)
-    lc_model = make_lc_model(router)
-    tools = _make_tools(sections_dir)
-
-    system = _SYSTEM_PROMPT.format(
-        domain_count=domain_count,
-        domain_labels=domain_labels,
-        max_calls=_MAX_TOOL_CALLS,
-    )
-
-    agent = build_react_graph(
-        lc_model,
-        tools=tools,
-        system_prompt=system,
-        recursion_limit=_MAX_TOOL_CALLS * 2 + 2,
-    )
 
     t0 = time.monotonic()
-    primers_inserted = 0
-    try:
-        result = await agent.ainvoke(
-            {
-                "messages": [
-                    (
-                        "user",
-                        "Please thread prerequisites through the document now. "
-                        "Start by listing sections, then identify and fix forward references.",
-                    )
-                ]
-            },
-        )
-        # Count primer insertions from events (approximate via message scan)
-        msgs = result.get("messages", [])
-        primers_inserted = sum(
-            1 for m in msgs
-            if hasattr(m, "content") and "Primer for" in str(m.content) and "inserted" in str(m.content)
-        )
-        emit({
-            "event": "s6_5_agent_complete",
-            "reason": "agent_done",
-            "elapsed_s": round(time.monotonic() - t0, 2),
-        })
-    except Exception as exc:
-        emit({
-            "event": "s6_5_agent_error",
-            "error": str(exc)[:200],
-            "elapsed_s": round(time.monotonic() - t0, 2),
-        })
+    total_primers = 0
+    sections_processed = []
+
+    section_files = sorted(sections_dir.glob("section_*.md"))
+    for sf in section_files:
+        section_id = sf.stem[len("section_"):]
+        try:
+            n = await _thread_section(
+                section_id=section_id,
+                sections_dir=sections_dir,
+                domain_labels=domain_labels,
+                background_field=background_field,
+                unknown_concepts=unknown_concepts,
+                router=router,
+            )
+            total_primers += n
+            sections_processed.append(section_id)
+        except Exception as exc:
+            emit({
+                "event": "s9_prereq_section_failed",
+                "section_id": section_id,
+                "error": str(exc)[:200],
+            })
+
+    emit({
+        "event": "s6_5_finish",
+        "primers_inserted": total_primers,
+        "sections_processed": sections_processed,
+    })
 
     mark_stage_complete(state_dir, 9)
     emit({
         "event": "stage_complete",
         "stage": 9,
-        "primers_inserted": primers_inserted,
+        "primers_inserted": total_primers,
+        "elapsed_s": round(time.monotonic() - t0, 2),
     })

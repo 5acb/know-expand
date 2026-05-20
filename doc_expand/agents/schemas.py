@@ -246,6 +246,37 @@ class CitationAuditResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Stage 6 (align) — Structured-output models
+# ---------------------------------------------------------------------------
+
+class PedagogicalPatch(BaseModel):
+    position: str       # "end" | "start" | "after_intro" | "before:<heading>" | "after:<heading>"
+    content: str
+    checklist_item: str  # which checklist item this satisfies
+
+
+class AlignmentPlan(BaseModel):
+    patches: list[PedagogicalPatch]
+    search_queries: list[str]  # SS queries for NEEDS_CITATION or Where-to-Go-Next
+    checklist: dict            # {what_is_section, symbol_tables, worked_examples, where_to_go_next, citations_resolved}
+
+
+# ---------------------------------------------------------------------------
+# Stage 9 (prereq) — Structured-output models
+# ---------------------------------------------------------------------------
+
+class PrimerPatch(BaseModel):
+    term: str
+    position: str       # "before:<short phrase from paragraph where term first appears>"
+    primer_text: str    # 2-4 sentence blockquote primer
+
+
+class PrimerPlan(BaseModel):
+    section_id: str
+    primers: list[PrimerPatch]
+
+
+# ---------------------------------------------------------------------------
 # Stage 7 — Assemble
 # ---------------------------------------------------------------------------
 

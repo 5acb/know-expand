@@ -61,6 +61,11 @@ async def _prompt_taxonomy(
     Falls back to auto-merge if stdin is not a TTY.
     """
     if not sys.stdin.isatty():
+        emit({
+            "event": "stage3_headless_fallback",
+            "reason": "no TTY — taxonomy review skipped, auto-merging",
+            "recommendation": "pass --auto-taxonomy to suppress, or attach a TTY for interactive review",
+        })
         return await _auto_merge(lumper, splitter, issues, router, cfg)
 
     _print_proposal("Lumper  — broad domains", lumper)
