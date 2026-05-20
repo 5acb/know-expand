@@ -316,6 +316,18 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
              padding: 6px 10px; color: var(--text); font-size: 12px; width: 100%; outline: none; }
 .rf-check { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
 .rf-check input { accent-color: var(--accent); }
+.resume-info { font-size: 11px; font-family: var(--font-mono); color: var(--text);
+               background: var(--surface); border: 1px solid var(--border);
+               border-radius: 4px; padding: 7px 9px; margin-bottom: 6px;
+               line-height: 1.7; }
+.resume-info .ri-good { color: var(--green); }
+.resume-info .ri-warn { color: var(--yellow); }
+.resume-info .ri-path { color: var(--muted); font-size: 10px; word-break: break-all; }
+.resume-toggle { display: flex; gap: 4px; }
+.resume-btn { flex: 1; background: var(--surface); border: 1px solid var(--border);
+              color: var(--muted); border-radius: 4px; padding: 5px 0; font-size: 11px;
+              font-weight: 600; cursor: pointer; font-family: var(--font-mono); }
+.resume-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 #run-start-btn { background: var(--accent); color: #fff; border: none; border-radius: 4px;
                  padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer; width: 100%; margin-top: 4px; }
 #run-start-btn:hover { filter: brightness(1.1); }
@@ -507,10 +519,16 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
           <input type="checkbox" id="run-no-pdf" checked />
           Skip PDF render
         </label>
-        <label class="rf-check">
-          <input type="checkbox" id="run-resume" />
-          Resume (keep completed stages)
-        </label>
+        <!-- Resume status card (populated by JS from /api/status) -->
+        <div id="resume-card" style="display:none">
+          <div class="rf-label">Prior run</div>
+          <div id="resume-info" class="resume-info"></div>
+          <div id="resume-toggle" class="resume-toggle">
+            <button id="resume-btn-fresh" class="resume-btn active" onclick="setResumeMode(false)">Fresh run</button>
+            <button id="resume-btn-resume" class="resume-btn" onclick="setResumeMode(true)">Resume</button>
+          </div>
+        </div>
+        <input type="hidden" id="run-resume" value="0" />
 
         <!-- Models & Keys collapsible -->
         <div class="mk-section">
@@ -1003,6 +1021,7 @@ async function poll() {
       _stateDir = s.state_dir || '';
       $('run-label').textContent = s.run_id || '';
       $('top-status').textContent = s.summary || '';
+      updateResumeCard(s.stages || {}, s.input_path || '', s.run_id || '');
       // Auto-switch to all-events when pipeline first starts
       if (s.pipeline_running && !wasRunning && selectedView !== 'all-events') {
         $('sl-all-events').click();
@@ -1054,6 +1073,50 @@ setInterval(poll, 2000);
     });
   } catch {}
 })();
+
+const STAGE_NAMES_SHORT = {
+  '0':'Ingest','1':'Assess','2':'Extract','3':'Graph','4':'Audit',
+  '5':'Research','6':'Align','7':'Synth','8':'Verify','9':'Prereq','10':'Assemble'
+};
+
+function updateResumeCard(stages, inputPath, runId) {
+  const card = $('resume-card');
+  const completedIds = Object.entries(stages)
+    .filter(([,v]) => v.status === 'complete')
+    .map(([k]) => k)
+    .sort((a,b) => +a - +b);
+
+  if (completedIds.length === 0) {
+    card.style.display = 'none';
+    $('run-resume').value = '0';
+    return;
+  }
+
+  card.style.display = 'block';
+
+  // Health check: any error stages?
+  const errorIds = Object.entries(stages)
+    .filter(([,v]) => v.status === 'error')
+    .map(([k]) => k);
+  const healthy = errorIds.length === 0;
+
+  const completedNames = completedIds.map(id => STAGE_NAMES_SHORT[id] || ('S'+id));
+  const statusIcon = healthy ? '<span class="ri-good">✓ resumable</span>'
+                             : '<span class="ri-warn">⚠ errors present</span>';
+  const inputSnippet = inputPath
+    ? `<div class="ri-path">${inputPath}</div>` : '';
+  const runSnippet = runId ? `<div class="ri-path">run: ${runId}</div>` : '';
+
+  $('resume-info').innerHTML =
+    `${statusIcon} &nbsp;${completedIds.length}/11 stages done &nbsp;(${completedNames.join(', ')})`
+    + inputSnippet + runSnippet;
+}
+
+function setResumeMode(doResume) {
+  $('run-resume').value = doResume ? '1' : '0';
+  $('resume-btn-fresh').classList.toggle('active', !doResume);
+  $('resume-btn-resume').classList.toggle('active', doResume);
+}
 
 function updateRunActiveInfo() {
   const el = $('run-active-info');
@@ -1265,7 +1328,7 @@ async function startRun() {
   const depth = $('run-depth').value;
   const autoTax = $('run-auto-tax').checked;
   const noPdf = $('run-no-pdf').checked;
-  const resume = $('run-resume').checked;
+  const resume = $('run-resume').value === '1';
 
   const apiKeys = {
     anthropic: $('key-anthropic').value.trim(),
@@ -1589,6 +1652,7 @@ def _load_state(state_dir: Path) -> dict:
             data = json.loads(pipeline_path.read_text())
             result["stages"] = data.get("stages", {})
             result["run_id"] = data.get("run_id", "")
+            result["input_path"] = data.get("input_path", "") or data.get("input", "")
         except Exception:
             pass
 
