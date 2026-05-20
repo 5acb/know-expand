@@ -1349,11 +1349,16 @@ function onCustomModelInput(val) {
 async function startRun() {
   const isResume = $('run-resume').value === '1';
   const input = isResume ? _resumeInputPath : $('run-input').value.trim();
-  if (!input) { $('run-input').focus(); return; }
-  const depth = $('run-depth').value;
-  const autoTax = $('run-auto-tax').checked;
-  const noPdf = $('run-no-pdf').checked;
-  const resume = $('run-resume').value === '1';
+  if (!input) {
+    if (!isResume) $('run-input').focus();
+    return;
+  }
+  // In resume mode depth/autoTax/noPdf come from the prior run — pass
+  // sensible defaults; the pipeline already has them baked into state.
+  const depth = isResume ? 'standard' : $('run-depth').value;
+  const autoTax = isResume ? true : $('run-auto-tax').checked;
+  const noPdf = isResume ? true : $('run-no-pdf').checked;
+  const resume = isResume;
 
   const apiKeys = {
     anthropic: $('key-anthropic').value.trim(),
@@ -1386,7 +1391,7 @@ async function startRun() {
     $('sl-all-events').click();
   } catch(e) {
     $('run-start-btn').disabled = false;
-    $('run-start-btn').textContent = '▶ Start Run';
+    $('run-start-btn').textContent = isResume ? '▶ Resume Run' : '▶ Start Run';
   }
 }
 
