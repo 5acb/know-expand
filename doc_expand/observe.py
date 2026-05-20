@@ -9,6 +9,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -149,6 +150,10 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
 .topbar-spacer { flex: 1; }
 .top-status { font-size: 11px; color: var(--muted); font-family: var(--font-mono); }
+#stop-btn { display: none; background: #3a1a1a; border: 1px solid var(--red); color: var(--red);
+            border-radius: 3px; padding: 3px 10px; font-size: 11px; font-weight: 600;
+            cursor: pointer; font-family: var(--font-mono); }
+#stop-btn:hover { background: var(--red); color: #fff; }
 
 /* main split */
 #main { flex: 1; overflow: hidden; display: flex; }
@@ -165,6 +170,10 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
           width: 22px; flex-shrink: 0; text-align: right; }
 .sl-name { flex: 1; font-size: 12px; font-weight: 500; }
 .sl-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+.sl-clear { color: var(--border); font-size: 14px; line-height: 1; cursor: pointer;
+            flex-shrink: 0; padding: 0 1px; transition: color .1s; }
+.sl-item:hover .sl-clear { color: var(--muted); }
+.sl-clear:hover { color: var(--red) !important; }
 .sl-dot.done { background: var(--green); }
 .sl-dot.running { background: var(--green); animation: blink 1.4s infinite; }
 .sl-dot.skipped { background: var(--accent); }
@@ -387,6 +396,7 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
   <h1>doc-expand</h1>
   <span class="run-id" id="run-label">—</span>
   <span class="topbar-spacer"></span>
+  <button id="stop-btn" onclick="stopRun()">■ Stop</button>
   <span class="top-status" id="top-status">loading…</span>
 </div>
 
@@ -542,15 +552,23 @@ let stageArtifacts = {};  // cache { [stageId]: artifact data }
 function renderStageList(stages) {
   stageData = stages;
   const container = $('sl-stages');
+  const anyRunning = Object.values(stages).some(s => s.status === 'running');
+  $('stop-btn').style.display = anyRunning ? 'inline-block' : 'none';
+
   container.innerHTML = STAGE_ORDER.map(sid => {
     const s = stages[sid] || {};
     const status = s.status || 'pending';
     const dotCls = {complete:'done', running:'running', error:'error', skipped:'skipped'}[status] || '';
     const active = selectedView === sid ? ' active' : '';
+    const canClear = status === 'complete' || status === 'error' || status === 'skipped';
+    const clearBtn = canClear
+      ? `<span class="sl-clear" onclick="event.stopPropagation();clearStage('${sid}')" title="Clear stage">×</span>`
+      : `<span class="sl-clear" style="visibility:hidden">×</span>`;
     return `<div class="sl-item${active}" data-stage="${sid}" onclick="selectStage('${sid}')">
       <span class="sl-num">S${sid}</span>
       <span class="sl-name">${STAGE_NAMES[sid]}</span>
       <span class="sl-dot ${dotCls}"></span>
+      ${clearBtn}
     </div>`;
   }).join('');
 
@@ -976,6 +994,21 @@ setInterval(poll, 2000);
     });
   } catch {}
 })();
+
+// ── Stop / clear ─────────────────────────────────────────────────────────
+async function stopRun() {
+  await fetch('/api/stop', {method: 'POST'});
+  lastStatusEtag = '';
+  $('stop-btn').style.display = 'none';
+}
+
+async function clearStage(sid) {
+  await fetch(`/api/stage/${sid}/clear`, {method: 'POST'});
+  delete stageArtifacts[sid];
+  lastStatusEtag = '';
+  // If we're viewing this stage, refresh header
+  if (selectedView === sid) renderDetailHeader(sid);
+}
 
 // ── Run pane ──────────────────────────────────────────────────────────────────
 let runPaneMode = 'setup'; // 'setup' | 'qa' | 'running'
@@ -1862,6 +1895,7 @@ def _spawn_pipeline(state_dir: Path, params: dict) -> int:
         stderr=subprocess.DEVNULL,
         env=env,
     )
+    (state_dir / "pipeline_pid").write_text(str(proc.pid))
     return proc.pid
 
 
@@ -2002,6 +2036,44 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
             if self.path == "/api/run":
                 pid = _spawn_pipeline(state_dir, data)
                 payload = json.dumps({"ok": True, "pid": pid}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            elif self.path == "/api/stop":
+                killed = False
+                pid_file = state_dir / "pipeline_pid"
+                if pid_file.exists():
+                    try:
+                        pid = int(pid_file.read_text().strip())
+                        os.killpg(os.getpgid(pid), signal.SIGTERM)
+                        killed = True
+                    except Exception:
+                        pass
+                    try:
+                        pid_file.unlink()
+                    except Exception:
+                        pass
+                payload = json.dumps({"ok": True, "killed": killed}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            elif self.path.startswith("/api/stage/") and self.path.endswith("/clear"):
+                sid = self.path[len("/api/stage/"):-len("/clear")]
+                pipeline_path = state_dir / "pipeline.json"
+                if sid and pipeline_path.exists():
+                    try:
+                        pipe = json.loads(pipeline_path.read_text())
+                        pipe.setdefault("stages", {}).pop(str(sid), None)
+                        pipeline_path.write_text(json.dumps(pipe, indent=2))
+                    except Exception:
+                        pass
+                payload = json.dumps({"ok": True}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(payload)))
