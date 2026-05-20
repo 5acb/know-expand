@@ -333,6 +333,10 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
               color: var(--muted); white-space: nowrap; }
 .model-chip:hover { border-color: var(--accent); color: var(--accent); }
 .model-chip.active { border-color: var(--accent); color: var(--accent); background: #1a2a3a; }
+.provider-section { border: 1px solid var(--border); border-radius: 4px; overflow: hidden; margin-bottom: 5px; }
+.provider-section-hdr { background: var(--surface2); padding: 3px 8px; font-size: 9px; color: var(--muted);
+                        font-family: var(--font-mono); text-transform: uppercase; letter-spacing: .09em; font-weight: 600; }
+.provider-section-chips { padding: 6px 8px; display: flex; flex-wrap: wrap; gap: 4px; }
 /* file browser */
 .rf-input-row { display: flex; gap: 5px; align-items: center; }
 .rf-input-row .rf-input { flex: 1; }
@@ -493,9 +497,12 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
             </div>
             <div class="mk-divider"></div>
             <div class="rf-label">Primary model (first tried for all roles)</div>
-            <div id="model-chips-container" class="model-chips">
+            <div id="provider-sections">
               <span style="color:var(--muted);font-size:11px">loading…</span>
             </div>
+            <input class="rf-input" id="custom-model-input" placeholder="or type any model ID…"
+                   style="font-size:11px;padding:5px 8px;margin-top:2px"
+                   oninput="onCustomModelInput(this.value)" />
           </div>
         </div>
 
@@ -982,7 +989,7 @@ function toggleMkPanel() {
   mkOpen = !mkOpen;
   $('mk-body').classList.toggle('collapsed', !mkOpen);
   $('mk-chevron').classList.toggle('open', mkOpen);
-  if (mkOpen && $('model-chips-container').children.length <= 1) loadModels();
+  if (mkOpen && $('provider-sections').children.length <= 1) loadModels();
 }
 
 function toggleKeyVis(id) {
@@ -999,28 +1006,61 @@ async function loadModels() {
   try {
     const r = await fetch('/api/models');
     const d = await r.json();
-    const container = $('model-chips-container');
+
+    // Pre-green dots for keys already set in server env
+    if (d.keys_set) {
+      ['anthropic', 'openai', 'gemini'].forEach(p => {
+        if (d.keys_set[p]) $('dot-' + p).classList.add('set');
+      });
+    }
+
+    const container = $('provider-sections');
     container.innerHTML = '';
 
-    // "auto" chip — no override
+    // "auto" chip at top (no model override)
+    const autoRow = document.createElement('div');
+    autoRow.style.cssText = 'padding-bottom:5px';
     const auto = document.createElement('span');
     auto.className = 'model-chip active';
     auto.textContent = 'auto';
     auto.dataset.model = '';
     auto.onclick = () => selectModel('', auto);
-    container.appendChild(auto);
+    autoRow.appendChild(auto);
+    container.appendChild(autoRow);
 
+    const PROVIDER_LABEL = {anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Google Gemini'};
+
+    // Group by provider (order preserved by server sort)
+    const sections = {};
+    const order = [];
     for (const m of d.models) {
-      const chip = document.createElement('span');
-      chip.className = 'model-chip';
-      chip.textContent = m.label;
-      chip.title = m.id;
-      chip.dataset.model = m.id;
-      chip.onclick = () => selectModel(m.id, chip);
-      container.appendChild(chip);
+      if (!sections[m.provider]) { sections[m.provider] = []; order.push(m.provider); }
+      sections[m.provider].push(m);
+    }
+
+    for (const prov of order) {
+      const section = document.createElement('div');
+      section.className = 'provider-section';
+      const hdr = document.createElement('div');
+      hdr.className = 'provider-section-hdr';
+      hdr.textContent = PROVIDER_LABEL[prov] || prov;
+      section.appendChild(hdr);
+      const chips = document.createElement('div');
+      chips.className = 'provider-section-chips';
+      for (const m of sections[prov]) {
+        const chip = document.createElement('span');
+        chip.className = 'model-chip';
+        chip.textContent = m.label;
+        chip.title = m.id;
+        chip.dataset.model = m.id;
+        chip.onclick = () => selectModel(m.id, chip);
+        chips.appendChild(chip);
+      }
+      section.appendChild(chips);
+      container.appendChild(section);
     }
   } catch(e) {
-    $('model-chips-container').innerHTML = '<span style="color:var(--muted);font-size:11px">unavailable</span>';
+    $('provider-sections').innerHTML = '<span style="color:var(--muted);font-size:11px">unavailable</span>';
   }
 }
 
@@ -1028,6 +1068,20 @@ function selectModel(modelId, chipEl) {
   selectedModel = modelId || null;
   document.querySelectorAll('.model-chip').forEach(c => c.classList.remove('active'));
   chipEl.classList.add('active');
+  if (modelId !== '') $('custom-model-input').value = '';
+}
+
+function onCustomModelInput(val) {
+  val = val.trim();
+  if (val) {
+    selectedModel = val;
+    document.querySelectorAll('.model-chip').forEach(c => c.classList.remove('active'));
+  } else {
+    // revert to auto
+    selectedModel = null;
+    const autoChip = document.querySelector('.model-chip[data-model=""]');
+    if (autoChip) autoChip.classList.add('active');
+  }
 }
 
 async function startRun() {
@@ -1612,21 +1666,109 @@ def _render_section(section_path: Path) -> str:
         return "<pre>" + _h.escape(text) + "</pre>"
 
 
-def _known_models() -> list[dict]:
-    """Curated list of models available for the primary-model picker."""
-    return [
-        # Anthropic
-        {"id": "claude-opus-4-7",      "label": "Opus 4.7",        "provider": "anthropic"},
-        {"id": "claude-sonnet-4-6",    "label": "Sonnet 4.6",      "provider": "anthropic"},
-        {"id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5",  "provider": "anthropic"},
-        # OpenAI
-        {"id": "gpt-4o",               "label": "GPT-4o",          "provider": "openai"},
-        {"id": "gpt-4o-mini",          "label": "GPT-4o mini",     "provider": "openai"},
-        {"id": "o3-mini",              "label": "o3-mini",         "provider": "openai"},
-        # Google
-        {"id": "gemini/gemini-2.5-pro","label": "Gemini 2.5 Pro",  "provider": "gemini"},
-        {"id": "gemini/gemini-2.0-flash","label": "Gemini 2.0 Flash","provider": "gemini"},
-    ]
+_models_cache: list[dict] | None = None
+_models_cache_ts: float = 0.0
+_MODELS_CACHE_TTL = 3600.0  # 1 hour
+_LITELLM_PRICES_URL = (
+    "https://raw.githubusercontent.com/BerriAI/litellm/main"
+    "/model_prices_and_context_window.json"
+)
+
+# Prefixes that map a model id → provider key.
+# Ordered so longer/more-specific prefixes match first.
+_PROVIDER_PREFIXES: list[tuple[str, str]] = [
+    ("claude-",          "anthropic"),
+    ("anthropic/",       "anthropic"),
+    ("gpt-",             "openai"),
+    ("o1",               "openai"),
+    ("o3",               "openai"),
+    ("o4",               "openai"),
+    ("openai/",          "openai"),
+    ("gemini/",          "gemini"),
+    ("google/",          "gemini"),
+]
+
+# Substrings that disqualify a model
+_BLOCKLIST = (
+    "vision", "embed", "audio", "tts", "whisper", "dall-e",
+    "instruct", "realtime", "search", "computer-use",
+    "image-generation", "container",
+    "gpt-3.5",                    # too old
+    "gpt-4-0",                    # dated GPT-4 snapshots (gpt-4-0314, gpt-4-0613)
+    "gpt-4-3",                    # gpt-4-32k variants
+    "gpt-4-vision",
+    "1106-preview", "0125-preview", "turbo-preview", "gpt-4-preview",
+    "robotics", "learnlm", "lyria", "gemma",  # non-chat Gemini models
+    "/gemini-exp-",                            # experimental snapshot variants
+)
+
+import re as _re
+_DATE_SUFFIX = _re.compile(r'(-\d{8}|-\d{4}-\d{2}-\d{2})$')   # YYYYMMDD or YYYY-MM-DD snapshot suffix
+
+
+def _provider_of(model_id: str) -> str | None:
+    for prefix, provider in _PROVIDER_PREFIXES:
+        if model_id.startswith(prefix):
+            return provider
+    return None
+
+
+def _fetch_litellm_models() -> list[dict]:
+    """Fetch LiteLLM's authoritative model list and return [{id, label, provider}]."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(_LITELLM_PRICES_URL, timeout=8) as r:
+            data: dict = json.loads(r.read().decode())
+    except Exception:
+        return []
+
+    out: list[dict] = []
+    for model_id, meta in data.items():
+        if not isinstance(meta, dict):
+            continue
+        provider = _provider_of(model_id)
+        if provider is None:
+            continue
+        low = model_id.lower()
+        if any(b in low for b in _BLOCKLIST):
+            continue
+        if _DATE_SUFFIX.search(model_id):
+            continue
+        if ":" in model_id:          # Bedrock ARN variants
+            continue
+        # Strip provider prefix for the label
+        label = model_id
+        for prefix, _ in _PROVIDER_PREFIXES:
+            if label.startswith(prefix):
+                label = label[len(prefix):]
+                break
+        # Only keep chat models (excludes embedding, image_generation, audio, etc.)
+        mode = meta.get("mode", "")
+        if mode and mode != "chat":
+            continue
+
+        out.append({"id": model_id, "label": label, "provider": provider})
+
+    # Sort: provider order (anthropic → openai → gemini), then by id
+    order = {"anthropic": 0, "openai": 1, "gemini": 2}
+    out.sort(key=lambda m: (order.get(m["provider"], 9), m["id"]))
+    return out
+
+
+def _get_models() -> list[dict]:
+    global _models_cache, _models_cache_ts
+    now = time.time()
+    if _models_cache is not None and now - _models_cache_ts < _MODELS_CACHE_TTL:
+        return _models_cache
+    fetched = _fetch_litellm_models()
+    if fetched:
+        _models_cache = fetched
+        _models_cache_ts = now
+    elif _models_cache is not None:
+        pass  # keep stale cache on network failure
+    else:
+        _models_cache = []
+    return _models_cache
 
 
 def _list_files(dir_param: str) -> dict:
@@ -1816,7 +1958,12 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
                 _json_response(self, _list_files(dir_param))
 
             elif self.path == "/api/models":
-                _json_response(self, {"models": _known_models()})
+                keys_set = {
+                    "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
+                    "openai":    bool(os.environ.get("OPENAI_API_KEY")),
+                    "gemini":    bool(os.environ.get("GEMINI_API_KEY")),
+                }
+                _json_response(self, {"models": _get_models(), "keys_set": keys_set})
 
             else:
                 self.send_response(404)
