@@ -24,6 +24,7 @@ class CanonicalTerm(BaseModel):
     centrality: str          # core | supporting | incidental
     occurrence_count: int
     in_structural_zones: bool
+    grounded: bool = True    # False if SS title search returned no confident results
 
 
 # ---------------------------------------------------------------------------

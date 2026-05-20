@@ -1,9 +1,11 @@
 import asyncio
 import json
+import logging
 import re
 import time
 from pathlib import Path
 
+import httpx
 import numpy as np
 import spacy
 from keybert import KeyBERT
@@ -11,6 +13,7 @@ from sentence_transformers import SentenceTransformer
 
 from doc_expand.agents.base import make_router
 from doc_expand.agents.schemas import TermInventory, TermOccurrence, CanonicalTerm
+from doc_expand.bibliography import _ss_search, _get_ss_limiter
 from doc_expand.centrality import compute_centrality, BOILERPLATE
 from doc_expand.config import Config
 from doc_expand.state import (
@@ -18,6 +21,8 @@ from doc_expand.state import (
     sentinel_exists, write_sentinel,
 )
 from doc_expand.union_find import UnionFind
+
+_logger = logging.getLogger("doc_expand.s1")
 
 _MAP_PROMPT = """\
 You are a domain expert reading a chunk of a technical document.
@@ -210,6 +215,71 @@ def _clean_term(name: str) -> str | None:
     return name
 
 
+async def _ground_core_terms(
+    terms: list[CanonicalTerm],
+    cfg: Config,
+) -> list[CanonicalTerm]:
+    """Query Semantic Scholar for each core-tier term.
+
+    Terms with zero confident results are demoted to 'supporting' and flagged
+    grounded=False. Skipped entirely if SS is unavailable; pipeline never fails.
+    """
+    core_terms = [t for t in terms if t.centrality == "core"]
+    if not core_terms:
+        return terms
+
+    emit({"event": "s1_concept_grounding_start", "core_term_count": len(core_terms)})
+
+    async def _check_one(term: CanonicalTerm, http: httpx.AsyncClient) -> tuple[str, bool]:
+        """Return (term_name, is_grounded). Catches all errors."""
+        try:
+            results = await _ss_search(term.name, http, cfg, limit=3)
+            return (term.name, bool(results))
+        except Exception as exc:
+            _logger.warning("s1 grounding: SS search failed for %r: %s", term.name, exc)
+            return (term.name, True)  # assume grounded on error — don't demote without evidence
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            # Respect the same rate limiter as bibliography.py — 1 req per interval
+            # _get_ss_limiter ensures the singleton is initialised before concurrent use
+            _get_ss_limiter(cfg)
+            grounding_tasks = [_check_one(t, http) for t in core_terms]
+            results_list = await asyncio.gather(*grounding_tasks, return_exceptions=True)
+    except Exception as exc:
+        _logger.warning("s1 concept grounding: SS unavailable, skipping (%s)", exc)
+        emit({"event": "s1_concept_grounding_skipped", "reason": str(exc)[:120]})
+        return terms
+
+    grounding: dict[str, bool] = {}
+    for item in results_list:
+        if isinstance(item, Exception):
+            continue
+        name, is_grounded = item
+        grounding[name] = is_grounded
+
+    # Apply grounding results to term list
+    updated: list[CanonicalTerm] = []
+    ungrounded_names: list[str] = []
+    for t in terms:
+        is_grounded = grounding.get(t.name, True)
+        if not is_grounded and t.centrality == "core":
+            ungrounded_names.append(t.name)
+            _logger.warning(
+                "s1 concept grounding: demoting %r core→supporting (no SS hits)", t.name
+            )
+            updated.append(t.model_copy(update={"centrality": "supporting", "grounded": False}))
+        else:
+            updated.append(t.model_copy(update={"grounded": is_grounded}))
+
+    emit({
+        "event": "s1_concept_grounding_done",
+        "core_terms_checked": len(core_terms),
+        "ungrounded": ungrounded_names,
+    })
+    return updated
+
+
 def _alias_clusters(
     all_terms: list[TermOccurrence],
     cosine_threshold: float,
@@ -326,6 +396,9 @@ async def run(state: PipelineState, cfg: Config) -> None:
         ))
 
     canonical_terms.sort(key=lambda t: t.occurrence_count, reverse=True)
+
+    # Speculative concept filter: verify core-tier terms exist in SS before committing.
+    canonical_terms = await _ground_core_terms(canonical_terms, cfg)
 
     terms_path = state_dir / "terms.json"
     terms_path.write_text(

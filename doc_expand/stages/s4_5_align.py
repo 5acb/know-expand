@@ -24,7 +24,7 @@ from doc_expand.agents.base import make_router
 from doc_expand.agents.lc_adapter import build_react_graph, make_lc_model
 from doc_expand.bibliography import _ss_search, reset_ss_limiter
 from doc_expand.config import Config
-from doc_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
+from doc_expand.state import PipelineState, atomic_write, emit, mark_stage_complete, stage_is_complete
 
 _logger = logging.getLogger("doc_expand.s4_5")
 
@@ -232,7 +232,7 @@ def _make_tools(
         existing_ids = {e.get("id") for e in existing_bib} | {e.get("paperId") for e in existing_bib}
         if cit_id not in existing_ids and paper_id not in existing_ids:
             existing_bib.append(entry)
-            bib_path.write_text(json.dumps(existing_bib, indent=2))
+            atomic_write(bib_path, json.dumps(existing_bib, indent=2))
         return f"Citation key: {cit_id} — use [@{cit_id}] to cite this paper."
 
     @tool
