@@ -368,6 +368,23 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
 .fb-name.dir { color: var(--accent); }
 .fb-size { font-size: 10px; color: var(--muted); flex-shrink: 0; font-family: var(--font-mono); }
 
+/* Taxonomy review UI */
+#run-taxonomy { display:none; flex-direction:column; flex:1; overflow:hidden; }
+#tax-body { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+.tax-proposal { border:1px solid var(--border); border-radius:5px; overflow:hidden; }
+.tax-proposal-hdr { padding:7px 10px; font-size:11px; font-weight:600;
+                    background:var(--surface2); border-bottom:1px solid var(--border); }
+.tax-domains { padding:8px 10px; display:flex; flex-wrap:wrap; gap:5px; }
+.tax-domain { background:var(--bg); border:1px solid var(--border); border-radius:3px;
+              padding:3px 8px; font-size:10px; font-family:var(--font-mono); color:var(--text); }
+.tax-rationale { padding:0 10px 8px; font-size:11px; color:var(--muted); line-height:1.5; }
+#tax-actions { padding:10px; border-top:1px solid var(--border); display:flex; flex-direction:column; gap:6px; flex-shrink:0; }
+.tax-btn { border:1px solid var(--border); border-radius:4px; padding:7px 12px; font-size:12px;
+           font-weight:600; cursor:pointer; background:var(--surface); color:var(--text); text-align:left; }
+.tax-btn:hover { border-color:var(--accent); color:var(--accent); }
+.tax-btn.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+.tax-btn.primary:hover { filter:brightness(1.1); }
+
 /* Chat UI */
 #chat-messages { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 .chat-msg { display: flex; flex-direction: column; gap: 4px; }
@@ -530,6 +547,16 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
 
         <button id="run-start-btn" onclick="startRun()">▶ Start Run</button>
       </div>
+      <!-- mode: taxonomy review -->
+      <div id="run-taxonomy">
+        <div id="tax-body"></div>
+        <div id="tax-actions">
+          <button class="tax-btn primary" onclick="submitTaxonomy('l')">▶ Use Lumper (broad)</button>
+          <button class="tax-btn" onclick="submitTaxonomy('s')">▶ Use Splitter (fine-grained)</button>
+          <button class="tax-btn" onclick="submitTaxonomy('m')">⚙ Auto-merge both</button>
+        </div>
+      </div>
+
       <!-- mode: qa (chat interface) -->
       <div id="run-qa" style="display:none; flex-direction:column; flex:1">
         <div id="chat-messages"></div>
@@ -991,6 +1018,7 @@ async function poll() {
     $('top-status').textContent = 'disconnected';
   }
   await pollQa();
+  await pollTaxonomy();
 }
 
 poll();
@@ -1030,11 +1058,66 @@ let qaHistory = []; // [{question: str, answer: str}]
 function setRunMode(mode) {
   runPaneMode = mode;
   $('run-setup').style.display = mode === 'setup' ? 'flex' : 'none';
+  $('run-taxonomy').style.display = mode === 'taxonomy' ? 'flex' : 'none';
   $('run-qa').style.display = mode === 'qa' ? 'flex' : 'none';
   $('run-active').style.display = mode === 'running' ? 'block' : 'none';
   const badge = $('run-state-badge');
-  badge.className = 'badge ' + {setup:'badge-pending', qa:'badge-running', running:'badge-running'}[mode];
-  badge.textContent = {setup:'idle', qa:'interview', running:'running'}[mode];
+  badge.className = 'badge ' + {setup:'badge-pending', qa:'badge-running',
+                                 taxonomy:'badge-running', running:'badge-running'}[mode];
+  badge.textContent = {setup:'idle', qa:'interview', taxonomy:'review', running:'running'}[mode];
+}
+
+// ── Taxonomy review ───────────────────────────────────────────────────────
+let taxReviewPending = false;
+
+async function pollTaxonomy() {
+  if (runPaneMode !== 'running' && runPaneMode !== 'taxonomy') return;
+  try {
+    const r = await fetch('/api/taxonomy');
+    const d = await r.json();
+    if (d.lumper && !taxReviewPending) {
+      taxReviewPending = true;
+      renderTaxonomyReview(d);
+      setRunMode('taxonomy');
+    } else if (!d.lumper && taxReviewPending) {
+      taxReviewPending = false;
+      setRunMode('running');
+    }
+  } catch {}
+}
+
+function renderTaxonomyReview(d) {
+  const body = $('tax-body');
+  body.innerHTML = '';
+  for (const [key, label] of [['lumper','Lumper — broad domains'], ['splitter','Splitter — fine-grained']]) {
+    const p = d[key] || {};
+    const domains = p.domains || [];
+    const el = document.createElement('div');
+    el.className = 'tax-proposal';
+    el.innerHTML = `
+      <div class="tax-proposal-hdr">${label} · ${domains.length} domains</div>
+      <div class="tax-domains">${domains.map(dm =>
+        `<span class="tax-domain">${dm.label || dm.id}</span>`).join('')}</div>
+      ${p.rationale ? `<div class="tax-rationale">${p.rationale}</div>` : ''}`;
+    body.appendChild(el);
+  }
+  if (d.issues?.length) {
+    const el = document.createElement('div');
+    el.style.cssText = 'font-size:11px;color:var(--yellow);padding:4px 2px';
+    el.textContent = '⚠ Issues: ' + d.issues.join('; ');
+    body.appendChild(el);
+  }
+}
+
+async function submitTaxonomy(choice) {
+  $('tax-actions').querySelectorAll('.tax-btn').forEach(b => b.disabled = true);
+  await fetch('/api/taxonomy/choice', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({choice}),
+  });
+  taxReviewPending = false;
+  setRunMode('running');
 }
 
 // Models & Keys panel
@@ -1901,7 +1984,8 @@ def _list_files(dir_param: str) -> dict:
 
 def _spawn_pipeline(state_dir: Path, params: dict) -> int:
     """Clear Q&A state (and stage markers unless resuming), spawn pipeline subprocess, return PID."""
-    for fname in ("qa_queue.jsonl", "qa_answers.jsonl", "qa_complete"):
+    for fname in ("qa_queue.jsonl", "qa_answers.jsonl", "qa_complete",
+                   "taxonomy_review.json", "taxonomy_choice.json"):
         p = state_dir / fname
         if p.exists():
             p.unlink()
@@ -2065,6 +2149,16 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
             elif self.path == "/api/qa":
                 _json_response(self, _get_qa_state(state_dir))
 
+            elif self.path == "/api/taxonomy":
+                review_path = state_dir / "taxonomy_review.json"
+                if review_path.exists():
+                    try:
+                        _json_response(self, json.loads(review_path.read_text()))
+                    except Exception:
+                        _json_response(self, {})
+                else:
+                    _json_response(self, {})
+
             elif self.path.startswith("/api/files"):
                 from urllib.parse import urlparse, parse_qs
                 qs = parse_qs(urlparse(self.path).query)
@@ -2138,6 +2232,17 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
                         pipeline_path.write_text(json.dumps(pipe, indent=2))
                     except Exception:
                         pass
+                payload = json.dumps({"ok": True}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            elif self.path == "/api/taxonomy/choice":
+                choice = data.get("choice", "l")
+                choice_path = state_dir / "taxonomy_choice.json"
+                choice_path.write_text(json.dumps({"choice": choice}))
                 payload = json.dumps({"ok": True}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
