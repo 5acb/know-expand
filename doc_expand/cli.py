@@ -58,6 +58,10 @@ def main() -> None:
     parser.add_argument("--user-profile", type=Path, metavar="PATH")
     parser.add_argument("--auto-taxonomy", action="store_true")
     parser.add_argument("--no-bibliography-fetch", action="store_true")
+    parser.add_argument(
+        "--primary-model", type=str, default=None, metavar="MODEL",
+        help="Prepend MODEL to all role model lists (e.g. 'claude-sonnet-4-6')",
+    )
 
     # Paths
     parser.add_argument("--output-dir", type=Path, default=Path("output"))
@@ -133,6 +137,7 @@ def main() -> None:
         depth=args.depth,
         cfg=cfg,
         auto_taxonomy=args.auto_taxonomy,
+        primary_model=args.primary_model,
         resume_stage=int(args.resume) if args.resume else None,
     ))
 

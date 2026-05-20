@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import subprocess
 import sys
 import time
@@ -306,6 +307,32 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
                  padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer; width: 100%; margin-top: 4px; }
 #run-start-btn:hover { filter: brightness(1.1); }
 #run-start-btn:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+/* models & keys panel */
+.mk-section { border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+.mk-header { display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+             background: var(--surface); cursor: pointer; user-select: none; font-size: 12px; font-weight: 600; }
+.mk-header:hover { background: var(--surface2); }
+.mk-chevron { font-size: 10px; color: var(--muted); transition: transform .15s; margin-left: auto; }
+.mk-chevron.open { transform: rotate(90deg); }
+.mk-body { display: none; padding: 10px; display: flex; flex-direction: column; gap: 9px; }
+.mk-body.collapsed { display: none; }
+.key-row { display: flex; align-items: center; gap: 5px; }
+.key-row .rf-input { flex: 1; font-size: 11px; padding: 5px 8px; }
+.key-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+.key-dot.set { background: var(--green); }
+.key-eye { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px;
+           padding: 0 3px; flex-shrink: 0; }
+.key-eye:hover { color: var(--text); }
+.mk-divider { height: 1px; background: var(--border); margin: 2px 0; }
+.model-role-row { display: flex; flex-direction: column; gap: 3px; }
+.model-role-label { font-size: 10px; color: var(--muted); font-family: var(--font-mono);
+                    text-transform: uppercase; letter-spacing: .05em; }
+.model-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.model-chip { background: var(--bg); border: 1px solid var(--border); border-radius: 3px;
+              padding: 3px 7px; font-size: 10px; font-family: var(--font-mono); cursor: pointer;
+              color: var(--muted); white-space: nowrap; }
+.model-chip:hover { border-color: var(--accent); color: var(--accent); }
+.model-chip.active { border-color: var(--accent); color: var(--accent); background: #1a2a3a; }
 /* file browser */
 .rf-input-row { display: flex; gap: 5px; align-items: center; }
 .rf-input-row .rf-input { flex: 1; }
@@ -437,6 +464,41 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
           <input type="checkbox" id="run-no-pdf" checked />
           Skip PDF render
         </label>
+
+        <!-- Models & Keys collapsible -->
+        <div class="mk-section">
+          <div class="mk-header" onclick="toggleMkPanel()">
+            <span>⚙</span> Models &amp; Keys
+            <span class="mk-chevron" id="mk-chevron">▶</span>
+          </div>
+          <div class="mk-body collapsed" id="mk-body">
+            <div class="rf-label">API Keys (session only — never stored)</div>
+            <div class="key-row">
+              <span class="key-dot" id="dot-anthropic"></span>
+              <input class="rf-input" id="key-anthropic" type="password" placeholder="Anthropic sk-ant-…"
+                     oninput="updateKeyDot('anthropic')" />
+              <button class="key-eye" onclick="toggleKeyVis('key-anthropic')">👁</button>
+            </div>
+            <div class="key-row">
+              <span class="key-dot" id="dot-openai"></span>
+              <input class="rf-input" id="key-openai" type="password" placeholder="OpenAI sk-…"
+                     oninput="updateKeyDot('openai')" />
+              <button class="key-eye" onclick="toggleKeyVis('key-openai')">👁</button>
+            </div>
+            <div class="key-row">
+              <span class="key-dot" id="dot-gemini"></span>
+              <input class="rf-input" id="key-gemini" type="password" placeholder="Gemini AIza…"
+                     oninput="updateKeyDot('gemini')" />
+              <button class="key-eye" onclick="toggleKeyVis('key-gemini')">👁</button>
+            </div>
+            <div class="mk-divider"></div>
+            <div class="rf-label">Primary model (first tried for all roles)</div>
+            <div id="model-chips-container" class="model-chips">
+              <span style="color:var(--muted);font-size:11px">loading…</span>
+            </div>
+          </div>
+        </div>
+
         <button id="run-start-btn" onclick="startRun()">▶ Start Run</button>
       </div>
       <!-- mode: qa (chat interface) -->
@@ -912,12 +974,74 @@ function setRunMode(mode) {
   badge.textContent = {setup:'idle', qa:'interview', running:'running'}[mode];
 }
 
+// Models & Keys panel
+let mkOpen = false;
+let selectedModel = null;
+
+function toggleMkPanel() {
+  mkOpen = !mkOpen;
+  $('mk-body').classList.toggle('collapsed', !mkOpen);
+  $('mk-chevron').classList.toggle('open', mkOpen);
+  if (mkOpen && $('model-chips-container').children.length <= 1) loadModels();
+}
+
+function toggleKeyVis(id) {
+  const el = $(id);
+  el.type = el.type === 'password' ? 'text' : 'password';
+}
+
+function updateKeyDot(provider) {
+  const val = $('key-' + provider).value.trim();
+  $('dot-' + provider).classList.toggle('set', val.length > 0);
+}
+
+async function loadModels() {
+  try {
+    const r = await fetch('/api/models');
+    const d = await r.json();
+    const container = $('model-chips-container');
+    container.innerHTML = '';
+
+    // "auto" chip — no override
+    const auto = document.createElement('span');
+    auto.className = 'model-chip active';
+    auto.textContent = 'auto';
+    auto.dataset.model = '';
+    auto.onclick = () => selectModel('', auto);
+    container.appendChild(auto);
+
+    for (const m of d.models) {
+      const chip = document.createElement('span');
+      chip.className = 'model-chip';
+      chip.textContent = m.label;
+      chip.title = m.id;
+      chip.dataset.model = m.id;
+      chip.onclick = () => selectModel(m.id, chip);
+      container.appendChild(chip);
+    }
+  } catch(e) {
+    $('model-chips-container').innerHTML = '<span style="color:var(--muted);font-size:11px">unavailable</span>';
+  }
+}
+
+function selectModel(modelId, chipEl) {
+  selectedModel = modelId || null;
+  document.querySelectorAll('.model-chip').forEach(c => c.classList.remove('active'));
+  chipEl.classList.add('active');
+}
+
 async function startRun() {
   const input = $('run-input').value.trim();
   if (!input) { $('run-input').focus(); return; }
   const depth = $('run-depth').value;
   const autoTax = $('run-auto-tax').checked;
   const noPdf = $('run-no-pdf').checked;
+
+  const apiKeys = {
+    anthropic: $('key-anthropic').value.trim(),
+    openai: $('key-openai').value.trim(),
+    gemini: $('key-gemini').value.trim(),
+  };
 
   $('run-start-btn').disabled = true;
   $('run-start-btn').textContent = 'starting…';
@@ -926,7 +1050,11 @@ async function startRun() {
     await fetch('/api/run', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({input, depth, auto_taxonomy: autoTax, no_pdf: noPdf}),
+      body: JSON.stringify({
+        input, depth, auto_taxonomy: autoTax, no_pdf: noPdf,
+        api_keys: apiKeys,
+        primary_model: selectedModel || '',
+      }),
     });
 
     // Invalidate status cache so stage list refreshes
@@ -1484,6 +1612,23 @@ def _render_section(section_path: Path) -> str:
         return "<pre>" + _h.escape(text) + "</pre>"
 
 
+def _known_models() -> list[dict]:
+    """Curated list of models available for the primary-model picker."""
+    return [
+        # Anthropic
+        {"id": "claude-opus-4-7",      "label": "Opus 4.7",        "provider": "anthropic"},
+        {"id": "claude-sonnet-4-6",    "label": "Sonnet 4.6",      "provider": "anthropic"},
+        {"id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5",  "provider": "anthropic"},
+        # OpenAI
+        {"id": "gpt-4o",               "label": "GPT-4o",          "provider": "openai"},
+        {"id": "gpt-4o-mini",          "label": "GPT-4o mini",     "provider": "openai"},
+        {"id": "o3-mini",              "label": "o3-mini",         "provider": "openai"},
+        # Google
+        {"id": "gemini/gemini-2.5-pro","label": "Gemini 2.5 Pro",  "provider": "gemini"},
+        {"id": "gemini/gemini-2.0-flash","label": "Gemini 2.0 Flash","provider": "gemini"},
+    ]
+
+
 def _list_files(dir_param: str) -> dict:
     """Return directory listing for the file browser."""
     try:
@@ -1532,18 +1677,33 @@ def _spawn_pipeline(state_dir: Path, params: dict) -> int:
     depth = params.get("depth", "standard")
     auto_taxonomy = params.get("auto_taxonomy", False)
     no_pdf = params.get("no_pdf", False)
+    primary_model = params.get("primary_model", "").strip()
+    api_keys: dict = params.get("api_keys", {})
 
     args = [input_path, "--state-dir", str(state_dir), "--depth", str(depth)]
     if auto_taxonomy:
         args.append("--auto-taxonomy")
     if no_pdf:
         args.append("--no-pdf")
+    if primary_model:
+        args += ["--primary-model", primary_model]
+
+    env = os.environ.copy()
+    _KEY_MAP = {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai":    "OPENAI_API_KEY",
+        "gemini":    "GEMINI_API_KEY",
+    }
+    for provider, key_val in api_keys.items():
+        if key_val and provider in _KEY_MAP:
+            env[_KEY_MAP[provider]] = key_val
 
     proc = subprocess.Popen(
         cmd + args,
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=env,
     )
     return proc.pid
 
@@ -1654,6 +1814,9 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
                 qs = parse_qs(urlparse(self.path).query)
                 dir_param = qs.get("dir", ["."])[0]
                 _json_response(self, _list_files(dir_param))
+
+            elif self.path == "/api/models":
+                _json_response(self, {"models": _known_models()})
 
             else:
                 self.send_response(404)
