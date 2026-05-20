@@ -1968,6 +1968,10 @@ def _post_answer(state_dir: Path, qid: str, answer: str) -> None:
 
 
 def cmd_serve(state_dir: Path, port: int = 7842) -> None:
+    # Auto-reap any child processes (pipeline subprocesses) so they don't
+    # accumulate as zombies when they exit.
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+
     import hashlib
 
     def _etag(data: bytes) -> str:
