@@ -74,10 +74,31 @@ def _topo_sort_domains_with_nodes(
 # Bibliography merge
 # ---------------------------------------------------------------------------
 
+def _sanitize_bib_entry(entry: dict) -> dict:
+    """
+    Remove null values and ensure required CSL-JSON fields are present.
+    pandoc citeproc rejects entries that have null for string/number fields.
+    """
+    cleaned = {k: v for k, v in entry.items() if v is not None}
+    # Ensure mandatory fields
+    cleaned.setdefault("id", "unknown")
+    cleaned.setdefault("title", "Untitled")
+    cleaned.setdefault("type", "article-journal")
+    cleaned.setdefault("issued", {"date-parts": [[0]]})
+    # author must be a list of dicts; sanitize nested nulls
+    if "author" in cleaned and isinstance(cleaned["author"], list):
+        cleaned["author"] = [
+            {ak: av for ak, av in a.items() if av is not None}
+            for a in cleaned["author"]
+            if isinstance(a, dict)
+        ]
+    return cleaned
+
+
 def _merge_bibliographies(audit_dir: Path) -> list[dict]:
     """
     Load all bibliography_{domain_id}.json files, deduplicate by DOI then title.
-    Returns a flat list of unique CitationRecord dicts.
+    Returns a flat list of unique, sanitized CitationRecord dicts.
     """
     seen_dois: set[str] = set()
     seen_titles: set[str] = set()
@@ -99,7 +120,7 @@ def _merge_bibliographies(audit_dir: Path) -> list[dict]:
 
             if title:
                 seen_titles.add(title)
-            merged.append(entry)
+            merged.append(_sanitize_bib_entry(entry))
 
     return merged
 
@@ -167,6 +188,81 @@ def _bibliography_to_markdown(bibliography: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Bare LaTeX math fixer
+# ---------------------------------------------------------------------------
+
+# LaTeX commands that must be inside $...$ to survive xelatex.
+# We only wrap ones that are clearly mathematical (not \textbf, \emph, etc.).
+_MATH_CMDS = (
+    r"bar|hat|tilde|vec|dot|ddot|breve|check|acute|grave|widehat|widetilde"
+    r"|mathbb|mathbf|mathcal|mathit|mathsf|mathtt|mathfrak|boldsymbol"
+    r"|frac|dfrac|tfrac|sfrac|sqrt|binom|tbinom|dbinom"
+    r"|sum|prod|int|oint|iint|iiint|partial|nabla|infty"
+    r"|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta"
+    r"|iota|kappa|lambda|mu|nu|xi|pi|varpi|rho|varrho|sigma|varsigma"
+    r"|tau|upsilon|phi|varphi|chi|psi|omega"
+    r"|Alpha|Beta|Gamma|Delta|Epsilon|Zeta|Eta|Theta|Iota|Kappa|Lambda"
+    r"|Mu|Nu|Xi|Pi|Rho|Sigma|Tau|Upsilon|Phi|Chi|Psi|Omega"
+    r"|pm|mp|times|div|cdot|circ|bullet|oplus|otimes|odot"
+    r"|leq|geq|neq|approx|equiv|sim|simeq|propto|ll|gg|prec|succ"
+    r"|in|notin|subset|subseteq|supset|supseteq|cup|cap|setminus|emptyset"
+    r"|forall|exists|nexists|neg|wedge|vee|langle|rangle"
+    r"|ldots|cdots|vdots|ddots|to|leftarrow|rightarrow|Rightarrow|Leftarrow"
+    r"|iff|implies|gets|mapsto|longrightarrow|leftrightarrow"
+    r"|lim|sup|inf|max|min|arg|det|dim|exp|ker|log|ln|sin|cos|tan"
+    r"|arcsin|arccos|arctan|sinh|cosh|tanh|cot|sec|csc"
+    r"|text|mathrm|operatorname"
+)
+_BARE_MATH_RE = re.compile(
+    # Match a bare LaTeX math command + all immediately following {arg}, ^{}, _{}
+    r"\\(?:" + _MATH_CMDS + r")"    # command name
+    r"(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\})* "  # {arg} groups (one level of nesting)
+    r"(?:[_^]\{[^{}]*\}|[_^][A-Za-z0-9])*"   # subscripts / superscripts
+    .replace(" ", "")               # strip formatting whitespace from above
+)
+
+
+def _fix_bare_math(text: str) -> str:
+    """
+    Wrap bare LaTeX math commands in $...$ when outside existing math/code blocks.
+    Operates line-by-line; skips fenced code blocks and inline code spans.
+    """
+    result_lines: list[str] = []
+    in_fence = False
+    fence_marker = ""
+
+    for line in text.splitlines():
+        # Track fenced code blocks (``` or ~~~)
+        stripped = line.lstrip()
+        if not in_fence:
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = True
+                fence_marker = stripped[:3]
+                result_lines.append(line)
+                continue
+        else:
+            if stripped.startswith(fence_marker):
+                in_fence = False
+            result_lines.append(line)
+            continue
+
+        # Process line outside code fence: split around inline code (`...`)
+        # and existing math ($...$ / $$...$$), only fix plain-text segments.
+        segments = re.split(r'(`[^`]*`|\$\$.*?\$\$|\$[^$\n]+?\$)', line)
+        fixed_segments: list[str] = []
+        for i, seg in enumerate(segments):
+            if i % 2 == 1:
+                # Odd segments are the delimiters themselves (code/math) — leave alone
+                fixed_segments.append(seg)
+            else:
+                # Even segments are plain text — wrap bare math commands
+                fixed_segments.append(_BARE_MATH_RE.sub(lambda m: f"${m.group(0)}$", seg))
+        result_lines.append("".join(fixed_segments))
+
+    return "\n".join(result_lines)
+
+
 _UNVALIDATED_RE = re.compile(r"\s*\[UNVALIDATED\]\s*", re.IGNORECASE)
 _NEEDS_CITATION_RE = re.compile(r"\s*\[NEEDS_CITATION\]\s*", re.IGNORECASE)
 _CITATION_NEEDED_RE = re.compile(r"\s*\[citation needed\]\s*", re.IGNORECASE)
@@ -186,7 +282,7 @@ def _is_slug_title(title: str) -> bool:
 
 
 def _clean_section_text(text: str) -> str:
-    """Strip internal pipeline markers before writing final output."""
+    """Strip internal pipeline markers and fix bare math before writing final output."""
     text = _UNVALIDATED_RE.sub(" ", text)
     text = _NEEDS_CITATION_RE.sub(" ", text)
     text = _CITATION_NEEDED_RE.sub(" ", text)
@@ -194,6 +290,7 @@ def _clean_section_text(text: str) -> str:
     text = _INFERRED_COMMENT_RE.sub("", text)
     text = _CITE_SYNTAX_RE.sub(lambda m: _convert_cite_syntax(m.group(1)), text)
     text = _ORPHAN_SPACE_PUNCT_RE.sub(r'\1', text)
+    text = _fix_bare_math(text)
     return text
 
 
@@ -355,9 +452,33 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
         "sections": len(section_files_used),
     })
 
-    # Build bibliography.json in CSL-JSON format for pandoc
+    # Write bibliography in CSL-JSON format for pandoc citeproc
     output_bib = output_dir / "bibliography.json"
     output_bib.write_text(json.dumps(bibliography, indent=2))
+
+    # Write a pandoc-ready markdown copy with YAML frontmatter.
+    # Embedding bibliography in frontmatter avoids the pandoc 3.x bug where
+    # --bibliography with a JSON array triggers a YAML parse exception.
+    csl_path = Path("style") / "chicago-author-date.csl"
+    frontmatter_lines = [
+        "---",
+        f'title: "{doc_title.replace(chr(34), chr(39))}"',
+        f'bibliography: "{output_bib}"',
+        "link-citations: true",
+        "header-includes:",
+        "  - \\usepackage{amsmath}",
+        "  - \\usepackage{amssymb}",
+        "  - \\usepackage{unicode-math}",
+        "geometry: margin=1in",
+        "fontsize: 11pt",
+    ]
+    if csl_path.exists():
+        frontmatter_lines.append(f'csl: "{csl_path.resolve()}"')
+    frontmatter_lines.append("---\n")
+    pandoc_md = output_dir / "expanded_pandoc.md"
+    # Strip the leading "# Title" from full_text since frontmatter carries the title
+    body = re.sub(r"^#[^\n]*\n", "", full_text, count=1)
+    pandoc_md.write_text("\n".join(frontmatter_lines) + body)
 
     # PDF generation
     output_pdf: str | None = None
@@ -384,16 +505,11 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
             emit({"event": "s7_pdf_start", "output": str(pdf_path)})
             pandoc_cmd = [
                 "pandoc",
-                str(output_md),
+                str(pandoc_md),
                 "--pdf-engine=xelatex",
-                f"--bibliography={output_bib}",
+                "--citeproc",           # process [@key] citations via frontmatter bibliography
                 "-o", str(pdf_path),
             ]
-
-            # Add CSL if available
-            csl_path = Path("style") / "chicago-author-date.csl"
-            if csl_path.exists():
-                pandoc_cmd.extend(["--csl", str(csl_path)])
 
             try:
                 result = subprocess.run(
@@ -404,13 +520,13 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
                 )
                 if result.returncode != 0:
                     emit({
-                        "event": "s7_pdf_skipped",
+                        "event": "s7_pdf_error",
                         "reason": "pandoc_error",
                         "returncode": result.returncode,
-                        "stderr": result.stderr[:500],
+                        "stderr": result.stderr[:1000],
                     })
+                    _logger.error("s10: pandoc failed (rc=%d): %s", result.returncode, result.stderr[:500])
                 else:
-                    # Verify PDF exists and has pages
                     if pdf_path.exists() and pdf_path.stat().st_size > 0:
                         pages = _count_pdf_pages(pdf_path)
                         output_pdf = str(pdf_path)
@@ -421,13 +537,14 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
                         })
                     else:
                         emit({
-                            "event": "s7_pdf_skipped",
+                            "event": "s7_pdf_error",
                             "reason": "pdf_not_created",
+                            "stderr": result.stderr[:500],
                         })
             except subprocess.TimeoutExpired:
-                emit({"event": "s7_pdf_skipped", "reason": "pandoc_timeout"})
+                emit({"event": "s7_pdf_error", "reason": "pandoc_timeout"})
             except Exception as exc:
-                emit({"event": "s7_pdf_skipped", "reason": "pandoc_exception", "error": str(exc)[:200]})
+                emit({"event": "s7_pdf_error", "reason": "pandoc_exception", "error": str(exc)[:200]})
 
     manifest = AssemblyManifest(
         domain_order=ordered_domain_ids,
