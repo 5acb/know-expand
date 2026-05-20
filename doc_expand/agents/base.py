@@ -56,8 +56,11 @@ async def _probe_one(model: str, cfg: Config) -> bool:
         return bool(os.environ.get("ANTHROPIC_API_KEY"))
     if "gpt" in model or "openai" in model:
         return bool(os.environ.get("OPENAI_API_KEY"))
-    if "gemini" in model:
+    if "gemini" in model or "google" in model:
         return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+    # Local providers are not supported — always unavailable
+    if model.startswith(("llamacpp/", "ollama/", "lm_studio/", "local/")):
+        return False
     # Unknown remote provider — optimistically assume available
     return True
 
