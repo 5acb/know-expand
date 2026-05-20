@@ -1,7 +1,3 @@
-llamacpp:
-  base_url: "http://192.168.1.117:8080"
-  max_tokens: 8192
-
 bibliography:
   foundational_fraction: 0.65
   frontier_months: 24
@@ -33,8 +29,7 @@ rate_limits:
     time_period: 1
 
 concurrency:
-  cloud_default: 8
-  local_default: 2
+  default: 8
 
 timeouts:
   domain_research_seconds: 2700

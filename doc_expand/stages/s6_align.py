@@ -89,6 +89,47 @@ def _make_citation_id(title: str, year: int, first_author: str) -> str:
     return f"{slug}_{year}_{title_word}"
 
 
+def _normalize(text: str) -> str:
+    """Strip markdown punctuation and collapse whitespace for fuzzy comparison."""
+    import string
+    stripped = re.sub(r"[*_`\[\]()#>]", "", text)
+    stripped = re.sub(r"\s+", " ", stripped).strip().lower()
+    return stripped
+
+
+def _token_overlap(a: str, b: str) -> float:
+    """Fraction of tokens in `a` that appear in `b` (recall-style)."""
+    ta = set(_normalize(a).split())
+    tb = set(_normalize(b).split())
+    if not ta:
+        return 0.0
+    return len(ta & tb) / len(ta)
+
+
+def _fuzzy_find_line(target: str, lines: list[str]) -> int | None:
+    """
+    Return index of the best matching line for `target`.
+    Priority: (1) exact normalized substring, (2) token overlap >= 0.75.
+    Returns None if no line meets either threshold.
+    """
+    norm_target = _normalize(target)
+    best_idx: int | None = None
+    best_score: float = 0.0
+    for i, line in enumerate(lines):
+        norm_line = _normalize(line)
+        # Exact normalized substring match — always wins
+        if norm_target and norm_target in norm_line:
+            return i
+        # Token overlap fallback
+        score = _token_overlap(target, line)
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    if best_score >= 0.75:
+        return best_idx
+    return None
+
+
 def _apply_patch(path: Path, position: str, content: str) -> str:
     """Apply a single insertion patch to the section file at path.
     Returns a human-readable result string."""
@@ -124,21 +165,15 @@ def _apply_patch(path: Path, position: str, content: str) -> str:
         mode = "before" if position.startswith("before:") else "after"
         target = position[len(mode) + 1:]
         lines = text.split("\n")
-        match_idx = next(
-            (i for i, line in enumerate(lines) if target.lower() in line.lower()),
-            None,
-        )
+        match_idx = _fuzzy_find_line(target, lines)
         if match_idx is None:
-            heading_indices = [i for i, l in enumerate(lines) if l.startswith("## ")]
-            if heading_indices:
-                insert_at = heading_indices[-1]
-                lines.insert(insert_at, "")
-                lines.insert(insert_at, content)
-                path.write_text("\n".join(lines))
-                return f"Target '{target}' not found; inserted before last ## section as fallback."
-            else:
-                path.write_text(text.rstrip() + "\n\n" + content + "\n")
-                return f"Target '{target}' not found and no ## headings; appended to end."
+            emit({
+                "event": "patch_apply_failed",
+                "path": str(path),
+                "position": position,
+                "reason": "anchor not found (fuzzy match < 0.75)",
+            })
+            return f"patch_apply_failed: anchor '{target}' not found — patch dropped."
         if mode == "before":
             lines.insert(match_idx, "")
             lines.insert(match_idx, content)
