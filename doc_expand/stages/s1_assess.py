@@ -347,6 +347,29 @@ async def _ask_web(q: dict, state_dir: Path) -> str:
 # Core interview loop
 # ---------------------------------------------------------------------------
 
+def _fallback_options(turn: int, key_concepts: list[str]) -> list[str]:
+    """Hardcoded fallback options for the three structured turns."""
+    if turn == 0:
+        return (key_concepts or ["(none identified)"])[:10] + ["None of these", "All of them"]
+    if turn == 1:
+        return [
+            "Build or implement what's described",
+            "Evaluate whether to adopt this approach",
+            "Understand it deeply enough to teach it",
+            "Get a quick mental model",
+            "Research extensions or open problems",
+            "Other — describe below",
+        ]
+    if turn == 2:
+        return [
+            "Quick overview (~30 min)",
+            "Solid working understanding (~2 hrs)",
+            "Deep mastery including the math (days)",
+            "Just the parts relevant to my goal",
+        ]
+    return []
+
+
 async def _conduct_interview(
     document_context: str,
     key_concepts: list[str],
@@ -375,6 +398,17 @@ async def _conduct_interview(
 
         q = decision.next_question
         clean_text, options = _extract_embedded_options(q.text, q.options)
+
+        # LLMs reliably set question_type but often forget to populate options.
+        # For the three fixed structured turns we know exactly what the options
+        # should be. For later unstructured turns, downgrade to open.
+        if not options:
+            fallback = _fallback_options(turn, key_concepts)
+            if fallback:
+                options = fallback
+            else:
+                q.question_type = "open"
+
         q_dict = {
             "id": f"q{turn}",
             "text": clean_text,
