@@ -1,4 +1,4 @@
-"""Stage 4 — Research: per-domain deep dives with top-down / bottom-up agents."""
+"""Stage 4 — Research: per-domain deep dives with three-persona multi-expert panel."""
 
 import asyncio
 import json
@@ -7,15 +7,18 @@ import time
 from pathlib import Path
 
 from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import CritiqueResult, DomainSummary
+from doc_expand.agents.schemas import (
+    CritiqueResult,
+    DomainSummary,
+    PersonaOutput,
+    ReconcilerOutput,
+)
 from doc_expand.config import Config
 from doc_expand.state import (
     PipelineState,
     emit,
     mark_stage_complete,
-    sentinel_exists,
     stage_is_complete,
-    write_sentinel,
 )
 
 _logger = logging.getLogger("doc_expand.s4")
@@ -38,6 +41,17 @@ CONCEPT INTRODUCTION PROTOCOL — apply to EVERY non-trivial concept:
 5. WHY IT MATTERS: One sentence on the practical payoff.
 """
 
+_MATH_PROTOCOL = """\
+MATHEMATICS PROTOCOL — apply to EVERY non-trivial concept that involves an equation:
+1. INTUITION: One plain-English paragraph using a concrete everyday analogy. No jargon.
+2. SYMBOL TABLE: A Markdown table with columns | Symbol | Type | Meaning |
+   Every symbol appearing in the equation must have a row. No exceptions.
+3. FORMAL DEFINITION: The equation in LaTeX (use $...$ for inline, $$...$$ for display).
+4. WORKED EXAMPLE: Substitute specific real numbers and walk through the computation
+   step by step. No variable-only examples.
+5. WHY IT MATTERS: One sentence on the practical payoff.
+"""
+
 _CLOSING_SECTION = """\
 The FINAL section must be titled "Where to Go Next" with this structure:
 - **Open problems**: 2-3 specific, unresolved questions at the research \
@@ -49,17 +63,39 @@ The FINAL section must be titled "Where to Go Next" with this structure:
   sentence why each paper matters.
 """
 
-_TOP_DOWN_PROMPT = """\
-You are writing a self-contained learning chapter. The reader's goal is to \
-go from zero knowledge of {domain_label} to being able to build on and advance \
-the field — using only this chapter. They must not need to consult any other \
-source.
+_ANTI_HALLUCINATION = """\
+ANTI-HALLUCINATION RULES:
+- Cite only from the bibliography using [@citation_id] notation.
+- Mark unciteable claims [NEEDS_CITATION].
+- Tag speculative claims [INFERRED].
+- Do not invent paper titles, authors, or results.
+"""
 
-Work TOP-DOWN: establish the mental model first, then fill in the mechanisms, \
-then show the state of the art.
+_PERSONA_DRIFT_GUARD = """\
+ROLE DISCIPLINE — you are ONLY a {persona_name}. Stay strictly within this role:
+- Do NOT write content outside your designated scope (see your role description above).
+- Do NOT correct grammar, style, or prose in other sections.
+- Do NOT produce a synthesis or summary — that is the Reconciler's job.
+- If you find yourself writing about something outside your scope, stop and return \
+  to your role.
+"""
+
+# ---------------------------------------------------------------------------
+# Persona prompts
+# ---------------------------------------------------------------------------
+
+_THEORETICIAN_PROMPT = """\
+You are a THEORETICIAN writing one persona's contribution to a self-contained \
+learning chapter on {domain_label}. The reader's goal is to go from zero \
+knowledge to being able to build on and advance the field.
+
+Your role: provide mathematical foundations, formal definitions, historical \
+context, and first-principles derivations. Work TOP-DOWN: establish the mental \
+model and axiomatic basis first, then derive mechanisms from theory.
 
 Domain: {domain_label} (id: {domain_id})
 Reader profile: {reader_profile}
+{reader_profile_note}
 
 Knowledge graph nodes:
 {graph_nodes}
@@ -72,42 +108,87 @@ Bibliography (cite ONLY from this list using the citation id field):
 
 STRUCTURE (follow this section order exactly):
 1. "What is {domain_label}?" — 3–5 paragraphs. One-sentence definition. \
-   One concrete real-world example. Why it exists and what problem it solves. \
-   What a practitioner can do AFTER mastering it that they could not do before.
+   One concrete real-world example. Why it exists and what problem it solves.
 2. "Prerequisites and Notation" — Any math or CS concepts this domain \
-   builds on that a practitioner might not know. Derive them briefly from \
-   scratch. Do NOT assume the reader knows them; do NOT link out.
-3. "Core Concepts" — The 5–10 load-bearing ideas. Apply the CONCEPT \
-   INTRODUCTION PROTOCOL to each.
-4. "Key Methods and Algorithms" — The main algorithms with pseudocode or \
-   code. Derive from first principles where possible.
-5. "State of the Art" — Current best approaches and their trade-offs, grounded \
-   in bibliography citations.
-6. "Where to Go Next" — see closing section spec below.
+   builds on. Derive them briefly from scratch. Do NOT assume prior knowledge; \
+   do NOT link out.
+3. "Mathematical Foundations" — The core formalisms. Apply the MATHEMATICS \
+   PROTOCOL to every equation and non-trivial concept.
+4. "Historical Development" — Key milestones that shaped the theory. \
+   Cite from bibliography.
+5. "Theoretical Limits and Guarantees" — What the theory proves is possible \
+   or impossible. Apply MATHEMATICS PROTOCOL to any bound or theorem.
 
+{math_protocol}
 {concept_protocol}
-{closing_section}
+{closing_section_note}
 
-ANTI-HALLUCINATION RULES:
-- Cite only from the bibliography using [@citation_id] notation.
-- Mark unciteable claims [NEEDS_CITATION].
-- Tag speculative claims [INFERRED].
-- Do not invent paper titles, authors, or results.
+{anti_hallucination}
+{drift_guard}
 
-Write a DomainSummary with domain_id="{domain_id}" and \
-domain_label="{domain_label}".
+Write a PersonaOutput with persona="theoretician" and domain_id="{domain_id}". \
+Your sections list must cover the 5 sections above. \
+key_claims should list 3–7 central theoretical claims you make. \
+citations_used should list every citation id you reference.
 """
 
-_BOTTOM_UP_PROMPT = """\
-You are writing a self-contained learning chapter. The reader's goal is to \
-go from zero knowledge of {domain_label} to being able to build on and advance \
-the field — using only this chapter.
+_ENGINEER_PROMPT = """\
+You are an ENGINEER writing one persona's contribution to a self-contained \
+learning chapter on {domain_label}. The reader's goal is to go from zero \
+knowledge to being able to build on and advance the field.
 
-Work BOTTOM-UP: start with the minimal runnable thing, then build upward to \
-theory and frontier.
+Your role: cover algorithms, architectures, implementation patterns, and system \
+design. Work FROM MECHANISM TO THEORY: show how things are built, then explain why.
 
 Domain: {domain_label} (id: {domain_id})
 Reader profile: {reader_profile}
+{reader_profile_note}
+
+Knowledge graph nodes:
+{graph_nodes}
+
+Gap analysis findings for this domain:
+{gap_analysis}
+
+Bibliography (cite ONLY from this list using the citation id field):
+{bibliography}
+
+STRUCTURE (follow this section order exactly):
+1. "Key Algorithms" — The main algorithms with pseudocode. Derive from first \
+   principles where possible. Apply MATHEMATICS PROTOCOL to any non-trivial \
+   expression in the algorithm.
+2. "System Architecture" — Canonical architectures. Diagrams in ASCII or \
+   Markdown tables. Explain every component's purpose.
+3. "Implementation Guide" — How to build a real system. What to watch out for. \
+   Concrete code sketches where they clarify understanding.
+4. "Engineering Trade-offs" — Latency vs. throughput, memory vs. accuracy, etc. \
+   Be specific: quote numbers from bibliography where available.
+5. "Common Failure Modes" — What breaks, why, and how to diagnose it. \
+   Include concrete debugging checklists.
+
+{math_protocol}
+{concept_protocol}
+{anti_hallucination}
+{drift_guard}
+
+Write a PersonaOutput with persona="engineer" and domain_id="{domain_id}". \
+Your sections list must cover the 5 sections above. \
+key_claims should list 3–7 central engineering claims you make. \
+citations_used should list every citation id you reference.
+"""
+
+_PRACTITIONER_PROMPT = """\
+You are a PRACTITIONER writing one persona's contribution to a self-contained \
+learning chapter on {domain_label}. The reader's goal is to go from zero \
+knowledge to being able to build on and advance the field.
+
+Your role: cover real-world trade-offs, failure modes, benchmarks, gotchas, \
+and where to go next. Work FROM USAGE TO MECHANISM: start with what a \
+practitioner does, then explain why it works.
+
+Domain: {domain_label} (id: {domain_id})
+Reader profile: {reader_profile}
+{reader_profile_note}
 
 Knowledge graph nodes:
 {graph_nodes}
@@ -121,94 +202,169 @@ Bibliography (cite ONLY from this list using the citation id field):
 STRUCTURE (follow this section order exactly):
 1. "Minimal Working Example" — The simplest possible demonstration of \
    {domain_label} doing one useful thing. Complete, runnable code or concrete \
-   step-by-step walkthrough. No prerequisites, no "first install X". \
-   A reader who runs this should say "I understand what this is."
-2. "Building the Intuition" — Explain WHY the minimal example works. \
-   Use analogies. Work backwards from the example to the underlying idea.
-3. "Foundations from Scratch" — Derive the theoretical underpinnings of \
-   what was just demonstrated. Apply the CONCEPT INTRODUCTION PROTOCOL \
-   to every mathematical concept. Never assume prior knowledge.
-4. "Worked Examples with Increasing Complexity" — Three examples: trivial \
-   → practical → research-grade. Show the full progression explicitly.
-5. "Implementation Guide" — How to build a real system. What to watch out for. \
-   Common failure modes and how to diagnose them.
-6. "Where to Go Next" — see closing section spec below.
+   step-by-step walkthrough. A reader who runs this should say "I understand \
+   what this is."
+2. "Real-World Trade-offs" — When to use this approach vs. alternatives. \
+   Concrete decision criteria. Cite benchmarks from bibliography.
+3. "Benchmarks and Empirical Results" — State-of-the-art numbers, datasets \
+   used, reproducibility notes. Apply MATHEMATICS PROTOCOL to any metric definition.
+4. "Gotchas and Production Pitfalls" — What surprises practitioners who \
+   deploy this in the real world. Be specific and actionable.
+5. "Where to Go Next" — \
+   - **Open problems**: 2-3 specific, unresolved questions at the research \
+     frontier of {domain_label}. \
+   - **Start here**: One codebase, dataset, or benchmark a reader can clone \
+     and run today to begin contributing. \
+   - **Essential reading**: Exactly 3 papers from the bibliography that would \
+     most accelerate a newcomer's understanding of this domain. Explain in one \
+     sentence why each paper matters.
 
+{math_protocol}
 {concept_protocol}
-{closing_section}
+{anti_hallucination}
+{drift_guard}
 
-ANTI-HALLUCINATION RULES:
-- Cite only from the bibliography using [@citation_id] notation.
-- Mark unciteable claims [NEEDS_CITATION].
-- Tag speculative claims [INFERRED].
-- Do not invent paper titles, authors, or results.
-
-Write a DomainSummary with domain_id="{domain_id}" and \
-domain_label="{domain_label}".
+Write a PersonaOutput with persona="practitioner" and domain_id="{domain_id}". \
+Your sections list must cover the 5 sections above. \
+key_claims should list 3–7 central practitioner insights you make. \
+citations_used should list every citation id you reference.
 """
 
+# ---------------------------------------------------------------------------
+# Reconciler prompt
+# ---------------------------------------------------------------------------
+
+_RECONCILER_PROMPT = """\
+You are a RECONCILER synthesizing three expert perspectives into a single \
+definitive learning chapter on {domain_label}.
+
+You have received outputs from three persona agents:
+- THEORETICIAN: mathematical foundations, formal definitions, historical context
+- ENGINEER: algorithms, architectures, implementation patterns
+- PRACTITIONER: real-world trade-offs, benchmarks, failure modes, where to go next
+
+Your task: merge their best content into one coherent, non-redundant chapter \
+that takes a reader from zero knowledge to being able to build on and advance \
+{domain_label} — using only this chapter.
+
+Domain: {domain_label} (id: {domain_id})
+Reader profile: {reader_profile}
+
+Bibliography (cite ONLY from this list using the citation id field):
+{bibliography}
+
+--- THEORETICIAN OUTPUT ---
+{theoretician_sections}
+
+--- ENGINEER OUTPUT ---
+{engineer_sections}
+
+--- PRACTITIONER OUTPUT ---
+{practitioner_sections}
+
+RECONCILIATION RULES:
+1. Deduplicate: when two personas cover the same concept, keep the deeper \
+   treatment and discard the shallower one.
+2. Smooth transitions: the chapter must read as one continuous narrative, \
+   not as three stitched sections.
+3. Section order must be:
+   a. "What is {domain_label}?" (from Theoretician)
+   b. "Prerequisites and Notation" (from Theoretician)
+   c. "Mathematical Foundations" (from Theoretician, annotated with Engineer \
+      context where relevant)
+   d. "Key Algorithms and Architecture" (from Engineer)
+   e. "Implementation Guide and Failure Modes" (from Engineer + Practitioner)
+   f. "Benchmarks and Trade-offs" (from Practitioner)
+   g. "Historical Development" (from Theoretician)
+   h. "Theoretical Limits and Guarantees" (from Theoretician)
+   i. "Where to Go Next" (from Practitioner — must include open problems, \
+      start-here resource, and 3 essential papers)
+4. The narrative field must be complete Markdown — headers, tables, code \
+   blocks, LaTeX equations. No placeholders.
+
+{math_protocol}
+{concept_protocol}
+
+MATHEMATICS PROTOCOL reminder: every equation in the merged chapter must have \
+its INTUITION → SYMBOL TABLE → FORMAL DEFINITION → WORKED EXAMPLE → WHY IT \
+MATTERS structure intact. Do not strip symbol tables or worked examples during \
+merging.
+
+{anti_hallucination}
+
+Return a ReconcilerOutput with:
+- narrative: the complete merged Markdown chapter
+- summary: a DomainSummary with domain_id="{domain_id}" and \
+  domain_label="{domain_label}" populated from the merged content
+"""
+
+# ---------------------------------------------------------------------------
+# Critic and revise prompts
+# ---------------------------------------------------------------------------
+
 _CRITIC_PROMPT = """\
-You are an adversarial research critic. The goal of these documents is to take \
+You are an adversarial research critic. The goal of this document is to take \
 a reader from zero knowledge to being able to build on and advance {domain_label}. \
-Identify every way they fall short of that goal.
+Identify every way it falls short of that goal.
 
 Domain: {domain_label} (id: {domain_id})
 
-Bibliography (only these citations are valid):
+Bibliography (only these citation IDs are valid):
 {bibliography_ids}
 
-TOP-DOWN DRAFT:
-{top_down_narrative}
+Gap analysis (real gaps that should be addressed):
+{gap_analysis}
 
-BOTTOM-UP DRAFT:
-{bottom_up_narrative}
+RECONCILED CHAPTER DRAFT:
+{narrative}
 
 Check EVERY item below. For each issue found, quote the exact sentence and \
 explain what is wrong:
-1. Citations: unsupported claims not tagged [NEEDS_CITATION]; invalid keys
+1. Citations: unsupported claims not tagged [NEEDS_CITATION]; invalid citation keys
 2. Pedagogy — symbol tables: any equation lacking a preceding symbol table
 3. Pedagogy — worked examples: any abstract concept without a concrete \
-   numerical or code example with specific values
+   numerical or code example with specific values (not variable-only)
 4. Pedagogy — intuition: formal definitions without a plain-English intuition \
    paragraph preceding them
 5. Pedagogy — undefined terms: jargon used before it is defined
 6. Pedagogy — assumed knowledge: concepts that require prerequisites the \
    reader was not given
 7. Pedagogy — missing "What is {domain_label}?" accessible intro section
-8. Missing "Where to Go Next" section with open problems, start-here \
-   codebase/dataset, and 3 essential papers
-9. Logical gaps or contradictions between the two drafts
+8. Missing or incomplete "Where to Go Next" section (must have open problems, \
+   start-here codebase/dataset, and exactly 3 essential papers with explanations)
+9. Gap analysis coverage: real gaps identified in gap_analysis that are not \
+   addressed in the chapter
+10. Logical gaps, contradictions, or unsupported leaps
 
 Return a CritiqueResult with domain_id="{domain_id}".
-verdict must be "accept" ONLY if all 9 checks pass. Otherwise "revise".
+verdict must be "accept" ONLY if all 10 checks pass. Otherwise "revise".
 """
 
 _REVISE_PROMPT = """\
-You are a technical research writer revising your draft based on critic feedback.
+You are a technical research writer revising a reconciled chapter based on \
+critic feedback.
 
 Domain: {domain_label} (id: {domain_id})
 
 Bibliography (cite ONLY from this list):
 {bibliography}
 
-ORIGINAL TOP-DOWN DRAFT:
-{top_down_narrative}
-
-ORIGINAL BOTTOM-UP DRAFT:
-{bottom_up_narrative}
+CURRENT NARRATIVE:
+{narrative}
 
 CRITIC FEEDBACK:
 Issues: {issues}
 Suggested additions: {suggested_additions}
 
-Produce a revised, reconciled DomainSummary that:
-- Combines the best elements of both drafts
+Produce a revised ReconcilerOutput that:
 - Addresses each issue raised by the critic
 - Incorporates the suggested additions where supported by the bibliography
 - Tags all unsupported claims [NEEDS_CITATION] or [INFERRED]
 - Uses only citation IDs from the provided bibliography
+- Keeps all symbol tables and worked examples intact
+- Retains the "Where to Go Next" section structure
 
-Return a DomainSummary with domain_id="{domain_id}" and \
+Return a ReconcilerOutput with domain_id="{domain_id}" and \
 domain_label="{domain_label}".
 """
 
@@ -216,6 +372,11 @@ domain_label="{domain_label}".
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _narrative_to_markdown(output: ReconcilerOutput) -> str:
+    """Return the full Markdown content of a reconciler output."""
+    return output.narrative
+
 
 def _domain_summary_to_markdown(summary: DomainSummary) -> str:
     lines = [f"# {summary.domain_label}\n", f"{summary.overview}\n"]
@@ -263,6 +424,19 @@ def _bib_summary(bibliography: list[dict]) -> str:
     return "[\n" + ",\n".join(entries) + "\n]"
 
 
+def _persona_sections_to_text(persona_output: PersonaOutput) -> str:
+    """Render persona output sections as readable Markdown for the reconciler prompt."""
+    lines = [f"**Key claims:** {', '.join(persona_output.key_claims)}\n"]
+    for section in persona_output.sections:
+        lines.append(f"### {section.heading}\n")
+        lines.append(section.body)
+        if section.citations:
+            for c in section.citations:
+                lines.append(f"[@{c.citation_id}] {c.quote_or_claim}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Core per-domain research
 # ---------------------------------------------------------------------------
@@ -273,6 +447,8 @@ def _reader_profile_strings(profile: dict) -> tuple[str, str]:
     field = profile.get("background_field", "unknown")
     goal = profile.get("learning_goal", "apply")
     math = profile.get("math_comfort", "engage")
+    unknown_concepts: list[str] = profile.get("unknown_concepts", [])
+    known_concepts: list[str] = profile.get("known_concepts", [])
 
     summary = f"familiarity={level}, background={field}, goal={goal}, math={math}"
 
@@ -298,6 +474,20 @@ def _reader_profile_strings(profile: dict) -> tuple[str, str]:
         "research": " Highlight open questions, reproducibility gaps, and future directions.",
     }
     calibration += goal_notes.get(goal, "")
+
+    # Thread specific calibration misconceptions — the reader got these wrong or
+    # said they didn't know them; they need first-principles treatment regardless
+    # of how central they are to this domain.
+    if unknown_concepts:
+        concepts_str = ", ".join(f'"{c}"' for c in unknown_concepts[:8])
+        calibration += (
+            f" PRIORITY: The reader specifically does not understand {concepts_str}. "
+            "Trace each of these from absolute first principles before using them."
+        )
+    if known_concepts:
+        known_str = ", ".join(f'"{c}"' for c in known_concepts[:8])
+        calibration += f" The reader already understands {known_str} — do not re-explain these."
+
     return summary, calibration
 
 
@@ -357,71 +547,89 @@ async def _research_domain(
     reader_profile_str, reader_profile_note = _reader_profile_strings(user_profile or {})
 
     closing_section = _CLOSING_SECTION.format(domain_label=domain_label)
-
-    # Parallel top-down + bottom-up
-    top_down_msg = [{
-        "role": "user",
-        "content": _TOP_DOWN_PROMPT.format(
-            domain_label=domain_label,
-            domain_id=domain_id,
-            graph_nodes=nodes_str,
-            gap_analysis=gap_context,
-            bibliography=bib_str,
-            reader_profile=reader_profile_str,
-            reader_profile_note=reader_profile_note,
-            concept_protocol=_CONCEPT_PROTOCOL,
-            closing_section=closing_section,
-        ),
-    }]
-    bottom_up_msg = [{
-        "role": "user",
-        "content": _BOTTOM_UP_PROMPT.format(
-            domain_label=domain_label,
-            domain_id=domain_id,
-            graph_nodes=nodes_str,
-            gap_analysis=gap_context,
-            bibliography=bib_str,
-            reader_profile=reader_profile_str,
-            reader_profile_note=reader_profile_note,
-            concept_protocol=_CONCEPT_PROTOCOL,
-            closing_section=closing_section,
-        ),
-    }]
-
-    top_down_result, bottom_up_result = await asyncio.gather(
-        router.call(top_down_msg, DomainSummary),
-        router.call(bottom_up_msg, DomainSummary),
+    closing_section_note = (
+        "NOTE: The Practitioner agent will write the 'Where to Go Next' section. "
+        "You do NOT need to include it."
     )
 
-    emit({"event": "s4_domain_top_down_done", "domain_id": domain_id})
-    emit({"event": "s4_domain_bottom_up_done", "domain_id": domain_id})
+    # Shared format kwargs for persona prompts
+    _persona_kwargs = dict(
+        domain_label=domain_label,
+        domain_id=domain_id,
+        graph_nodes=nodes_str,
+        gap_analysis=gap_context,
+        bibliography=bib_str,
+        reader_profile=reader_profile_str,
+        reader_profile_note=reader_profile_note,
+        math_protocol=_MATH_PROTOCOL,
+        concept_protocol=_CONCEPT_PROTOCOL,
+        anti_hallucination=_ANTI_HALLUCINATION,
+        drift_guard=_PERSONA_DRIFT_GUARD,  # filled per-persona below
+    )
 
-    # Adversarial critic loop
+    # Inject persona-specific drift guard (persona_name filled at call site)
+    def _with_persona(name: str) -> dict:
+        d = dict(_persona_kwargs)
+        d["drift_guard"] = _PERSONA_DRIFT_GUARD.format(persona_name=name)
+        return d
+
+    theoretician_msg = [{"role": "user", "content": _THEORETICIAN_PROMPT.format(
+        **_with_persona("THEORETICIAN"),
+        closing_section_note=closing_section_note,
+    )}]
+    engineer_msg = [{"role": "user", "content": _ENGINEER_PROMPT.format(**_with_persona("ENGINEER"))}]
+    practitioner_msg = [{"role": "user", "content": _PRACTITIONER_PROMPT.format(**_with_persona("PRACTITIONER"))}]
+
+    # Run all three personas in parallel
+    theoretician_result, engineer_result, practitioner_result = await asyncio.gather(
+        router.call(theoretician_msg, PersonaOutput),
+        router.call(engineer_msg, PersonaOutput),
+        router.call(practitioner_msg, PersonaOutput),
+    )
+
+    emit({"event": "s4_personas_done", "domain_id": domain_id,
+          "theoretician_sections": len(theoretician_result.sections),
+          "engineer_sections": len(engineer_result.sections),
+          "practitioner_sections": len(practitioner_result.sections)})
+
+    # Reconciler: merge all three persona outputs
+    reconciler_msg = [{"role": "user", "content": _RECONCILER_PROMPT.format(
+        domain_label=domain_label,
+        domain_id=domain_id,
+        reader_profile=reader_profile_str,
+        bibliography=bib_str,
+        theoretician_sections=_persona_sections_to_text(theoretician_result),
+        engineer_sections=_persona_sections_to_text(engineer_result),
+        practitioner_sections=_persona_sections_to_text(practitioner_result),
+        math_protocol=_MATH_PROTOCOL,
+        concept_protocol=_CONCEPT_PROTOCOL,
+        anti_hallucination=_ANTI_HALLUCINATION,
+    )}]
+    reconciled: ReconcilerOutput = await router.call(reconciler_msg, ReconcilerOutput)
+    emit({"event": "s4_reconciler_done", "domain_id": domain_id})
+
+    # Adversarial critic loop with convergence termination
     rounds = cfg.adversarial_rounds.get(depth, 1)
-    current_top_down = top_down_result
-    current_bottom_up = bottom_up_result
-
-    def _summary_narrative(s: DomainSummary) -> str:
-        parts = [s.overview]
-        for sec in s.sections:
-            parts.append(f"### {sec.heading}\n{sec.body}")
-        return "\n\n".join(parts)
-
+    current_reconciled = reconciled
     final_summary: DomainSummary | None = None
+    prev_issues: set[str] | None = None
+    termination_reason = "max_rounds"
 
     for rnd in range(1, rounds + 1):
-        emit({"event": "s4_domain_critique_round", "domain_id": domain_id, "round": rnd, "total_rounds": rounds})
+        emit({
+            "event": "s4_domain_critique_round",
+            "domain_id": domain_id,
+            "round": rnd,
+            "total_rounds": rounds,
+        })
 
-        critic_msg = [{
-            "role": "user",
-            "content": _CRITIC_PROMPT.format(
-                domain_label=domain_label,
-                domain_id=domain_id,
-                bibliography_ids=json.dumps(bib_ids),
-                top_down_narrative=_summary_narrative(current_top_down),
-                bottom_up_narrative=_summary_narrative(current_bottom_up),
-            ),
-        }]
+        critic_msg = [{"role": "user", "content": _CRITIC_PROMPT.format(
+            domain_label=domain_label,
+            domain_id=domain_id,
+            bibliography_ids=json.dumps(bib_ids),
+            gap_analysis=gap_context,
+            narrative=current_reconciled.narrative,
+        )}]
         critique: CritiqueResult = await router.call(critic_msg, CritiqueResult)
 
         # Write critique artifact
@@ -438,35 +646,59 @@ async def _research_domain(
             critique_lines.append(f"- {sugg}")
         critique_path.write_text("\n".join(critique_lines))
 
+        current_issues = set(critique.issues)
+
+        # (a) Critic accepts
         if critique.verdict == "accept":
+            termination_reason = "critic_accepted"
             if critique.revised_summary is not None:
                 final_summary = critique.revised_summary
             break
 
-        # Revise
-        revise_msg = [{
-            "role": "user",
-            "content": _REVISE_PROMPT.format(
-                domain_label=domain_label,
-                domain_id=domain_id,
-                bibliography=bib_str,
-                top_down_narrative=_summary_narrative(current_top_down),
-                bottom_up_narrative=_summary_narrative(current_bottom_up),
-                issues=json.dumps(critique.issues),
-                suggested_additions=json.dumps(critique.suggested_additions),
-            ),
-        }]
-        revised: DomainSummary = await router.call(revise_msg, DomainSummary)
-        # Feed revised as new top-down for next round; keep bottom-up stable
-        current_top_down = revised
-        final_summary = revised
+        # (b) Gap list is empty
+        if not current_issues:
+            termination_reason = "no_issues"
+            break
+
+        # (c) Gap list identical to prior round — critic has stalled
+        if prev_issues is not None and current_issues == prev_issues:
+            termination_reason = "critic_stalled"
+            emit({
+                "event": "s4_critic_stalled",
+                "domain_id": domain_id,
+                "round": rnd,
+                "issue_count": len(current_issues),
+            })
+            break
+
+        prev_issues = current_issues
+
+        # Revise the reconciled output
+        revise_msg = [{"role": "user", "content": _REVISE_PROMPT.format(
+            domain_label=domain_label,
+            domain_id=domain_id,
+            bibliography=bib_str,
+            narrative=current_reconciled.narrative,
+            issues=json.dumps(critique.issues),
+            suggested_additions=json.dumps(critique.suggested_additions),
+        )}]
+        revised: ReconcilerOutput = await router.call(revise_msg, ReconcilerOutput)
+        current_reconciled = revised
+        final_summary = revised.summary
+
+    emit({
+        "event": "s4_critic_loop_done",
+        "domain_id": domain_id,
+        "termination_reason": termination_reason,
+        "rounds_run": rnd,
+    })
 
     if final_summary is None:
-        final_summary = current_top_down
+        final_summary = current_reconciled.summary
 
     # Write outputs
     section_path = sections_dir / f"section_{domain_id}.md"
-    section_path.write_text(_domain_summary_to_markdown(final_summary))
+    section_path.write_text(current_reconciled.narrative)
 
     summary_path = summaries_dir / f"summary_{domain_id}.json"
     summary_path.write_text(final_summary.model_dump_json(indent=2))

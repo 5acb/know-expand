@@ -49,15 +49,6 @@ Prioritise the most technical sections and the most blocking forward references.
 """
 
 
-def _first_use_paragraph_start(text: str, term: str) -> int:
-    """Return the character index of the start of the paragraph that first uses term."""
-    m = re.search(re.escape(term), text, re.IGNORECASE)
-    if m is None:
-        return -1
-    para_break = text.rfind("\n\n", 0, m.start())
-    return para_break + 2 if para_break != -1 else 0
-
-
 def _make_tools(sections_dir: Path) -> list:
     """Create tool functions closed over sections_dir."""
 
@@ -102,9 +93,14 @@ def _make_tools(sections_dir: Path) -> list:
         if marker.lower() in existing.lower():
             return f"Primer for '{term}' already exists in section '{section_id}' — skipped."
 
-        para_start = _first_use_paragraph_start(existing, term)
-        if para_start == -1:
+        # Find the first occurrence of the term (case-insensitive)
+        m = re.search(re.escape(term), existing, re.IGNORECASE)
+        if m is None:
             return f"Term '{term}' not found in section '{section_id}'."
+
+        # Find the start of the paragraph containing the first use
+        para_break = existing.rfind("\n\n", 0, m.start())
+        para_start = para_break + 2 if para_break != -1 else 0
 
         primer_block = f"{marker} — {primer_text.strip()}\n\n"
         new_text = existing[:para_start] + primer_block + existing[para_start:]

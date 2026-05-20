@@ -1,10 +1,10 @@
 """Two-bucket bibliography fetcher (Semantic Scholar only)."""
 
 import asyncio
+import datetime
 import logging
 import os
 import re
-from datetime import datetime
 
 import httpx
 from aiolimiter import AsyncLimiter
@@ -12,6 +12,52 @@ from aiolimiter import AsyncLimiter
 from doc_expand.agents.schemas import CitationRecord
 from doc_expand.config import Config
 from doc_expand.state import emit
+
+_FIELD_BASELINES: dict[tuple[str, int], float] = {
+    # Field, Year -> approximate avg citation count for a paper in that field/year
+    # These are order-of-magnitude estimates; good enough for ranking
+    ("computer science", 2020): 15.0,
+    ("computer science", 2021): 12.0,
+    ("computer science", 2022): 8.0,
+    ("computer science", 2023): 4.0,
+    ("computer science", 2024): 1.5,
+    ("medicine", 2020): 20.0,
+    ("medicine", 2021): 16.0,
+    ("medicine", 2022): 10.0,
+    ("medicine", 2023): 5.0,
+    ("biology", 2020): 12.0,
+    ("biology", 2021): 9.0,
+    ("biology", 2022): 6.0,
+    ("biology", 2023): 3.0,
+    ("mathematics", 2020): 5.0,
+    ("mathematics", 2021): 4.0,
+    ("mathematics", 2022): 2.5,
+    ("mathematics", 2023): 1.5,
+    ("physics", 2020): 10.0,
+    ("physics", 2021): 8.0,
+    ("physics", 2022): 5.0,
+    ("physics", 2023): 2.5,
+}
+
+
+def _mncs_score(citation_count: int, field: str, year: int, field_baselines: dict) -> float:
+    """
+    Mean Normalized Citation Score: citation_count / field_year_average.
+    Eliminates recency bias and field-size bias.
+    field_baselines: {(field, year): avg_citation_count}
+    Falls back to raw count if no baseline available.
+    """
+    key = (field.lower(), year)
+    baseline = field_baselines.get(key)
+    if baseline and baseline > 0:
+        return citation_count / baseline
+    # Fallback: apply a recency bonus to papers from last 24 months
+    # (approximates normalization without baselines)
+    current_year = datetime.datetime.now().year
+    age = max(1, current_year - year)
+    # Score = citations * recency_factor where newer papers get more weight
+    recency_factor = 1.0 + max(0, (3 - age) * 0.3)  # 1.9x for this year, 1.6x for last, 1.3x for 2y ago
+    return citation_count * recency_factor
 
 _SS_API_KEY: str = os.environ.get("SS_API_KEY", "")
 
@@ -44,7 +90,7 @@ def _get_ss_limiter(cfg: Config) -> AsyncLimiter:
     return _ss_limiter
 
 _SS_BASE = "https://api.semanticscholar.org/graph/v1/paper/search"
-_SS_FIELDS = "title,year,citationCount,externalIds,abstract,authors"
+_SS_FIELDS = "title,year,citationCount,externalIds,abstract,authors,fieldsOfStudy"
 
 
 def _parse_author(name: str) -> dict:
@@ -198,8 +244,8 @@ async def fetch_bibliography(
     n_frontier = n_total - n_history
 
     # frontier_months may not be a clean multiple of 12; floor to at least 1 year back
-    cutoff_year = datetime.now().year - max(1, cfg.bibliography.frontier_months // 12)
-    current_year = datetime.now().year
+    cutoff_year = datetime.datetime.now().year - max(1, cfg.bibliography.frontier_months // 12)
+    current_year = datetime.datetime.now().year
 
     # Sequential — both share the global rate limiter, so parallel offers no benefit
     # and doubles queue pressure on the SS API.
@@ -209,8 +255,18 @@ async def fetch_bibliography(
         year_filter=f"{cutoff_year}-{current_year}",
     )
 
+    # Foundational: sort by raw citation count (time-tested impact, no recency penalty)
     foundational_raw.sort(key=lambda p: p.get("citationCount") or 0, reverse=True)
-    frontier_raw.sort(key=lambda p: p.get("citationCount") or 0, reverse=True)
+    # Frontier: sort by MNCS to correct recency and field-size bias
+    frontier_raw.sort(
+        key=lambda p: _mncs_score(
+            p.get("citationCount") or 0,
+            (p.get("fieldsOfStudy") or [""])[0] if p.get("fieldsOfStudy") else "",
+            p.get("year") or current_year,
+            _FIELD_BASELINES,
+        ),
+        reverse=True,
+    )
 
     seen: set[str] = set()
     seen_dois: set[str] = set()

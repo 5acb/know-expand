@@ -48,6 +48,13 @@ CHECKLIST — verify each item and fix what's missing:
 5. Citations — Are there [NEEDS_CITATION] markers that can be resolved via search? \
    Search for the claim, add the paper to bibliography, and update the text.
 
+POSITION GUIDE for insert_content:
+- "What is X?" intro missing → use position='after_intro' to insert after the first ## heading
+- Symbol table before equation → use position='before:<equation heading or surrounding heading>'
+- Worked example after concept → use position='after:<concept heading>'
+- "Where to Go Next" section → use position='end' only if no suitable heading exists, otherwise 'after:<last concept heading>'
+- Do NOT use position='start' for the "What is X?" intro; use 'after_intro' instead.
+
 CONSTRAINTS:
 - Only ADD content — never delete or rewrite existing text.
 - Be surgical: add the minimum necessary to satisfy each checklist item.
@@ -114,27 +121,83 @@ def _make_tools(
     @tool
     async def insert_content(content: str, position: str) -> str:
         """Insert Markdown content into this domain's section.
-        Use position='end' to append, 'start' to prepend,
-        or 'before:<exact heading text>' to insert before a heading."""
+        position options:
+          'end'              — append at document end (use only as last resort)
+          'start'            — prepend before all content
+          'after_intro'      — after the first section heading (## What is ...)
+          'before:<heading>' — before the line containing <heading> (case-insensitive substring)
+          'after:<heading>'  — after the section starting with <heading> (finds end of that section)
+        """
         content = content.strip()
         path = sections_dir / f"section_{domain_id}.md"
         if not path.exists():
             return f"Section not found: {domain_id}"
-        existing = path.read_text()
+        text = path.read_text()
+
         if position == "end":
-            path.write_text(existing.rstrip() + "\n\n" + content + "\n")
+            path.write_text(text.rstrip() + "\n\n" + content + "\n")
+            return f"Appended {len(content)} chars at document end."
+
         elif position == "start":
-            path.write_text(content + "\n\n" + existing)
-        elif position.startswith("before:"):
-            heading = position[len("before:"):]
-            idx = existing.find(heading)
-            if idx == -1:
-                path.write_text(existing.rstrip() + "\n\n" + content + "\n")
-                return f"Heading '{heading}' not found; appended to end instead."
-            path.write_text(existing[:idx] + content + "\n\n" + existing[idx:])
+            path.write_text(content + "\n\n" + text)
+            return f"Prepended {len(content)} chars at document start."
+
+        elif position == "after_intro":
+            # Find the first ## heading after the opening, insert after it
+            lines = text.split("\n")
+            for i, line in enumerate(lines):
+                if line.startswith("## ") and i > 0:
+                    insert_at = i + 1
+                    # Skip any immediate blank lines after the heading
+                    while insert_at < len(lines) and lines[insert_at].strip() == "":
+                        insert_at += 1
+                    lines.insert(insert_at, "")
+                    lines.insert(insert_at, content)
+                    path.write_text("\n".join(lines))
+                    return f"Inserted {len(content)} chars after intro heading."
+            # Fallback: prepend
+            path.write_text(content + "\n\n" + text)
+            return f"No ## heading found; prepended instead."
+
+        elif position.startswith("before:") or position.startswith("after:"):
+            mode = "before" if position.startswith("before:") else "after"
+            target = position[len(mode) + 1:]
+            lines = text.split("\n")
+            # Case-insensitive substring search across all lines
+            match_idx = next(
+                (i for i, line in enumerate(lines) if target.lower() in line.lower()),
+                None
+            )
+            if match_idx is None:
+                # Try to find the nearest heading as a fallback
+                # Insert before the LAST top-level section as a best effort
+                heading_indices = [i for i, l in enumerate(lines) if l.startswith("## ")]
+                if heading_indices:
+                    insert_at = heading_indices[-1]
+                    lines.insert(insert_at, "")
+                    lines.insert(insert_at, content)
+                    path.write_text("\n".join(lines))
+                    return f"Target '{target}' not found; inserted before last ## section as fallback."
+                else:
+                    path.write_text(text.rstrip() + "\n\n" + content + "\n")
+                    return f"Target '{target}' not found and no ## headings; appended to end."
+            if mode == "before":
+                lines.insert(match_idx, "")
+                lines.insert(match_idx, content)
+            else:  # after: find end of that section
+                # Insert at the blank line before the next ## heading, or at end
+                next_heading = next(
+                    (i for i in range(match_idx + 1, len(lines)) if lines[i].startswith("## ")),
+                    len(lines)
+                )
+                insert_at = next_heading
+                lines.insert(insert_at, "")
+                lines.insert(insert_at, content)
+            path.write_text("\n".join(lines))
+            return f"Inserted {len(content)} chars {mode} '{target}'."
+
         else:
-            return f"Unknown position: {position}"
-        return f"Content inserted ({len(content)} chars) at position '{position}'."
+            return f"Unknown position '{position}'. Use: end, start, after_intro, before:<heading>, after:<heading>"
 
     @tool
     async def add_to_bibliography(
