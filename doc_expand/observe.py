@@ -382,6 +382,10 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
 .chat-opt:hover { border-color: var(--accent); color: var(--accent); }
 .chat-opt:disabled { opacity: 0.5; cursor: default; }
 .chat-opt.chosen { background: #1a2a3a; border-color: var(--accent); color: var(--accent); }
+.chat-opt-submit { margin-top: 4px; background: var(--accent); border: none; border-radius: 4px;
+                   padding: 5px 14px; font-size: 11px; font-weight: 600; cursor: pointer;
+                   color: #fff; width: 100%; text-align: center; }
+.chat-opt-submit:hover { filter: brightness(1.15); }
 #chat-input-area { padding: 10px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-shrink: 0; }
 #chat-input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
               padding: 6px 10px; color: var(--text); font-family: var(--font-mono); font-size: 12px; outline: none; }
@@ -1294,9 +1298,24 @@ function renderQuestion(q) {
       const btn = document.createElement('button');
       btn.className = 'chat-opt';
       btn.textContent = opt;
-      btn.onclick = () => submitAnswer(q.id, opt, msgEl);
+      btn.onclick = () => {
+        btn.classList.toggle('chosen');
+        submitBtn.style.display = opts.querySelector('.chat-opt.chosen') ? 'block' : 'none';
+      };
       opts.appendChild(btn);
     });
+    const submitBtn = document.createElement('button');
+    submitBtn.className = 'chat-opt-submit';
+    submitBtn.textContent = 'Submit →';
+    submitBtn.style.display = 'none';
+    submitBtn.onclick = () => {
+      const chosen = [...opts.querySelectorAll('.chat-opt.chosen')].map(b => b.textContent);
+      if (!chosen.length) return;
+      opts.querySelectorAll('.chat-opt').forEach(b => b.disabled = true);
+      submitBtn.style.display = 'none';
+      submitAnswer(q.id, chosen.join(', '), msgEl);
+    };
+    opts.appendChild(submitBtn);
     msgEl.appendChild(opts);
     $('chat-input-area').style.display = 'none';
   } else {
