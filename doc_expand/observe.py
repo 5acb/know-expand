@@ -2433,12 +2433,18 @@ def _spawn_pipeline(runs_dir: Path, params: dict) -> int:
     if no_pdf:
         args.append("--no-pdf")
 
+    # Reset SIGCHLD to SIG_DFL in the child before exec.  The server sets
+    # SIGCHLD=SIG_IGN to prevent zombie accumulation, but SIG_IGN survives
+    # fork+exec (POSIX), so without this reset pandoc can't wait() for xelatex
+    # and fails with "No child processes".
+    import signal as _sig
     proc = subprocess.Popen(
         cmd + args,
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=os.environ.copy(),
+        preexec_fn=lambda: _sig.signal(_sig.SIGCHLD, _sig.SIG_DFL),
     )
     (state_dir / "pipeline_pid").write_text(str(proc.pid))
     return proc.pid
