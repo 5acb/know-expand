@@ -105,10 +105,19 @@ async def run_pipeline(
     depth: str,
     cfg: Config,
     auto_taxonomy: bool = False,
+    primary_model: str | None = None,
     no_pdf: bool = False,
     resume_stage: int | None = None,
 ) -> None:
     import uuid
+
+    if primary_model:
+        for role in cfg.models:
+            models = cfg.models[role]
+            if primary_model not in models:
+                cfg.models[role] = [primary_model] + models
+            else:
+                cfg.models[role] = [primary_model] + [m for m in models if m != primary_model]
 
     pipeline_json = load_pipeline_json(state_dir)
     run_id = pipeline_json.get("run_id") or f"run_{uuid.uuid4().hex[:8]}"
