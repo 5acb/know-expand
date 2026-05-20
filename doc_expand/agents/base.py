@@ -1,6 +1,8 @@
 import asyncio
+import json
 import logging
 import os
+import re
 import time
 from typing import TypeVar
 
@@ -12,6 +14,331 @@ from doc_expand.config import Config
 from doc_expand.state import emit
 
 _logger = logging.getLogger("doc_expand.router")
+
+T = TypeVar("T", bound=BaseModel)
+
+# ---------------------------------------------------------------------------
+# Gemini CLI provider  (prefix "geminicli/")
+# ---------------------------------------------------------------------------
+# Uses `npx @google/gemini-cli` with cached OAuth — no API key required.
+# Structured output is achieved by injecting the JSON schema into the prompt
+# and extracting the first JSON object/array from the response.
+
+_GEMINICLI_PREFIX = "geminicli/"
+# Model passed to the CLI binary (free OAuth path).
+_GEMINICLI_CLI_MODEL = "gemini-3.1-pro-preview"
+
+_LLAMACPP_PREFIX = "llamacpp/"
+
+
+def _is_geminicli(model: str) -> bool:
+    return model.startswith(_GEMINICLI_PREFIX)
+
+
+def _is_llamacpp(model: str) -> bool:
+    return model.startswith(_LLAMACPP_PREFIX)
+
+
+def _geminicli_model_name(model: str) -> str:
+    """Return the model name to pass to the CLI binary."""
+    return _GEMINICLI_CLI_MODEL
+
+
+def _messages_to_prompt(messages: list[dict]) -> str:
+    """Flatten a messages list into a single text prompt for the CLI."""
+    parts: list[str] = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            # multi-part content blocks
+            content = "\n".join(
+                block.get("text", "") for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        if role == "system":
+            parts.append(f"[System]\n{content}")
+        elif role == "assistant":
+            parts.append(f"[Assistant]\n{content}")
+        else:
+            parts.append(f"[User]\n{content}")
+    return "\n\n".join(parts)
+
+
+def _extract_json(text: str) -> str:
+    """Pull the first JSON object or array out of CLI response text."""
+    # Strip markdown code fences
+    text = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.MULTILINE)
+    text = re.sub(r"```\s*$", "", text.strip(), flags=re.MULTILINE)
+    text = text.strip()
+    # Find outermost { } or [ ]
+    for start_char, end_char in [('{', '}'), ('[', ']')]:
+        start = text.find(start_char)
+        if start == -1:
+            continue
+        depth = 0
+        in_str = False
+        escape = False
+        for i, ch in enumerate(text[start:], start):
+            if escape:
+                escape = False
+                continue
+            if ch == '\\' and in_str:
+                escape = True
+                continue
+            if ch == '"' and not escape:
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == start_char:
+                depth += 1
+            elif ch == end_char:
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+    return text  # fall back to raw text; Pydantic will error cleanly
+
+
+async def _do_geminicli_call(
+    model: str,
+    messages: list[dict],
+    schema: type[T],
+    cfg: Config,
+    role: str = "?",
+) -> "T":
+    cli_model = _geminicli_model_name(model)
+    schema_json = json.dumps(schema.model_json_schema(), indent=2)
+    base_prompt = _messages_to_prompt(messages)
+    full_prompt = (
+        f"{base_prompt}\n\n"
+        f"---\n"
+        f"Respond with a single JSON object that strictly matches this JSON Schema "
+        f"(no extra keys, no markdown, no explanation — raw JSON only):\n"
+        f"{schema_json}"
+    )
+
+    t0 = time.monotonic()
+    emit({
+        "event": "llm_call_start",
+        "role": role,
+        "model": f"geminicli/{cli_model}",
+        "schema": schema.__name__,
+        "msg_chars": len(full_prompt),
+    })
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "--yes", "@google/gemini-cli",
+            "-m", cli_model,
+            "-p", full_prompt,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=getattr(cfg, "geminicli_timeout_s", 120),
+        )
+        raw = stdout_b.decode(errors="replace").strip()
+        # The CLI exits non-zero even on success when MCP warnings are present.
+        # Treat empty stdout as the real failure signal; non-empty stdout = success.
+        if not raw:
+            err_text = stderr_b.decode(errors="replace")[:400]
+            raise RuntimeError(f"gemini-cli returned no output (exit {proc.returncode}): {err_text}")
+
+        json_text = _extract_json(raw)
+        result = schema.model_validate_json(json_text)
+
+        elapsed = time.monotonic() - t0
+        emit({
+            "event": "llm_call_done",
+            "role": role,
+            "model": f"geminicli/{cli_model}",
+            "schema": schema.__name__,
+            "elapsed_s": round(elapsed, 2),
+            "tok_in": None,
+            "tok_out": None,
+            "tok_s": None,
+        })
+        return result
+
+    except Exception as exc:
+        elapsed = time.monotonic() - t0
+        emit({
+            "event": "llm_call_error",
+            "role": role,
+            "model": f"geminicli/{cli_model}",
+            "schema": schema.__name__,
+            "elapsed_s": round(elapsed, 2),
+            "error": str(exc)[:200],
+        })
+        raise
+
+
+async def _do_geminicli_tool_call(
+    model: str,
+    messages: list[dict],
+    tools: list[dict],
+    cfg: Config,
+    role: str = "?",
+) -> dict:
+    """Tool-use via Gemini CLI: describe tools as JSON in the prompt, parse back."""
+    cli_model = _geminicli_model_name(model)
+    tools_json = json.dumps(tools, indent=2)
+    base_prompt = _messages_to_prompt(messages)
+    full_prompt = (
+        f"{base_prompt}\n\n"
+        f"---\n"
+        f"You have access to the following tools:\n{tools_json}\n\n"
+        f"If you need to call a tool, respond with a JSON object in this exact format "
+        f"(raw JSON only, no markdown):\n"
+        f'{{"tool_call": {{"name": "<tool_name>", "arguments": {{...}}}}}}\n\n'
+        f"If no tool call is needed, respond normally as plain text."
+    )
+
+    reported_model = f"geminicli/{cli_model}"
+    t0 = time.monotonic()
+    emit({"event": "agent_tool_call_start", "role": role, "model": reported_model})
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "--yes", "@google/gemini-cli",
+            "-m", cli_model,
+            "-p", full_prompt,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=getattr(cfg, "geminicli_timeout_s", 120),
+        )
+        raw = stdout_b.decode(errors="replace").strip()
+        if not raw:
+            err_text = stderr_b.decode(errors="replace")[:400]
+            raise RuntimeError(f"gemini-cli returned no output (exit {proc.returncode}): {err_text}")
+
+        elapsed = time.monotonic() - t0
+        emit({
+            "event": "agent_tool_call_done",
+            "role": role,
+            "model": reported_model,
+            "elapsed_s": round(elapsed, 2),
+            "tool_calls": 0,
+        })
+
+        # Try to parse a tool call from the response
+        json_text = _extract_json(raw)
+        try:
+            parsed = json.loads(json_text)
+            if "tool_call" in parsed:
+                tc = parsed["tool_call"]
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": f"cli_{int(t0)}",
+                        "type": "function",
+                        "function": {
+                            "name": tc.get("name", ""),
+                            "arguments": json.dumps(tc.get("arguments", {})),
+                        },
+                    }],
+                }
+        except Exception:
+            pass
+
+        # No tool call — plain text response
+        return {"role": "assistant", "content": raw, "tool_calls": None}
+
+    except Exception as exc:
+        elapsed = time.monotonic() - t0
+        emit({
+            "event": "llm_call_error",
+            "role": role,
+            "model": reported_model,
+            "schema": "tool_call",
+            "elapsed_s": round(elapsed, 2),
+            "error": str(exc)[:200],
+        })
+        raise
+
+# ---------------------------------------------------------------------------
+# llamacpp provider  (prefix "llamacpp/")
+# ---------------------------------------------------------------------------
+# Routes to a llama-server instance via OpenAI-compatible API.
+# Base URL is read from cfg.llamacpp.base_url (default: http://127.0.0.1:8080).
+
+
+async def _llamacpp_is_available(cfg) -> bool:
+    """True if the llama-server /health endpoint is reachable."""
+    base_url: str = cfg.llamacpp.base_url
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{base_url}/health")
+            return r.status_code < 500
+    except Exception:
+        return False
+
+
+async def _do_llamacpp_call(
+    model: str,
+    messages: list[dict],
+    schema: type[T],
+    cfg,
+    role: str = "?",
+) -> T:
+    """Structured call to a llama-server via OpenAI-compat API (instructor + litellm)."""
+    import instructor
+
+    model_name = model[len(_LLAMACPP_PREFIX):]
+    base_url: str = cfg.llamacpp.base_url
+    api_base = base_url.rstrip("/") + "/v1"
+
+    client = instructor.from_litellm(litellm.acompletion)
+    t0 = time.monotonic()
+    emit({
+        "event": "llm_call_start",
+        "role": role,
+        "model": model,
+        "schema": schema.__name__,
+        "msg_chars": sum(len(m.get("content", "")) for m in messages),
+    })
+    try:
+        result, completion = await client.chat.completions.create_with_completion(
+            model=f"openai/{model_name}",
+            api_base=api_base,
+            api_key="not-needed",
+            messages=messages,
+            response_model=schema,
+        )
+        elapsed = time.monotonic() - t0
+        usage = getattr(completion, "usage", None)
+        tok_out = getattr(usage, "completion_tokens", None)
+        tok_in = getattr(usage, "prompt_tokens", None)
+        tok_s = round(tok_out / elapsed, 1) if tok_out and elapsed > 0 else None
+        emit({
+            "event": "llm_call_done",
+            "role": role,
+            "model": model,
+            "schema": schema.__name__,
+            "elapsed_s": round(elapsed, 2),
+            "tok_in": tok_in,
+            "tok_out": tok_out,
+            "tok_s": tok_s,
+        })
+        return result
+    except Exception as exc:
+        elapsed = time.monotonic() - t0
+        emit({
+            "event": "llm_call_error",
+            "role": role,
+            "model": model,
+            "schema": schema.__name__,
+            "elapsed_s": round(elapsed, 2),
+            "error": str(exc)[:200],
+        })
+        raise
+
 
 # Populated once by probe_models() at pipeline startup.
 # Every new QuotaAwareRouter copies this as its initial skip set.
@@ -50,16 +377,35 @@ def _is_auth_error(exc: BaseException) -> BaseException | None:
     return None
 
 
+def _geminicli_is_available() -> bool:
+    """True if npx exists and the Gemini CLI OAuth credentials are cached."""
+    import shutil
+    if not shutil.which("npx"):
+        return False
+    # Gemini CLI stores OAuth creds in ~/.gemini/oauth_creds.json
+    creds = os.path.expanduser("~/.gemini/oauth_creds.json")
+    return os.path.exists(creds)
+
+
 async def _probe_one(model: str, cfg: Config) -> bool:
     """Return True if model appears usable. Checks env vars only — no LLM call."""
+    if _is_geminicli(model):
+        return _geminicli_is_available()
     if "claude" in model or "anthropic" in model:
         return bool(os.environ.get("ANTHROPIC_API_KEY"))
     if "gpt" in model or "openai" in model:
         return bool(os.environ.get("OPENAI_API_KEY"))
     if "gemini" in model or "google" in model:
         return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-    # Local providers are not supported — always unavailable
-    if model.startswith(("llamacpp/", "ollama/", "lm_studio/", "local/")):
+    if "groq" in model:
+        return bool(os.environ.get("GROQ_API_KEY"))
+    if "mistral" in model:
+        return bool(os.environ.get("MISTRAL_API_KEY"))
+    # llamacpp: probe the actual server health endpoint
+    if model.startswith("llamacpp/"):
+        return await _llamacpp_is_available(cfg)
+    # Other local providers — skip unless explicitly configured
+    if model.startswith(("ollama/", "lm_studio/", "local/")):
         return False
     # Unknown remote provider — optimistically assume available
     return True
@@ -81,14 +427,32 @@ async def probe_models(cfg: Config) -> None:
     available = all_models - unavailable
     _PROBED_UNAVAILABLE = unavailable
 
+    def _report_name(m: str) -> str:
+        return f"geminicli/{_GEMINICLI_CLI_MODEL}" if _is_geminicli(m) else m
+
     emit({
         "event": "model_probe_done",
-        "available": sorted(available),
+        "available": sorted(_report_name(m) for m in available),
         "unavailable": sorted(unavailable),
     })
 
+    # Compute the first available model for each role and emit as an assignment map.
+    # For geminicli/ entries, report the real CLI model name so the log is truthful.
+    def _effective_name(m: str) -> str:
+        if _is_geminicli(m):
+            return f"geminicli/{_GEMINICLI_CLI_MODEL}"
+        return m
 
-T = TypeVar("T", bound=BaseModel)
+    assignments: dict[str, str | None] = {}
+    for role, models in cfg.models.items():
+        chosen = next((m for m in models if m not in unavailable), None)
+        assignments[role] = _effective_name(chosen) if chosen else None
+
+    emit({
+        "event": "model_role_assignments",
+        "assignments": assignments,
+    })
+
 
 _SEMAPHORE: asyncio.Semaphore | None = None
 
@@ -107,6 +471,11 @@ async def _do_call(
     cfg: Config,
     role: str = "?",
 ) -> T:
+    if _is_geminicli(model):
+        return await _do_geminicli_call(model, messages, schema, cfg, role)
+    if _is_llamacpp(model):
+        return await _do_llamacpp_call(model, messages, schema, cfg, role)
+
     import instructor
     client = instructor.from_litellm(litellm.acompletion)
     t0 = time.monotonic()
@@ -261,13 +630,36 @@ class QuotaAwareRouter:
                 "model": model,
             })
             try:
-                async with sem:
-                    response = await litellm.acompletion(
-                        model=model,
-                        messages=messages,
-                        tools=tools,
-                        tool_choice="auto",
-                    )
+                if _is_geminicli(model):
+                    async with sem:
+                        result_msg = await _do_geminicli_tool_call(
+                            model, messages, tools, self.cfg, role=self.role
+                        )
+                    self._fail_counts.pop(model, None)
+                    return result_msg
+
+                # llamacpp tool-calling: route to localhost OpenAI-compat endpoint
+                if _is_llamacpp(model):
+                    model_name = model[len(_LLAMACPP_PREFIX):]
+                    base_url: str = self.cfg.llamacpp.base_url
+                    api_base = base_url.rstrip("/") + "/v1"
+                    async with sem:
+                        response = await litellm.acompletion(
+                            model=f"openai/{model_name}",
+                            api_base=api_base,
+                            api_key="not-needed",
+                            messages=messages,
+                            tools=tools,
+                            tool_choice="auto",
+                        )
+                else:
+                    async with sem:
+                        response = await litellm.acompletion(
+                            model=model,
+                            messages=messages,
+                            tools=tools,
+                            tool_choice="auto",
+                        )
                 msg = response.choices[0].message
                 elapsed = time.monotonic() - t0
                 emit({

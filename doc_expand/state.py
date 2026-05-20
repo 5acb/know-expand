@@ -1,7 +1,7 @@
 """
 Logging and state management for the doc-expand pipeline.
 
-Log layout per run (logs/{run_id}/):
+Log layout per run (runs/{run_id}/logs/):
   events.jsonl  — every emit() call as a timestamped JSON Line
   pipeline.log  — human-readable INFO+ with UTC timestamps
   debug.log     — everything including DEBUG
@@ -48,16 +48,16 @@ class _UTCFormatter(logging.Formatter):
         return f"{ts} {record.levelname[0]} {record.name}: {record.getMessage()}"
 
 
-def setup_logging(run_id: str, log_base: Path = Path("logs")) -> Path:
+def setup_logging(run_id: str, log_dir: Path) -> Path:
     """
-    Create logs/{run_id}/ and wire up file handlers.
+    Wire up file handlers writing into log_dir (the full path, already including run_id).
     Must be called once at pipeline startup before any emit().
     Returns the log directory path.
     """
     global _run_id, _log_dir, _event_fh
 
     _run_id = run_id
-    _log_dir = log_base / run_id
+    _log_dir = log_dir
     _log_dir.mkdir(parents=True, exist_ok=True)
 
     _event_fh = open(_log_dir / "events.jsonl", "a", buffering=1)
