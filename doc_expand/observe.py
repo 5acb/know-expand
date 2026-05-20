@@ -306,6 +306,27 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
                  padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer; width: 100%; margin-top: 4px; }
 #run-start-btn:hover { filter: brightness(1.1); }
 #run-start-btn:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+/* file browser */
+.rf-input-row { display: flex; gap: 5px; align-items: center; }
+.rf-input-row .rf-input { flex: 1; }
+#browse-btn { background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
+              padding: 6px 9px; color: var(--muted); font-size: 11px; cursor: pointer;
+              white-space: nowrap; flex-shrink: 0; }
+#browse-btn:hover { border-color: var(--accent); color: var(--accent); }
+#file-browser { background: var(--surface); border: 1px solid var(--border); border-radius: 5px;
+                overflow: hidden; display: none; flex-direction: column; max-height: 240px; }
+#fb-crumb { padding: 5px 8px; font-size: 10px; font-family: var(--font-mono); color: var(--muted);
+            border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden;
+            text-overflow: ellipsis; flex-shrink: 0; }
+#fb-list { overflow-y: auto; flex: 1; }
+.fb-entry { display: flex; align-items: center; gap: 7px; padding: 5px 10px;
+            font-size: 12px; cursor: pointer; border-bottom: 1px solid var(--border); }
+.fb-entry:last-child { border-bottom: none; }
+.fb-entry:hover { background: var(--surface2); }
+.fb-icon { font-size: 11px; flex-shrink: 0; width: 14px; }
+.fb-name { flex: 1; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-name.dir { color: var(--accent); }
+.fb-size { font-size: 10px; color: var(--muted); flex-shrink: 0; font-family: var(--font-mono); }
 
 /* Chat UI */
 #chat-messages { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
@@ -391,7 +412,14 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
       <div id="run-setup">
         <div>
           <div class="rf-label">Input (file path or URL)</div>
-          <input id="run-input" class="rf-input" placeholder="./paper.pdf or https://…" />
+          <div class="rf-input-row">
+            <input id="run-input" class="rf-input" placeholder="./paper.pdf or https://…" />
+            <button id="browse-btn" onclick="toggleBrowser()">⋯</button>
+          </div>
+          <div id="file-browser">
+            <div id="fb-crumb">/</div>
+            <div id="fb-list"></div>
+          </div>
         </div>
         <div>
           <div class="rf-label">Depth</div>
@@ -916,6 +944,62 @@ async function startRun() {
   }
 }
 
+// File browser
+let fbOpen = false;
+let fbCwd = null;
+
+function toggleBrowser() {
+  const el = $('file-browser');
+  fbOpen = !fbOpen;
+  el.style.display = fbOpen ? 'flex' : 'none';
+  if (fbOpen && fbCwd === null) loadDir('.');
+}
+
+async function loadDir(dir) {
+  const r = await fetch('/api/files?dir=' + encodeURIComponent(dir));
+  if (!r.ok) return;
+  const d = await r.json();
+  fbCwd = d.cwd;
+  $('fb-crumb').textContent = fbCwd;
+  const list = $('fb-list');
+  list.innerHTML = '';
+
+  // Parent dir entry
+  if (d.parent) {
+    const row = document.createElement('div');
+    row.className = 'fb-entry';
+    row.innerHTML = '<span class="fb-icon">↑</span><span class="fb-name dir">..</span>';
+    row.onclick = () => loadDir(d.parent);
+    list.appendChild(row);
+  }
+
+  for (const e of d.entries) {
+    const row = document.createElement('div');
+    row.className = 'fb-entry';
+    const sizeStr = e.type === 'file' ? _fmtBytes(e.size) : '';
+    row.innerHTML = `<span class="fb-icon">${e.type === 'dir' ? '▶' : '·'}</span>` +
+      `<span class="fb-name ${e.type === 'dir' ? 'dir' : ''}">${e.name}</span>` +
+      `<span class="fb-size">${sizeStr}</span>`;
+    if (e.type === 'dir') {
+      row.onclick = () => loadDir(e.path);
+    } else {
+      row.onclick = () => {
+        $('run-input').value = e.path;
+        fbOpen = false;
+        $('file-browser').style.display = 'none';
+      };
+    }
+    list.appendChild(row);
+  }
+}
+
+function _fmtBytes(n) {
+  if (n == null) return '';
+  if (n < 1024) return n + 'B';
+  if (n < 1048576) return (n/1024).toFixed(0) + 'K';
+  return (n/1048576).toFixed(1) + 'M';
+}
+
 // Q&A polling (called from main poll loop)
 async function pollQa() {
   if (runPaneMode !== 'qa') return;
@@ -1400,6 +1484,37 @@ def _render_section(section_path: Path) -> str:
         return "<pre>" + _h.escape(text) + "</pre>"
 
 
+def _list_files(dir_param: str) -> dict:
+    """Return directory listing for the file browser."""
+    try:
+        target = Path(dir_param).expanduser().resolve()
+    except Exception:
+        target = Path.cwd()
+    if not target.is_dir():
+        target = target.parent if target.parent.is_dir() else Path.cwd()
+
+    entries = []
+    try:
+        for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+            if p.name.startswith("."):
+                continue
+            try:
+                size = p.stat().st_size if p.is_file() else None
+            except OSError:
+                size = None
+            entries.append({
+                "name": p.name,
+                "type": "dir" if p.is_dir() else "file",
+                "path": str(p),
+                "size": size,
+            })
+    except PermissionError:
+        pass
+
+    parent = str(target.parent) if target != target.parent else None
+    return {"cwd": str(target), "parent": parent, "entries": entries}
+
+
 def _spawn_pipeline(state_dir: Path, params: dict) -> int:
     """Clear Q&A state, spawn pipeline subprocess, return PID."""
     for fname in ("qa_queue.jsonl", "qa_answers.jsonl", "qa_complete"):
@@ -1533,6 +1648,12 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
 
             elif self.path == "/api/qa":
                 _json_response(self, _get_qa_state(state_dir))
+
+            elif self.path.startswith("/api/files"):
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(self.path).query)
+                dir_param = qs.get("dir", ["."])[0]
+                _json_response(self, _list_files(dir_param))
 
             else:
                 self.send_response(404)
