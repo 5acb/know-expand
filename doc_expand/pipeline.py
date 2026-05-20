@@ -6,16 +6,16 @@ from doc_expand.config import Config, load_config
 from doc_expand.state import PipelineState, emit, load_pipeline_json
 from doc_expand.stages import (
     s0_ingest,
-    s0_5_assess,
-    s1_extract,
-    s2_graph,
-    s3_audit,
-    s4_research,
-    s4_5_align,
-    s5_synthesize,
-    s6_verify,
-    s6_5_prereq,
-    s7_assemble,
+    s1_assess,
+    s2_extract,
+    s3_graph,
+    s4_audit,
+    s5_research,
+    s6_align,
+    s7_synthesize,
+    s8_verify,
+    s9_prereq,
+    s10_assemble,
 )
 
 
@@ -32,43 +32,43 @@ def build_graph(
         return state
 
     async def node_assess(state: PipelineState) -> PipelineState:
-        await s0_5_assess.run(state, interactive=interactive)
+        await s1_assess.run(state, interactive=interactive)
         return state
 
     async def node_extract(state: PipelineState) -> PipelineState:
-        await s1_extract.run(state, cfg)
+        await s2_extract.run(state, cfg)
         return state
 
     async def node_graph(state: PipelineState) -> PipelineState:
-        await s2_graph.run(state, cfg, auto_taxonomy=auto_taxonomy)
+        await s3_graph.run(state, cfg, auto_taxonomy=auto_taxonomy)
         return state
 
     async def node_audit(state: PipelineState) -> PipelineState:
-        await s3_audit.run(state, cfg)
+        await s4_audit.run(state, cfg)
         return state
 
     async def node_research(state: PipelineState) -> PipelineState:
-        await s4_research.run(state, cfg)
+        await s5_research.run(state, cfg)
         return state
 
     async def node_align(state: PipelineState) -> PipelineState:
-        await s4_5_align.run(state, cfg)
+        await s6_align.run(state, cfg)
         return state
 
     async def node_synthesize(state: PipelineState) -> PipelineState:
-        await s5_synthesize.run(state, cfg)
+        await s7_synthesize.run(state, cfg)
         return state
 
     async def node_verify(state: PipelineState) -> PipelineState:
-        await s6_verify.run(state, cfg)
+        await s8_verify.run(state, cfg)
         return state
 
     async def node_prereq(state: PipelineState) -> PipelineState:
-        await s6_5_prereq.run(state, cfg)
+        await s9_prereq.run(state, cfg)
         return state
 
     async def node_assemble(state: PipelineState) -> PipelineState:
-        await s7_assemble.run(state, cfg, no_pdf=no_pdf)
+        await s10_assemble.run(state, cfg, no_pdf=no_pdf)
         return state
 
     graph.add_node("ingest", node_ingest)

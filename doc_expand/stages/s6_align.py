@@ -1,4 +1,4 @@
-"""Stage 4.5 — Section Alignment Agent.
+"""Stage 6 — Section Alignment Agent.
 
 Uses langgraph.prebuilt.create_react_agent with a QuotaAwareRouter-backed
 chat model to align each domain section against the "zero-to-building"
@@ -347,19 +347,19 @@ async def run(state: PipelineState, cfg: Config) -> None:
     sections_dir = state_dir / "sections"
     audit_dir = state_dir / "audit"
 
-    if stage_is_complete(state_dir, "4.5"):
-        emit({"event": "stage_skipped", "stage": "4.5", "reason": "already_complete"})
+    if stage_is_complete(state_dir, 6):
+        emit({"event": "stage_skipped", "stage": 6, "reason": "already_complete"})
         return
 
-    emit({"event": "stage_start", "stage": "4.5"})
+    emit({"event": "stage_start", "stage": 6})
     reset_ss_limiter()
 
     taxonomy = json.loads((state_dir / "taxonomy.json").read_text())
     domains = taxonomy["domains"]
 
     if "agent" not in cfg.models:
-        emit({"event": "s4_5_skipped", "reason": "no_agent_role_in_models"})
-        mark_stage_complete(state_dir, "4.5")
+        emit({"event": "s6_align_skipped", "reason": "no_agent_role_in_models"})
+        mark_stage_complete(state_dir, 6)
         return
 
     router = make_router("agent", cfg)
@@ -370,16 +370,16 @@ async def run(state: PipelineState, cfg: Config) -> None:
                 await _align_domain(domain, sections_dir, audit_dir, http, cfg, router)
             except Exception as exc:
                 emit({
-                    "event": "s4_5_domain_failed",
+                    "event": "s6_align_domain_failed",
                     "domain_id": domain["id"],
                     "error": str(exc)[:200],
                 })
 
     aligned = sum(1 for d in domains if (sections_dir / f"section_{d['id']}.aligned").exists())
-    mark_stage_complete(state_dir, "4.5")
+    mark_stage_complete(state_dir, 6)
     emit({
         "event": "stage_complete",
-        "stage": "4.5",
+        "stage": 6,
         "domains_aligned": aligned,
         "domains_total": len(domains),
     })

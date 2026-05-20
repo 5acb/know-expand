@@ -921,11 +921,11 @@ async def run(state: PipelineState, cfg: Config) -> None:
     summaries_dir.mkdir(exist_ok=True)
     audit_dir.mkdir(exist_ok=True)
 
-    if stage_is_complete(state_dir, 4):
-        emit({"event": "stage_skipped", "stage": 4, "reason": "already_complete"})
+    if stage_is_complete(state_dir, 5):
+        emit({"event": "stage_skipped", "stage": 5, "reason": "already_complete"})
         return
 
-    emit({"event": "stage_start", "stage": 4})
+    emit({"event": "stage_start", "stage": 5})
 
     taxonomy = json.loads((state_dir / "taxonomy.json").read_text())
     domains = taxonomy["domains"]
@@ -975,10 +975,10 @@ async def run(state: PipelineState, cfg: Config) -> None:
         else:
             succeeded += 1
 
-    mark_stage_complete(state_dir, 4)
+    mark_stage_complete(state_dir, 5)
     emit({
-        "event": "s4_complete",
-        "stage": 4,
+        "event": "s5_research_complete",
+        "stage": 5,
         "domains_succeeded": succeeded,
         "domains_failed": failed,
     })

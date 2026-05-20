@@ -114,12 +114,12 @@ async def run(state: PipelineState, cfg: Config) -> None:
 
     audit_dir.mkdir(exist_ok=True)
 
-    if stage_is_complete(state_dir, 6):
-        emit({"event": "stage_skipped", "stage": 6, "reason": "already_complete"})
+    if stage_is_complete(state_dir, 8):
+        emit({"event": "stage_skipped", "stage": 8, "reason": "already_complete"})
         return
 
-    emit({"event": "stage_start", "stage": 6})
-    emit({"event": "s6_start"})
+    emit({"event": "stage_start", "stage": 8})
+    emit({"event": "s8_start"})
 
     # Build valid citation ID set from all bibliography JSONs
     valid_citation_ids: set[str] = set()
@@ -160,10 +160,10 @@ async def run(state: PipelineState, cfg: Config) -> None:
     citation_index_path = audit_dir / "citation_index.json"
     citation_index_path.write_text(json.dumps(bibliography_index, indent=2))
 
-    mark_stage_complete(state_dir, 6)
+    mark_stage_complete(state_dir, 8)
     emit({
-        "event": "s6_complete",
-        "stage": 6,
+        "event": "s8_complete",
+        "stage": 8,
         "total_needs_citation": total_needs_citation,
         "total_unknown_keys": total_unknown_keys,
         "total_verified": total_verified,
