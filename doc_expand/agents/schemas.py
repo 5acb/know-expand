@@ -157,6 +157,20 @@ class DomainSummary(BaseModel):
     citation_ids_used: list[str] = Field(default_factory=list)
 
 
+class PersonaOutput(BaseModel):
+    """Output from a single persona agent (Theoretician / Engineer / Practitioner)."""
+    persona: str                        # "theoretician" | "engineer" | "practitioner"
+    sections: list[ResearchSection]
+    key_claims: list[str] = Field(default_factory=list)
+    citations_used: list[str] = Field(default_factory=list)
+
+
+class ReconcilerOutput(BaseModel):
+    """Output from the reconciler agent that merges all three persona outputs."""
+    narrative: str              # full Markdown for the section file
+    summary: DomainSummary      # structured summary consumed by Stage 5
+
+
 class ResearchPlan(BaseModel):
     domain_id: str
     strategy: str               # "top_down" | "bottom_up"
@@ -197,6 +211,19 @@ class SynthesisCritique(BaseModel):
     missing_cross_domain: list[str]
     verdict: str                      # "accept" | "revise"
     revised_narrative: str = ""
+
+
+class CrossDomainBridge(BaseModel):
+    domain_a: str
+    domain_b: str
+    shared_concept: str          # what connects them
+    bridge_text: str             # 1-2 paragraph Markdown explaining the connection
+    evidence: str                # which summary field or KG edge supports this
+
+
+class ConnectorOutput(BaseModel):
+    bridges: list[CrossDomainBridge]
+    epistemic_stack_note: str    # 1-2 paragraphs describing the overall domain hierarchy
 
 
 # ---------------------------------------------------------------------------

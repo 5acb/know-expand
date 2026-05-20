@@ -8,7 +8,12 @@ import time
 from pathlib import Path
 
 from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import SynthesisCritique, SynthesisDraft
+from doc_expand.agents.schemas import (
+    ConnectorOutput,
+    CrossDomainBridge,
+    SynthesisCritique,
+    SynthesisDraft,
+)
 from doc_expand.config import Config
 from doc_expand.state import (
     PipelineState,
@@ -80,6 +85,31 @@ Return a SynthesisDraft with at least {min_insights} insights. The narrative \
 should complement the structural analysis. The reading_roadmap should order \
 domains by conceptual dependency for a first-time learner. The boss_nodes \
 should name 3-5 emerging research directions at the intersections.
+"""
+
+_CONNECTOR_PROMPT = """\
+You are a cross-domain bridge writer. Your sole job is to write explicit \
+transition sections that help a reader move between domains that share a \
+concept, methodology, or application.
+
+Domain summaries:
+{domain_summaries}
+
+Knowledge graph domains and edges:
+{graph_edges}
+
+For every pair of domains that share a concept, methodology, or application, \
+write a 1-2 paragraph "bridge" section in Markdown. Each bridge must:
+- Name the shared concept or methodology connecting the two domains
+- Explain why understanding one domain deepens or unlocks understanding of the other
+- Reference specific evidence from the summaries or graph edges
+
+Also write a 1-2 paragraph "epistemic stack note" that describes the overall \
+domain hierarchy: which domains are foundational, which build on top of others, \
+and what order a rigorous learner should tackle them in.
+
+Return a ConnectorOutput with one CrossDomainBridge entry per connected pair \
+and the epistemic_stack_note.
 """
 
 _SYNTHESIS_CRITIC_PROMPT = """\
@@ -174,7 +204,7 @@ def _summaries_full(summaries: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def _synthesis_draft_to_markdown(draft: SynthesisDraft) -> str:
+def _synthesis_draft_to_markdown(draft: SynthesisDraft, connector: ConnectorOutput | None = None) -> str:
     lines = ["# Cross-Domain Synthesis\n"]
     lines.append(draft.narrative)
 
@@ -217,6 +247,16 @@ def _synthesis_draft_to_markdown(draft: SynthesisDraft) -> str:
             lines.append(f"### {insight.insight}")
             lines.append(f"*Domains: {domains}* | *Confidence: {insight.confidence}*")
             lines.append(f"*Evidence: {insight.evidence}*\n")
+
+    if connector is not None and (connector.bridges or connector.epistemic_stack_note):
+        lines.append("\n## How the Domains Connect\n")
+        if connector.epistemic_stack_note:
+            lines.append(connector.epistemic_stack_note)
+        for bridge in connector.bridges:
+            lines.append(
+                f"\n### {bridge.domain_a} ↔ {bridge.domain_b}: {bridge.shared_concept}\n"
+            )
+            lines.append(bridge.bridge_text)
 
     return "\n".join(lines)
 
@@ -283,6 +323,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
 
     emit({"event": "s5_structural_start", "domain_count": len(summaries)})
     emit({"event": "s5_semantic_start", "domain_count": len(summaries)})
+    emit({"event": "s5_connector_start", "domain_count": len(summaries)})
 
     domain_count = len(summaries)
 
@@ -305,16 +346,26 @@ async def run(state: PipelineState, cfg: Config) -> None:
             domain_count=domain_count,
         ),
     }]
+    connector_msg = [{
+        "role": "user",
+        "content": _CONNECTOR_PROMPT.format(
+            domain_summaries=full_summaries_str,
+            graph_edges=edges_str,
+        ),
+    }]
 
-    structural_draft, semantic_draft = await asyncio.gather(
+    structural_draft, semantic_draft, connector_output = await asyncio.gather(
         router.call(structural_msg, SynthesisDraft),
         router.call(semantic_msg, SynthesisDraft),
+        router.call(connector_msg, ConnectorOutput),
     )
 
     rounds = cfg.adversarial_rounds.get(depth, 1)
     current_structural = structural_draft
     current_semantic = semantic_draft
     final_draft: SynthesisDraft | None = None
+    prev_issues: set[str] | None = None
+    termination_reason = "max_rounds"
 
     for rnd in range(1, rounds + 1):
         emit({"event": "s5_critique_round", "round": rnd, "total_rounds": rounds})
@@ -329,7 +380,14 @@ async def run(state: PipelineState, cfg: Config) -> None:
         }]
         critique: SynthesisCritique = await router.call(critic_msg, SynthesisCritique)
 
+        current_issues = set(
+            critique.trivial_connections
+            + critique.unsupported_connections
+            + critique.missing_cross_domain
+        )
+
         if critique.verdict == "accept":
+            termination_reason = "critic_accepted"
             if critique.revised_narrative:
                 # Build a combined draft using the revised narrative
                 final_draft = SynthesisDraft(
@@ -341,6 +399,17 @@ async def run(state: PipelineState, cfg: Config) -> None:
                     narrative=critique.revised_narrative,
                 )
             break
+
+        if not current_issues:
+            termination_reason = "no_issues"
+            break
+
+        if prev_issues is not None and current_issues == prev_issues:
+            termination_reason = "critic_stalled"
+            emit({"event": "s5_critic_stalled", "round": rnd})
+            break
+
+        prev_issues = current_issues
 
         revise_msg = [{
             "role": "user",
@@ -355,6 +424,8 @@ async def run(state: PipelineState, cfg: Config) -> None:
         revised: SynthesisDraft = await router.call(revise_msg, SynthesisDraft)
         current_structural = revised
         final_draft = revised
+
+    emit({"event": "s5_critic_loop_done", "termination_reason": termination_reason, "rounds_run": rnd})
 
     if final_draft is None:
         # Combine both drafts without revision
@@ -377,7 +448,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
         )
 
     synthesis_path = sections_dir / "section_synthesis.md"
-    synthesis_path.write_text(_synthesis_draft_to_markdown(final_draft))
+    synthesis_path.write_text(_synthesis_draft_to_markdown(final_draft, connector_output))
 
     mark_stage_complete(state_dir, 5)
     emit({

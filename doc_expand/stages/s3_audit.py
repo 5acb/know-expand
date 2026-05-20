@@ -94,70 +94,107 @@ async def _run_gap_loop(
     graph_terms: list[str],
     anchors: list[dict],
     router,
+    rounds: int = 3,
 ) -> GapAnalysisResult:
     terms_str = ", ".join(graph_terms)
     anchor_str = _anchor_summaries(anchors)
 
-    emit({"event": "gap_finder_start", "domain_id": domain_id, "term_count": len(graph_terms), "anchor_count": len(anchors)})
-    finder_msg = [{
-        "role": "user",
-        "content": _GAP_FINDER_PROMPT.format(
-            domain_label=domain_label,
-            domain_id=domain_id,
-            graph_terms=terms_str,
-            anchor_summaries=anchor_str,
-        ),
-    }]
-    finder_result: GapAnalysisResult = await router.call(finder_msg, GapAnalysisResult)
+    prev_gap_ids: set[str] | None = None
+    termination_reason = "max_rounds"
+    rebuttal_result: GapAnalysisResult | None = None
+    current_gap_ids: set[str] = set()
+    rnd = 0
+
+    for rnd in range(1, rounds + 1):
+        emit({"event": "gap_finder_start", "domain_id": domain_id, "round": rnd, "term_count": len(graph_terms), "anchor_count": len(anchors)})
+        finder_msg = [{
+            "role": "user",
+            "content": _GAP_FINDER_PROMPT.format(
+                domain_label=domain_label,
+                domain_id=domain_id,
+                graph_terms=terms_str,
+                anchor_summaries=anchor_str,
+            ),
+        }]
+        finder_result: GapAnalysisResult = await router.call(finder_msg, GapAnalysisResult)
+        emit({
+            "event": "gap_finder_complete",
+            "domain_id": domain_id,
+            "round": rnd,
+            "gap_count": len(finder_result.gaps),
+        })
+
+        if not finder_result.gaps:
+            rebuttal_result = finder_result
+            current_gap_ids = set()
+            termination_reason = "no_gaps"
+            break
+
+        gap_findings_str = json.dumps(
+            [g.model_dump() for g in finder_result.gaps], indent=2
+        )
+        emit({"event": "gap_defender_start", "domain_id": domain_id, "round": rnd, "gap_count": len(finder_result.gaps)})
+        defender_msg = [{
+            "role": "user",
+            "content": _GAP_DEFENDER_PROMPT.format(
+                domain_label=domain_label,
+                domain_id=domain_id,
+                graph_terms=terms_str,
+                gap_findings=gap_findings_str,
+            ),
+        }]
+        defender_result: GapAnalysisResult = await router.call(defender_msg, GapAnalysisResult)
+        emit({
+            "event": "gap_defender_complete",
+            "domain_id": domain_id,
+            "round": rnd,
+        })
+
+        defended_gaps = defender_result.gaps if defender_result.gaps else finder_result.gaps
+        defended_str = json.dumps(
+            [g.model_dump() for g in defended_gaps], indent=2
+        )
+        emit({"event": "gap_rebuttal_start", "domain_id": domain_id, "round": rnd})
+        rebuttal_msg = [{
+            "role": "user",
+            "content": _GAP_FINDER_REBUTTAL_PROMPT.format(
+                domain_label=domain_label,
+                domain_id=domain_id,
+                gap_findings_with_defenses=defended_str,
+            ),
+        }]
+        rebuttal_result = await router.call(rebuttal_msg, GapAnalysisResult)
+        emit({
+            "event": "gap_rebuttal_complete",
+            "domain_id": domain_id,
+            "round": rnd,
+            "real_gaps": sum(1 for g in rebuttal_result.gaps if g.verdict == "real_gap"),
+            "not_gaps": sum(1 for g in rebuttal_result.gaps if g.verdict == "not_a_gap"),
+            "ambiguous": sum(1 for g in rebuttal_result.gaps if g.verdict == "ambiguous"),
+        })
+
+        current_gap_ids = {g.gap_description for g in rebuttal_result.gaps if g.verdict == "real_gap"}
+
+        if not current_gap_ids:
+            termination_reason = "no_gaps"
+            break
+        if prev_gap_ids is not None and current_gap_ids == prev_gap_ids:
+            termination_reason = "stalled"
+            emit({"event": "s3_gap_loop_stalled", "domain_id": domain_id, "round": rnd})
+            break
+        prev_gap_ids = current_gap_ids
+
     emit({
-        "event": "gap_finder_complete",
+        "event": "s3_gap_loop_done",
         "domain_id": domain_id,
-        "gap_count": len(finder_result.gaps),
+        "termination_reason": termination_reason,
+        "rounds_run": rnd,
+        "real_gaps": len(current_gap_ids),
     })
 
-    if not finder_result.gaps:
-        return finder_result
-
-    gap_findings_str = json.dumps(
-        [g.model_dump() for g in finder_result.gaps], indent=2
-    )
-    emit({"event": "gap_defender_start", "domain_id": domain_id, "gap_count": len(finder_result.gaps)})
-    defender_msg = [{
-        "role": "user",
-        "content": _GAP_DEFENDER_PROMPT.format(
-            domain_label=domain_label,
-            domain_id=domain_id,
-            graph_terms=terms_str,
-            gap_findings=gap_findings_str,
-        ),
-    }]
-    defender_result: GapAnalysisResult = await router.call(defender_msg, GapAnalysisResult)
-    emit({
-        "event": "gap_defender_complete",
-        "domain_id": domain_id,
-    })
-
-    defended_gaps = defender_result.gaps if defender_result.gaps else finder_result.gaps
-    defended_str = json.dumps(
-        [g.model_dump() for g in defended_gaps], indent=2
-    )
-    emit({"event": "gap_rebuttal_start", "domain_id": domain_id})
-    rebuttal_msg = [{
-        "role": "user",
-        "content": _GAP_FINDER_REBUTTAL_PROMPT.format(
-            domain_label=domain_label,
-            domain_id=domain_id,
-            gap_findings_with_defenses=defended_str,
-        ),
-    }]
-    rebuttal_result: GapAnalysisResult = await router.call(rebuttal_msg, GapAnalysisResult)
-    emit({
-        "event": "gap_rebuttal_complete",
-        "domain_id": domain_id,
-        "real_gaps": sum(1 for g in rebuttal_result.gaps if g.verdict == "real_gap"),
-        "not_gaps": sum(1 for g in rebuttal_result.gaps if g.verdict == "not_a_gap"),
-        "ambiguous": sum(1 for g in rebuttal_result.gaps if g.verdict == "ambiguous"),
-    })
+    if rebuttal_result is None:
+        # No rounds ran (rounds=0); return empty result
+        return GapAnalysisResult(domain_id=domain_id, gaps=[])
     return rebuttal_result
 
 
