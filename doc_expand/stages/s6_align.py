@@ -1,8 +1,13 @@
 """Stage 6 — Section Alignment Agent.
 
-Uses langgraph.prebuilt.create_react_agent with a QuotaAwareRouter-backed
-chat model to align each domain section against the "zero-to-building"
-pedagogical checklist.
+Uses a two-pass structured-output approach (no ReAct loops):
+
+Pass 1: LLM reads section text and returns an AlignmentPlan (patches + search
+        queries + checklist).
+Pass 2: If search_queries non-empty, execute SS searches concurrently, then
+        call again with results appended. Returns a refined AlignmentPlan.
+
+Python applies patches deterministically via _apply_patch().
 
 Checklist items the agent fixes:
   1. "What is X?" plain-English intro
@@ -12,261 +17,188 @@ Checklist items the agent fixes:
   5. [NEEDS_CITATION] markers resolved via Semantic Scholar search
 """
 
+import asyncio
 import json
 import logging
+import re
 import time
 from pathlib import Path
 
 import httpx
-from langchain_core.tools import tool
 
 from doc_expand.agents.base import make_router
-from doc_expand.agents.lc_adapter import build_react_graph, make_lc_model
+from doc_expand.agents.schemas import AlignmentPlan
 from doc_expand.bibliography import _ss_search, reset_ss_limiter
 from doc_expand.config import Config
 from doc_expand.state import PipelineState, atomic_write, emit, mark_stage_complete, stage_is_complete
 
-_logger = logging.getLogger("doc_expand.s4_5")
+_logger = logging.getLogger("doc_expand.s6_align")
 
-_MAX_TOOL_CALLS_PER_DOMAIN = 12
+_MAX_SEARCH_QUERIES = 3
 
 _SYSTEM_PROMPT = """\
-You are a pedagogical alignment agent. Your mission is to ensure that a domain \
-section enables a reader to go from ZERO knowledge to being able to BUILD on the field.
+You are a pedagogical alignment agent for the domain: {domain_label}.
+Here is the current section text:
+---
+{section_text}
+---
+CHECKLIST — identify what's missing and provide patches to fix it:
+1. "What is {domain_label}?" — plain-English intro for a newcomer?
+2. Symbol tables — does every equation have a preceding Markdown table defining symbols?
+3. Worked examples — does every major concept have a concrete numerical/code example?
+4. "Where to Go Next" — open problems, start-here resource, 3 essential papers?
+5. Citations — any [NEEDS_CITATION] markers to resolve?
 
-You are working on the domain: {domain_label} (id: {domain_id})
+Return:
+- patches: list of insertions (position + content) to add. Only ADD, never delete.
+- search_queries: SS queries needed to find papers (for #4 and #5). Max {max_queries}.
+- checklist: boolean pass/fail for each item AFTER your patches are applied.
+  Keys: what_is_section, symbol_tables, worked_examples, where_to_go_next, citations_resolved.
 
-CHECKLIST — verify each item and fix what's missing:
-1. "What is {domain_label}?" — Does the section open with a plain-English intro \
-   accessible to a newcomer? If not, write one and insert it at the start.
-2. Symbol tables — Does every equation have a preceding Markdown table defining \
-   every symbol? If not, add the missing tables immediately before the equation.
-3. Worked examples — Does every major concept have a concrete numerical or code \
-   example with specific values? If not, add one after the concept.
-4. "Where to Go Next" — Does the section end with open problems, a start-here \
-   resource, and 3 essential papers? If not, search for papers and add this section.
-5. Citations — Are there [NEEDS_CITATION] markers that can be resolved via search? \
-   Search for the claim, add the paper to bibliography, and update the text.
+Position options for each patch:
+  "end"              — append at document end (use only as last resort)
+  "start"            — prepend before all content
+  "after_intro"      — after the first ## heading
+  "before:<heading>" — before the line containing <heading> (case-insensitive substring)
+  "after:<heading>"  — after the section starting with <heading>
+"""
 
-POSITION GUIDE for insert_content:
-- "What is X?" intro missing → use position='after_intro' to insert after the first ## heading
-- Symbol table before equation → use position='before:<equation heading or surrounding heading>'
-- Worked example after concept → use position='after:<concept heading>'
-- "Where to Go Next" section → use position='end' only if no suitable heading exists, otherwise 'after:<last concept heading>'
-- Do NOT use position='start' for the "What is X?" intro; use 'after_intro' instead.
+_SYSTEM_PROMPT_PASS2 = """\
+You are a pedagogical alignment agent for the domain: {domain_label}.
+Here is the current section text:
+---
+{section_text}
+---
+Below are Semantic Scholar search results for your queries:
+---
+{search_results}
+---
+Based on these results, return an updated AlignmentPlan. Include:
+- patches: all insertions (including any from the first pass, plus new ones using paper info)
+- search_queries: [] (empty — searches already done)
+- checklist: boolean pass/fail for each item AFTER all patches are applied.
+  Keys: what_is_section, symbol_tables, worked_examples, where_to_go_next, citations_resolved.
 
-CONSTRAINTS:
-- Only ADD content — never delete or rewrite existing text.
-- Be surgical: add the minimum necessary to satisfy each checklist item.
-- Budget: you have at most {max_calls} tool calls total.
-- Call finish_domain when done (pass or all possible fixes applied).
-- Start by calling read_section to see the current state.
+Only ADD content, never delete. Use citation keys in the form [@<author>_<year>_<word>].
 """
 
 
 def _make_citation_id(title: str, year: int, first_author: str) -> str:
-    import re
     slug = re.sub(r"[^a-z0-9]", "_", first_author.lower())[:15].strip("_")
     title_word = re.sub(r"[^a-z]", "", title.lower().split()[0]) if title else "paper"
     return f"{slug}_{year}_{title_word}"
 
 
-def _make_tools(
-    domain_id: str,
-    sections_dir: Path,
-    audit_dir: Path,
-    http: httpx.AsyncClient,
-    cfg: Config,
-) -> list:
-    """Create tool functions closed over per-domain context."""
+def _apply_patch(path: Path, position: str, content: str) -> str:
+    """Apply a single insertion patch to the section file at path.
+    Returns a human-readable result string."""
+    content = content.strip()
+    if not path.exists():
+        return f"Section file not found: {path}"
+    text = path.read_text()
 
-    @tool
-    async def read_section(section_domain_id: str) -> str:
-        """Read the full current text of a domain section.
-        Always call this first before inspecting a domain."""
-        path = sections_dir / f"section_{section_domain_id}.md"
-        if not path.exists():
-            return f"Section file not found: {section_domain_id}"
-        text = path.read_text()
-        if len(text) > 8000:
-            text = text[:8000] + f"\n\n... [truncated, {len(text)} chars total]"
-        return text
+    if position == "end":
+        path.write_text(text.rstrip() + "\n\n" + content + "\n")
+        return f"Appended {len(content)} chars at document end."
 
-    @tool
-    async def search_papers(query: str, limit: int = 5) -> str:
-        """Search Semantic Scholar for academic papers. Use this to find
-        citations for claims marked [NEEDS_CITATION] or to find papers
-        for the 'Where to Go Next' essential reading list."""
-        limit = min(int(limit), 10)
-        try:
-            papers = await _ss_search(query, http, cfg, limit=limit)
-            if not papers:
-                return "No results found."
-            lines = []
-            for p in papers[:limit]:
-                pid = p.get("paperId", "")
-                title = p.get("title", "")
-                year = p.get("year", "")
-                authors = [a.get("name", "") for a in p.get("authors", [])[:3]]
-                doi = p.get("externalIds", {}).get("DOI", "")
-                lines.append(
-                    f"paperId={pid} | year={year} | doi={doi}\n"
-                    f"  title: {title}\n"
-                    f"  authors: {', '.join(authors)}"
-                )
-            return "\n\n".join(lines)
-        except Exception as exc:
-            return f"Search failed: {exc}"
+    elif position == "start":
+        path.write_text(content + "\n\n" + text)
+        return f"Prepended {len(content)} chars at document start."
 
-    @tool
-    async def insert_content(content: str, position: str) -> str:
-        """Insert Markdown content into this domain's section.
-        position options:
-          'end'              — append at document end (use only as last resort)
-          'start'            — prepend before all content
-          'after_intro'      — after the first section heading (## What is ...)
-          'before:<heading>' — before the line containing <heading> (case-insensitive substring)
-          'after:<heading>'  — after the section starting with <heading> (finds end of that section)
-        """
-        content = content.strip()
-        path = sections_dir / f"section_{domain_id}.md"
-        if not path.exists():
-            return f"Section not found: {domain_id}"
-        text = path.read_text()
-
-        if position == "end":
-            path.write_text(text.rstrip() + "\n\n" + content + "\n")
-            return f"Appended {len(content)} chars at document end."
-
-        elif position == "start":
-            path.write_text(content + "\n\n" + text)
-            return f"Prepended {len(content)} chars at document start."
-
-        elif position == "after_intro":
-            # Find the first ## heading after the opening, insert after it
-            lines = text.split("\n")
-            for i, line in enumerate(lines):
-                if line.startswith("## ") and i > 0:
-                    insert_at = i + 1
-                    # Skip any immediate blank lines after the heading
-                    while insert_at < len(lines) and lines[insert_at].strip() == "":
-                        insert_at += 1
-                    lines.insert(insert_at, "")
-                    lines.insert(insert_at, content)
-                    path.write_text("\n".join(lines))
-                    return f"Inserted {len(content)} chars after intro heading."
-            # Fallback: prepend
-            path.write_text(content + "\n\n" + text)
-            return f"No ## heading found; prepended instead."
-
-        elif position.startswith("before:") or position.startswith("after:"):
-            mode = "before" if position.startswith("before:") else "after"
-            target = position[len(mode) + 1:]
-            lines = text.split("\n")
-            # Case-insensitive substring search across all lines
-            match_idx = next(
-                (i for i, line in enumerate(lines) if target.lower() in line.lower()),
-                None
-            )
-            if match_idx is None:
-                # Try to find the nearest heading as a fallback
-                # Insert before the LAST top-level section as a best effort
-                heading_indices = [i for i, l in enumerate(lines) if l.startswith("## ")]
-                if heading_indices:
-                    insert_at = heading_indices[-1]
-                    lines.insert(insert_at, "")
-                    lines.insert(insert_at, content)
-                    path.write_text("\n".join(lines))
-                    return f"Target '{target}' not found; inserted before last ## section as fallback."
-                else:
-                    path.write_text(text.rstrip() + "\n\n" + content + "\n")
-                    return f"Target '{target}' not found and no ## headings; appended to end."
-            if mode == "before":
-                lines.insert(match_idx, "")
-                lines.insert(match_idx, content)
-            else:  # after: find end of that section
-                # Insert at the blank line before the next ## heading, or at end
-                next_heading = next(
-                    (i for i in range(match_idx + 1, len(lines)) if lines[i].startswith("## ")),
-                    len(lines)
-                )
-                insert_at = next_heading
+    elif position == "after_intro":
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            if line.startswith("## ") and i > 0:
+                insert_at = i + 1
+                while insert_at < len(lines) and lines[insert_at].strip() == "":
+                    insert_at += 1
                 lines.insert(insert_at, "")
                 lines.insert(insert_at, content)
-            path.write_text("\n".join(lines))
-            return f"Inserted {len(content)} chars {mode} '{target}'."
+                path.write_text("\n".join(lines))
+                return f"Inserted {len(content)} chars after intro heading."
+        # Fallback: prepend
+        path.write_text(content + "\n\n" + text)
+        return "No ## heading found; prepended instead."
 
+    elif position.startswith("before:") or position.startswith("after:"):
+        mode = "before" if position.startswith("before:") else "after"
+        target = position[len(mode) + 1:]
+        lines = text.split("\n")
+        match_idx = next(
+            (i for i, line in enumerate(lines) if target.lower() in line.lower()),
+            None,
+        )
+        if match_idx is None:
+            heading_indices = [i for i, l in enumerate(lines) if l.startswith("## ")]
+            if heading_indices:
+                insert_at = heading_indices[-1]
+                lines.insert(insert_at, "")
+                lines.insert(insert_at, content)
+                path.write_text("\n".join(lines))
+                return f"Target '{target}' not found; inserted before last ## section as fallback."
+            else:
+                path.write_text(text.rstrip() + "\n\n" + content + "\n")
+                return f"Target '{target}' not found and no ## headings; appended to end."
+        if mode == "before":
+            lines.insert(match_idx, "")
+            lines.insert(match_idx, content)
+        else:  # after: find end of that section
+            next_heading = next(
+                (i for i in range(match_idx + 1, len(lines)) if lines[i].startswith("## ")),
+                len(lines),
+            )
+            insert_at = next_heading
+            lines.insert(insert_at, "")
+            lines.insert(insert_at, content)
+        path.write_text("\n".join(lines))
+        return f"Inserted {len(content)} chars {mode} '{target}'."
+
+    else:
+        return f"Unknown position '{position}'. No patch applied."
+
+
+def _format_paper(p: dict) -> str:
+    pid = p.get("paperId", "")
+    title = p.get("title", "")
+    year = p.get("year", "")
+    authors = [a.get("name", "") for a in p.get("authors", [])[:3]]
+    doi = p.get("externalIds", {}).get("DOI", "")
+    return (
+        f"paperId={pid} | year={year} | doi={doi}\n"
+        f"  title: {title}\n"
+        f"  authors: {', '.join(authors)}"
+    )
+
+
+async def _run_searches(
+    queries: list[str],
+    http: httpx.AsyncClient,
+    cfg: Config,
+) -> str:
+    queries = queries[:_MAX_SEARCH_QUERIES]
+    tasks = [_ss_search(q, http, cfg, limit=5) for q in queries]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    blocks = []
+    for q, r in zip(queries, results):
+        blocks.append(f"Query: {q}")
+        if isinstance(r, Exception):
+            blocks.append(f"  Error: {r}")
+        elif r:
+            blocks.extend(f"  {_format_paper(p)}" for p in r[:5])
         else:
-            return f"Unknown position '{position}'. Use: end, start, after_intro, before:<heading>, after:<heading>"
+            blocks.append("  No results.")
+    return "\n\n".join(blocks)
 
-    @tool
-    async def add_to_bibliography(
-        paper_id: str,
-        title: str,
-        authors: list[str],
-        year: int,
-        doi: str = "",
-        url: str = "",
-    ) -> str:
-        """Persist a paper from search_papers results into the domain bibliography
-        so it can be cited as [@<id>]. Returns the citation key."""
-        first_author = authors[0] if authors else "unknown"
-        cit_id = _make_citation_id(title, year, first_author)
 
-        author_objs = [{"family": a} for a in authors]
-        entry = {
-            "id": cit_id,
-            "type": "article-journal",
-            "title": title,
-            "author": author_objs,
-            "issued": {"date-parts": [[year]]},
-            "DOI": doi,
-            "URL": url,
-            "paperId": paper_id,
-        }
-
-        bib_path = audit_dir / f"bibliography_{domain_id}.json"
-        existing_bib: list[dict] = []
-        if bib_path.exists():
-            existing_bib = json.loads(bib_path.read_text())
-        existing_ids = {e.get("id") for e in existing_bib} | {e.get("paperId") for e in existing_bib}
-        if cit_id not in existing_ids and paper_id not in existing_ids:
-            existing_bib.append(entry)
-            atomic_write(bib_path, json.dumps(existing_bib, indent=2))
-        return f"Citation key: {cit_id} — use [@{cit_id}] to cite this paper."
-
-    @tool
-    def finish_domain(
-        checklist_what_is: bool = False,
-        checklist_symbol_tables: bool = False,
-        checklist_worked_examples: bool = False,
-        checklist_where_to_go_next: bool = False,
-        checklist_citations_resolved: bool = False,
-        patches_applied: list[str] | None = None,
-    ) -> str:
-        """Signal that this domain section is now aligned.
-        Call this when the section passes the checklist or when
-        you have made all the improvements you can."""
-        checklist = {
-            "what_is_section": checklist_what_is,
-            "symbol_tables": checklist_symbol_tables,
-            "worked_examples": checklist_worked_examples,
-            "where_to_go_next": checklist_where_to_go_next,
-            "citations_resolved": checklist_citations_resolved,
-        }
-        emit({
-            "event": "s4_5_domain_aligned",
-            "domain_id": domain_id,
-            "checklist": checklist,
-            "patches": patches_applied or [],
-        })
-        return "ALIGNMENT_COMPLETE"
-
-    return [read_section, search_papers, insert_content, add_to_bibliography, finish_domain]
+def _persist_bibliography(plan: AlignmentPlan, domain_id: str, audit_dir: Path) -> None:
+    """Extract any paper references from patch content and note them.
+    (Best-effort: actual citation ids are embedded by the LLM in content.)"""
+    # No-op for now; bibliography persistence happens via existing s3 pipeline.
+    pass
 
 
 # ---------------------------------------------------------------------------
-# Per-domain agent loop
+# Per-domain align (two-pass structured approach)
 # ---------------------------------------------------------------------------
 
 async def _align_domain(
@@ -288,45 +220,27 @@ async def _align_domain(
 
     emit({"event": "s4_5_domain_start", "domain_id": domain_id, "label": domain_label})
 
-    system = _SYSTEM_PROMPT.format(
-        domain_label=domain_label,
-        domain_id=domain_id,
-        max_calls=_MAX_TOOL_CALLS_PER_DOMAIN,
-    )
+    section_path = sections_dir / f"section_{domain_id}.md"
+    if not section_path.exists():
+        emit({"event": "s6_align_domain_error", "domain_id": domain_id, "error": "section file missing"})
+        sentinel.touch()
+        return
 
-    tools = _make_tools(domain_id, sections_dir, audit_dir, http, cfg)
-    lc_model = make_lc_model(router)
-    agent = build_react_graph(
-        lc_model,
-        tools=tools,
-        system_prompt=system,
-        recursion_limit=_MAX_TOOL_CALLS_PER_DOMAIN * 2 + 2,
+    raw_text = section_path.read_text()
+    section_text = raw_text[:8000]
+    if len(raw_text) > 8000:
+        section_text += f"\n\n... [truncated, {len(raw_text)} chars total]"
+
+    # --- Pass 1 ---
+    system1 = _SYSTEM_PROMPT.format(
+        domain_label=domain_label,
+        section_text=section_text,
+        max_queries=_MAX_SEARCH_QUERIES,
     )
+    messages: list[dict] = [{"role": "system", "content": system1}]
 
     try:
-        result = await agent.ainvoke(
-            {
-                "messages": [
-                    (
-                        "user",
-                        f"Please align the '{domain_label}' section now. "
-                        "Start by reading it, then work through the checklist.",
-                    )
-                ]
-            },
-        )
-        final_messages = result.get("messages", [])
-        tool_calls_made = sum(
-            1 for m in final_messages
-            if hasattr(m, "tool_calls") and m.tool_calls
-        )
-        emit({
-            "event": "s4_5_domain_complete",
-            "domain_id": domain_id,
-            "reason": "agent_done",
-            "tool_calls": tool_calls_made,
-            "elapsed_s": round(time.monotonic() - t0, 2),
-        })
+        plan: AlignmentPlan = await router.call(messages, AlignmentPlan)
     except Exception as exc:
         emit({
             "event": "s4_5_domain_error",
@@ -334,6 +248,51 @@ async def _align_domain(
             "error": str(exc)[:200],
             "elapsed_s": round(time.monotonic() - t0, 2),
         })
+        sentinel.touch()
+        return
+
+    # --- Pass 2 (only if search needed) ---
+    if plan.search_queries:
+        try:
+            search_results = await _run_searches(plan.search_queries, http, cfg)
+        except Exception as exc:
+            search_results = f"Search failed: {exc}"
+
+        system2 = _SYSTEM_PROMPT_PASS2.format(
+            domain_label=domain_label,
+            section_text=section_text,
+            search_results=search_results,
+        )
+        messages2: list[dict] = [{"role": "system", "content": system2}]
+        try:
+            plan = await router.call(messages2, AlignmentPlan)
+        except Exception as exc:
+            emit({
+                "event": "s6_align_pass2_error",
+                "domain_id": domain_id,
+                "error": str(exc)[:200],
+            })
+            # Fall through with Pass 1 plan
+
+    # --- Apply patches ---
+    patches_applied = []
+    for patch in plan.patches:
+        result = _apply_patch(section_path, patch.position, patch.content)
+        patches_applied.append({"position": patch.position, "checklist_item": patch.checklist_item, "result": result})
+
+    emit({
+        "event": "s4_5_domain_aligned",
+        "domain_id": domain_id,
+        "checklist": plan.checklist,
+        "patches": [p["checklist_item"] for p in patches_applied],
+    })
+    emit({
+        "event": "s4_5_domain_complete",
+        "domain_id": domain_id,
+        "reason": "structured_output_done",
+        "patches_applied": len(patches_applied),
+        "elapsed_s": round(time.monotonic() - t0, 2),
+    })
 
     sentinel.touch()
 

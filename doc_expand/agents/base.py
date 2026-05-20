@@ -17,6 +17,9 @@ _logger = logging.getLogger("doc_expand.router")
 # Every new QuotaAwareRouter copies this as its initial skip set.
 _PROBED_UNAVAILABLE: set[str] = set()
 
+# Exponential backoff delays (seconds) for consecutive headerless failures.
+_BURST_BACKOFF = [2, 4, 8]
+
 
 def _find_in_chain(exc: BaseException, *types) -> BaseException | None:
     """Walk __cause__ / __context__ chain; return first match for any of types."""
@@ -183,6 +186,8 @@ class QuotaAwareRouter:
         # Seed from probe results so unavailable models are never attempted.
         self._skip: set[str] = set(_PROBED_UNAVAILABLE)
         self._lock = asyncio.Lock()
+        # Per-model consecutive-failure counter for headerless 429/500/529.
+        self._fail_counts: dict[str, int] = {}
 
     def _next_model(self) -> str | None:
         for m in self.models:
@@ -198,10 +203,14 @@ class QuotaAwareRouter:
             sem = _get_semaphore(model, self.cfg)
             try:
                 async with sem:
-                    return await _do_call(model, messages, schema, self.cfg, role=self.role)
+                    result = await _do_call(model, messages, schema, self.cfg, role=self.role)
+                self._fail_counts.pop(model, None)
+                return result
             except Exception as e:
                 auth_err = _is_auth_error(e)
                 rate_err = _find_in_chain(e, litellm.RateLimitError)
+                server_err = _find_in_chain(e, litellm.ServiceUnavailableError)
+                transient_err = rate_err or server_err
                 if auth_err:
                     async with self._lock:
                         self._skip.add(model)
@@ -213,14 +222,31 @@ class QuotaAwareRouter:
                         "next_model": next_model,
                         "reason": str(auth_err)[:120],
                     })
-                elif rate_err:
+                elif transient_err:
                     retry_after = (
-                        getattr(rate_err, "response", None)
-                        and rate_err.response.headers.get("retry-after")
+                        getattr(transient_err, "response", None)
+                        and transient_err.response.headers.get("retry-after")
                     )
                     if retry_after:
+                        self._fail_counts.pop(model, None)
                         await asyncio.sleep(int(retry_after))
                         continue
+                    # Headerless failure: increment counter and backoff before skipping.
+                    count = self._fail_counts.get(model, 0) + 1
+                    self._fail_counts[model] = count
+                    if count < 3:
+                        sleep_s = _BURST_BACKOFF[min(count - 1, len(_BURST_BACKOFF) - 1)]
+                        emit({
+                            "event": "model_burst_retry",
+                            "role": self.role,
+                            "model": model,
+                            "attempt": count,
+                            "sleep_s": sleep_s,
+                        })
+                        await asyncio.sleep(sleep_s)
+                        continue
+                    # 3 consecutive failures — permanently skip this model.
+                    self._fail_counts.pop(model, None)
                     async with self._lock:
                         self._skip.add(model)
                         next_model = self._next_model()
@@ -229,7 +255,7 @@ class QuotaAwareRouter:
                         "role": self.role,
                         "exhausted_model": model,
                         "next_model": next_model,
-                        "reason": str(rate_err),
+                        "reason": str(transient_err),
                     })
                 else:
                     raise
@@ -285,6 +311,7 @@ class QuotaAwareRouter:
                     "elapsed_s": round(elapsed, 2),
                     "tool_calls": len(msg.tool_calls) if msg.tool_calls else 0,
                 })
+                self._fail_counts.pop(display_model, None)
                 # Normalise to plain dict for message history
                 return {
                     "role": "assistant",
@@ -304,19 +331,46 @@ class QuotaAwareRouter:
             except Exception as e:
                 auth_err = _is_auth_error(e)
                 rate_err = _find_in_chain(e, litellm.RateLimitError)
+                server_err = _find_in_chain(e, litellm.ServiceUnavailableError)
+                transient_err = rate_err or server_err
                 if auth_err:
                     async with self._lock:
                         self._skip.add(display_model)
-                elif rate_err:
+                elif transient_err:
                     retry_after = (
-                        getattr(rate_err, "response", None)
-                        and rate_err.response.headers.get("retry-after")
+                        getattr(transient_err, "response", None)
+                        and transient_err.response.headers.get("retry-after")
                     )
                     if retry_after:
+                        self._fail_counts.pop(display_model, None)
                         await asyncio.sleep(int(retry_after))
                         continue
+                    # Headerless failure: increment counter and backoff before skipping.
+                    count = self._fail_counts.get(display_model, 0) + 1
+                    self._fail_counts[display_model] = count
+                    if count < 3:
+                        sleep_s = _BURST_BACKOFF[min(count - 1, len(_BURST_BACKOFF) - 1)]
+                        emit({
+                            "event": "model_burst_retry",
+                            "role": self.role,
+                            "model": display_model,
+                            "attempt": count,
+                            "sleep_s": sleep_s,
+                        })
+                        await asyncio.sleep(sleep_s)
+                        continue
+                    # 3 consecutive failures — permanently skip this model.
+                    self._fail_counts.pop(display_model, None)
                     async with self._lock:
                         self._skip.add(display_model)
+                    next_model = self._next_model()
+                    emit({
+                        "event": "model_quota_switch",
+                        "role": self.role,
+                        "exhausted_model": display_model,
+                        "next_model": next_model,
+                        "reason": str(transient_err),
+                    })
                 else:
                     raise
         raise RuntimeError(f"All models exhausted for agent role: {self.role}")
