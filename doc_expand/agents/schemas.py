@@ -27,6 +27,16 @@ class CanonicalTerm(BaseModel):
     occurrence_count: int
     in_structural_zones: bool
     grounded: bool = True    # False if SS title search returned no confident results
+    term_type: Literal["academic", "tool_library", "concept"] = "academic"
+
+
+class TermKindItem(BaseModel):
+    term: str
+    term_type: Literal["academic", "tool_library", "concept"]
+
+
+class TermKindBatch(BaseModel):
+    classifications: list[TermKindItem]
 
 
 # ---------------------------------------------------------------------------
