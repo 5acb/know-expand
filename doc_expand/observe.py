@@ -476,7 +476,7 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
             <span class="mk-chevron" id="mk-chevron">▶</span>
           </div>
           <div class="mk-body collapsed" id="mk-body">
-            <div class="rf-label">API Keys (session only — never stored)</div>
+            <div class="rf-label">API Keys</div>
             <div class="key-row">
               <span class="key-dot" id="dot-anthropic"></span>
               <input class="rf-input" id="key-anthropic" type="password" placeholder="Anthropic sk-ant-…"
@@ -966,6 +966,17 @@ async function poll() {
 poll();
 setInterval(poll, 2000);
 
+// Initialize key dots from server env on load
+(async () => {
+  try {
+    const d = await (await fetch('/api/keys')).json();
+    ['anthropic', 'openai', 'gemini'].forEach(p => {
+      _envKeysSet[p] = !!d[p];
+      $('dot-' + p).classList.toggle('set', !!d[p]);
+    });
+  } catch {}
+})();
+
 // ── Run pane ──────────────────────────────────────────────────────────────────
 let runPaneMode = 'setup'; // 'setup' | 'qa' | 'running'
 let currentQaId = null;
@@ -997,9 +1008,11 @@ function toggleKeyVis(id) {
   el.type = el.type === 'password' ? 'text' : 'password';
 }
 
+const _envKeysSet = {};  // populated by /api/keys on load
+
 function updateKeyDot(provider) {
   const val = $('key-' + provider).value.trim();
-  $('dot-' + provider).classList.toggle('set', val.length > 0);
+  $('dot-' + provider).classList.toggle('set', val.length > 0 || !!_envKeysSet[provider]);
 }
 
 async function loadModels() {
@@ -1030,13 +1043,15 @@ async function loadModels() {
 
     const PROVIDER_LABEL = {anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Google Gemini'};
 
-    // Group by provider (order preserved by server sort)
+    // Group by provider, then float providers with env keys to top
     const sections = {};
     const order = [];
     for (const m of d.models) {
       if (!sections[m.provider]) { sections[m.provider] = []; order.push(m.provider); }
       sections[m.provider].push(m);
     }
+    const keysSet = d.keys_set || {};
+    order.sort((a, b) => (!!keysSet[b] - !!keysSet[a]));
 
     for (const prov of order) {
       const section = document.createElement('div');
@@ -1956,6 +1971,13 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
                 qs = parse_qs(urlparse(self.path).query)
                 dir_param = qs.get("dir", ["."])[0]
                 _json_response(self, _list_files(dir_param))
+
+            elif self.path == "/api/keys":
+                _json_response(self, {
+                    "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
+                    "openai":    bool(os.environ.get("OPENAI_API_KEY")),
+                    "gemini":    bool(os.environ.get("GEMINI_API_KEY")),
+                })
 
             elif self.path == "/api/models":
                 keys_set = {
