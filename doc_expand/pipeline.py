@@ -21,7 +21,6 @@ from doc_expand.stages import (
 
 def build_graph(
     cfg: Config,
-    interactive: bool,
     auto_taxonomy: bool,
     no_pdf: bool = False,
 ) -> StateGraph:
@@ -32,7 +31,7 @@ def build_graph(
         return state
 
     async def node_assess(state: PipelineState) -> PipelineState:
-        await s1_assess.run(state, interactive=interactive)
+        await s1_assess.run(state, cfg)
         return state
 
     async def node_extract(state: PipelineState) -> PipelineState:
@@ -105,7 +104,6 @@ async def run_pipeline(
     output_dir: Path,
     depth: str,
     cfg: Config,
-    interactive: bool = False,
     auto_taxonomy: bool = False,
     no_pdf: bool = False,
     resume_stage: int | None = None,
@@ -135,6 +133,6 @@ async def run_pipeline(
     from doc_expand.agents.base import probe_models
     await probe_models(cfg)
 
-    graph = build_graph(cfg, interactive=interactive, auto_taxonomy=auto_taxonomy, no_pdf=no_pdf)
+    graph = build_graph(cfg, auto_taxonomy=auto_taxonomy, no_pdf=no_pdf)
     compiled = graph.compile()
     await compiled.ainvoke(state)
