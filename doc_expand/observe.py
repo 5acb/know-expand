@@ -1350,7 +1350,14 @@ async function startRun() {
   const isResume = $('run-resume').value === '1';
   const input = isResume ? _resumeInputPath : $('run-input').value.trim();
   if (!input) {
-    if (!isResume) $('run-input').focus();
+    if (isResume) {
+      // Prior run predates input_path tracking — fall back to text field
+      setResumeMode(false);
+      $('run-input').focus();
+      $('run-input').placeholder = 'enter input path to resume…';
+    } else {
+      $('run-input').focus();
+    }
     return;
   }
   // In resume mode depth/autoTax/noPdf come from the prior run — pass
