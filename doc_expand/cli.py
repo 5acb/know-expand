@@ -55,7 +55,6 @@ def main() -> None:
     parser.add_argument("--status", action="store_true", help="Emit pipeline status and exit")
     parser.add_argument("--resume", type=str, metavar="STAGE", help="Resume from stage N")
     parser.add_argument("--stage", type=str, metavar="STAGE", help="Run only stage N then stop")
-    parser.add_argument("--interactive", action="store_true", help="Run Stage 1 (Assess) interactively")
     parser.add_argument("--user-profile", type=Path, metavar="PATH")
     parser.add_argument("--auto-taxonomy", action="store_true")
     parser.add_argument("--no-bibliography-fetch", action="store_true")
@@ -133,7 +132,6 @@ def main() -> None:
         output_dir=args.output_dir,
         depth=args.depth,
         cfg=cfg,
-        interactive=args.interactive,
         auto_taxonomy=args.auto_taxonomy,
         resume_stage=int(args.resume) if args.resume else None,
     ))
