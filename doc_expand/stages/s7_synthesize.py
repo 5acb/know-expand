@@ -273,11 +273,11 @@ async def run(state: PipelineState, cfg: Config) -> None:
 
     sections_dir.mkdir(exist_ok=True)
 
-    if stage_is_complete(state_dir, 5):
-        emit({"event": "stage_skipped", "stage": 5, "reason": "already_complete"})
+    if stage_is_complete(state_dir, 7):
+        emit({"event": "stage_skipped", "stage": 7, "reason": "already_complete"})
         return
 
-    emit({"event": "stage_start", "stage": 5})
+    emit({"event": "stage_start", "stage": 7})
 
     graph_data = json.loads((state_dir / "graph.json").read_text())
     edges = graph_data.get("edges", [])
@@ -290,15 +290,15 @@ async def run(state: PipelineState, cfg: Config) -> None:
 
     if not summaries:
         emit({
-            "event": "s5_complete",
-            "stage": 5,
+            "event": "s7_complete",
+            "stage": 7,
             "summaries_loaded": 0,
             "skipped": True,
             "reason": "no_summaries",
         })
         synthesis_path = sections_dir / "section_synthesis.md"
         atomic_write(synthesis_path, "# Cross-Domain Synthesis\n\n(No domain summaries available.)\n")
-        mark_stage_complete(state_dir, 5)
+        mark_stage_complete(state_dir, 7)
         return
 
     domain_ids = [s.get("domain_id", "") for s in summaries]
@@ -462,10 +462,10 @@ async def run(state: PipelineState, cfg: Config) -> None:
     summaries_dir.mkdir(exist_ok=True)
     atomic_write(summary_synthesis_path, json.dumps(summary_synthesis, indent=2))
 
-    mark_stage_complete(state_dir, 5)
+    mark_stage_complete(state_dir, 7)
     emit({
-        "event": "s5_complete",
-        "stage": 5,
+        "event": "s7_complete",
+        "stage": 7,
         "summaries_loaded": len(summaries),
         "insights_count": len(final_draft.insights),
         "artifact": str(synthesis_path),

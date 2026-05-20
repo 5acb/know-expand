@@ -314,11 +314,11 @@ async def run(state: PipelineState, cfg: Config) -> None:
     audit_dir = state_dir / "audit"
     audit_dir.mkdir(exist_ok=True)
 
-    if stage_is_complete(state_dir, 3):
-        emit({"event": "stage_skipped", "stage": 3, "reason": "already_complete"})
+    if stage_is_complete(state_dir, 4):
+        emit({"event": "stage_skipped", "stage": 4, "reason": "already_complete"})
         return
 
-    emit({"event": "stage_start", "stage": 3})
+    emit({"event": "stage_start", "stage": 4})
     reset_ss_limiter()
 
     input_path = state["input_path"]
@@ -399,10 +399,10 @@ async def run(state: PipelineState, cfg: Config) -> None:
         sum(1 for g in r.gaps if g.verdict == "ambiguous") for r in gap_results
     )
 
-    mark_stage_complete(state_dir, 3)
+    mark_stage_complete(state_dir, 4)
     emit({
         "event": "stage_complete",
-        "stage": 3,
+        "stage": 4,
         "real_gaps": total_real,
         "not_gaps": total_not,
         "ambiguous": total_ambiguous,

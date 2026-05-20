@@ -260,12 +260,12 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if stage_is_complete(state_dir, 7):
-        emit({"event": "stage_skipped", "stage": 7, "reason": "already_complete"})
+    if stage_is_complete(state_dir, 10):
+        emit({"event": "stage_skipped", "stage": 10, "reason": "already_complete"})
         return
 
-    emit({"event": "stage_start", "stage": 7})
-    emit({"event": "s7_start"})
+    emit({"event": "stage_start", "stage": 10})
+    emit({"event": "s10_start"})
 
     # Load graph for topological sort
     graph_data = json.loads((state_dir / "graph.json").read_text())
@@ -466,10 +466,10 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(manifest.model_dump_json(indent=2))
 
-    mark_stage_complete(state_dir, 7)
+    mark_stage_complete(state_dir, 10)
     emit({
-        "event": "s7_complete",
-        "stage": 7,
+        "event": "s10_complete",
+        "stage": 10,
         "output_md": str(output_md),
         "output_pdf": output_pdf,
         "total_words": total_words,

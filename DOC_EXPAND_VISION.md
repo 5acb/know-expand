@@ -111,7 +111,7 @@ Imprecise failure handling causes cascading damage:
 | HTTP 429, no `Retry-After` | True quota exhaustion | Switch to next model in fallback list |
 | All models exhausted | Full quota drain | Emit `quota_exhausted`; preserve progress; wait for `--resume` |
 | xelatex exit 0, tiny PDF | Silent corruption | Explicit size check; raise before checkpoint is written |
-| SIGKILL mid-subprocess | Process death | LangGraph writes no completion checkpoint; Stage 7 reruns on resume |
+| SIGKILL mid-subprocess | Process death | LangGraph writes no completion checkpoint; Stage 10 reruns on resume |
 | Concurrent 429s from fan-out | Rate limit misread as quota exhaustion | Cloud semaphore prevents the fan-out; limiters absorb the burst |
 
 Conflating any two rows wastes the fallback list on recoverable errors or misses real failures. The handling table above is fixed, not ad hoc.
@@ -131,22 +131,22 @@ These principles are non-negotiable. Every architectural decision traces back to
 ### 1. Bounded execution for every LLM step
 No single agent processes an unbounded input. A 40-page PDF fed to one agent guarantees silent omission of middle-document content ("lost in the middle"). Every LLM step operates on a token-bounded input. Large inputs are chunked before agents see them.
 
-**Consequence:** Stage 1 is a Map-Reduce pipeline, not a single extraction agent.
+**Consequence:** Stage 2 is a Map-Reduce pipeline, not a single extraction agent.
 
 ### 2. Explicit canonicalization before classification
 Never ask an LLM to dynamically cluster a large raw set in one shot. The result is overlapping, unprincipled categories. First lock the taxonomy; then classify against it. Two separate, sequential steps.
 
-**Consequence:** Stage 2 is two phases with a human checkpoint between them.
+**Consequence:** Stage 3 is two phases with a human checkpoint between them.
 
 ### 3. Independent verification vectors
 A model auditing a graph it just generated is grading its own homework. External anchors — real papers, real field taxonomies, real APIs — must be pulled before the audit so the auditor has something to diff against that the generator has never seen.
 
-**Consequence:** Stage 3 fetches external anchors before any gap analysis runs.
+**Consequence:** Stage 4 fetches external anchors before any gap analysis runs.
 
 ### 4. Citations must be grounded before writing, not verified after
 Agents without web access will hallucinate plausible-sounding papers. Verifying hallucinated titles against Crossref/Semantic Scholar yields 100% failure. The fix is not better verification — it is preventing the hallucination by providing a bounded real bibliography before writing begins.
 
-**Consequence:** Stage 3 pre-fetches a real bibliography per domain. Stage 4 agents are strictly constrained to cite only from that bibliography.
+**Consequence:** Stage 4 pre-fetches a real bibliography per domain. Stage 5 agents are strictly constrained to cite only from that bibliography.
 
 ### 5. Domain-agnostic architecture
 The system must work for CS, biology, law, economics, architecture. Any component hardcoded to a specific field's citation infrastructure (e.g., arXiv) is a domain assumption, not a design choice.
@@ -156,7 +156,7 @@ The system must work for CS, biology, law, economics, architecture. Any componen
 ### 6. Synthesis must not consume narrative
 At "deep" depth, 10 domain section files easily exceed 150k tokens. A synthesis agent fed raw narrative will truncate, lose thread, and hallucinate cross-domain connections. The fix is a tight JSON contract between domain research and synthesis.
 
-**Consequence:** Each Stage 4 agent emits both a narrative `.md` and a structured `summary_{domain}.json`. Stage 5 consumes only the JSON summaries and the knowledge graph — never the raw sections.
+**Consequence:** Each Stage 5 agent emits both a narrative `.md` and a structured `summary_{domain}.json`. Stage 7 consumes only the JSON summaries and the knowledge graph — never the raw sections.
 
 ### 7. Structural semantics over lexical frequency
 A paper uses "Theorem" 80 times. It introduces its core mechanism "Speculative Chunking" exactly 4 times. Pure frequency-based centrality flags the boilerplate as core and demotes the science. Centrality must be grounded in document structure (abstract, headers, bold/italic), not just occurrence counts.
@@ -164,30 +164,30 @@ A paper uses "Theorem" 80 times. It introduces its core mechanism "Speculative C
 **Consequence:** Docling's `SECTION_HEADER`/`TITLE` labels drive structural zone extraction before chunking. Centrality fuses structural signals with frequency, filtered through a boilerplate stop-list.
 
 ### 8. Adversarial quality where logical leaps occur
-A single agent producing an output with no challenge has no error-correction mechanism. But critics at every step is redundancy theater — it burns tokens to resolve artificially introduced non-determinism in stages where a deterministic check or structural reconciliation is sufficient. Critics are applied only where logical leaps happen: Stage 3 (gap analysis), Stage 4 (domain research), Stage 5 (cross-domain synthesis). Stages 1 and 2 use structural reconciliation instead.
+A single agent producing an output with no challenge has no error-correction mechanism. But critics at every step is redundancy theater — it burns tokens to resolve artificially introduced non-determinism in stages where a deterministic check or structural reconciliation is sufficient. Critics are applied only where logical leaps happen: Stage 4 (gap analysis), Stage 5 (domain research), Stage 7 (cross-domain synthesis). Stages 2 and 3 use structural reconciliation instead.
 
-**Consequence:** Adversarial loops with convergence-based termination (not fixed rounds) in Stages 3, 4, and 5. Loop exits when the critic's issue set is empty, identical to the prior round (stalled), or the critic explicitly accepts — whichever comes first. Hard cap (1/2/3 rounds for survey/standard/deep) prevents infinite loops if convergence fails.
+**Consequence:** Adversarial loops with convergence-based termination (not fixed rounds) in Stages 4, 5, and 7. Loop exits when the critic's issue set is empty, identical to the prior round (stalled), or the critic explicitly accepts — whichever comes first. Hard cap (1/2/3 rounds for survey/standard/deep) prevents infinite loops if convergence fails.
 
 ### 9. Complementary redundancy where strategy divergence is genuine
 Two agents with structurally different strategies (top-down vs. bottom-up, lexical vs. conceptual) run in parallel where the strategies actually produce different coverage. Divergence between them is signal, not error. Running two LLMs with slightly different prompts over the same chunk is non-determinism theater — it does not yield higher truth.
 
-**Consequence:** Stage 4 runs three genuinely distinct persona agents in parallel (Theoretician, Engineer, Practitioner), each covering a different epistemic dimension, reconciled by a fourth agent. Stage 5 runs three agents (Structural, Semantic, Cross-domain Connector). Stage 2 uses Lumper/Splitter. Stage 1 uses spaCy + LLM + KeyBERT — three fundamentally different signal types.
+**Consequence:** Stage 5 runs three genuinely distinct persona agents in parallel (Theoretician, Engineer, Practitioner), each covering a different epistemic dimension, reconciled by a fourth agent. Stage 7 runs three agents (Structural, Semantic, Cross-domain Connector). Stage 3 uses Lumper/Splitter. Stage 2 uses spaCy + LLM + KeyBERT — three fundamentally different signal types.
 
 ### 10. Idempotent stages
-If the pipeline crashes at Stage 4 and `--resume 4` is run, it must not silently append to partially-written files from the crashed run. Each stage that writes parallel outputs explicitly clears those outputs before restarting.
+If the pipeline crashes at Stage 5 and `--resume 5` is run, it must not silently append to partially-written files from the crashed run. Each stage that writes parallel outputs explicitly clears those outputs before restarting.
 
 **Consequence:** Every stage that writes parallel outputs calls `path.unlink(missing_ok=True)` on resume before launching agents.
 
-### 11. Human interaction permitted only at Stage 0.5 and Stage 2, and only when not bypassed
+### 11. Human interaction permitted only at Stage 1 and Stage 3, and only when not bypassed
 The pipeline runs autonomously from start to finish. Exactly two human-facing interactions are permitted, both at the very beginning of the pipeline, and both are skippable via flags:
 
-1. **Stage 0.5 — Calibration questions** (bypassable with `--skip-assessment` or `--user-profile`): 7 questions asked once, before any research runs. Costs ~2 minutes; calibrates every downstream stage. Automatically skipped in LLM-orchestrated runs.
+1. **Stage 1 — Calibration questions** (bypassable with `--skip-assessment` or `--user-profile`): 7 questions asked once, before any research runs. Costs ~2 minutes; calibrates every downstream stage. Automatically skipped in LLM-orchestrated runs.
 
-2. **Stage 2 — Taxonomy lock** (bypassable with `--auto-taxonomy`): the orchestrating LLM or the human reviews and approves the domain taxonomy before classification and research run. The highest-consequence single decision in the pipeline.
+2. **Stage 3 — Taxonomy lock** (bypassable with `--auto-taxonomy`): the orchestrating LLM or the human reviews and approves the domain taxonomy before classification and research run. The highest-consequence single decision in the pipeline.
 
-Both interactions are at the absolute start of the pipeline. Neither one blocks research, writing, or building — they inform them. All other stages — EXTRACT, AUDIT, RESEARCH, SYNTHESIZE, VERIFY, ASSEMBLE — are fully autonomous. Any `input()`, `subprocess.call([editor, ...])`, or `pause_for_review()` call outside Stage 0.5 and Stage 2 is a design defect.
+Both interactions are at the absolute start of the pipeline. Neither one blocks research, writing, or building — they inform them. All other stages — EXTRACT, AUDIT, RESEARCH, SYNTHESIZE, VERIFY, ASSEMBLE — are fully autonomous. Any `input()`, `subprocess.call([editor, ...])`, or `pause_for_review()` call outside Stage 1 and Stage 3 is a design defect.
 
-**Consequence:** Two and only two `subprocess.call([editor, ...])` paths exist in the codebase: Stage 0.5 (assessment presentation, gated behind `if not skip_assessment`) and Stage 2 (taxonomy review, gated behind `if not auto_taxonomy`). No other stage may block on human input under any conditions.
+**Consequence:** Two and only two `subprocess.call([editor, ...])` paths exist in the codebase: Stage 1 (assessment presentation, gated behind `if not skip_assessment`) and Stage 3 (taxonomy review, gated behind `if not auto_taxonomy`). No other stage may block on human input under any conditions.
 
 ---
 
@@ -207,7 +207,7 @@ Input Document (text / file / URL / PDF)
                             │  state/structural_zones.json
                             ▼
 ┌───────────────────────────────────────────────────────┐
-│ Stage 0.5: ASSESS (User Calibration)                  │
+│ Stage 1: ASSESS (User Calibration)                    │
 │ 7 questions tailored to document vocabulary           │
 │ → UserProfile (depth, math mode, known concepts)      │
 │ ← Human interaction #1 (earliest; bypassable)         │
@@ -215,14 +215,14 @@ Input Document (text / file / URL / PDF)
                             │  state/user_profile.json
                             ▼
 ┌───────────────────────────────────────────────────────┐
-│ Stage 1: EXTRACT (Map-Reduce)                         │
+│ Stage 2: EXTRACT (Map-Reduce)                         │
 │ Map: parallel agents per chunk (lexical + conceptual) │
 │ Reduce: merge, deduplicate, compute centrality        │
 └───────────────────────────┬───────────────────────────┘
                             │  state/terms.json
                             ▼
 ┌───────────────────────────────────────────────────────┐
-│ Stage 2: GRAPH (Two-Phase Lock)                       │
+│ Stage 3: GRAPH (Two-Phase Lock)                       │
 │ Phase 1: taxonomy proposals (lumper + splitter)       │
 │          → $EDITOR review OR --auto-taxonomy (LLM)    │
 │          ← ONLY human checkpoint in pipeline          │
@@ -232,7 +232,7 @@ Input Document (text / file / URL / PDF)
                             │  state/graph.json
                             ▼
 ┌───────────────────────────────────────────────────────┐
-│ Stage 3: AUDIT (Anchored)                             │
+│ Stage 4: AUDIT (Anchored)                             │
 │ Fetch anchors (3 papers) + bibliography (10/30/50)    │
 │ Gap finder vs. Defender adversarial loop              │
 └───────────────────────────┬───────────────────────────┘
@@ -241,7 +241,7 @@ Input Document (text / file / URL / PDF)
                             │  state/audit/bibliography_{domain}.json
                             ▼
 ┌───────────────────────────────────────────────────────┐
-│ Stage 4: RESEARCH (Parallel per domain)               │
+│ Stage 5: RESEARCH (Parallel per domain)               │
 │ Top-down + bottom-up agents per domain                │
 │ Adversarial critic loop                               │
 │ Constrained to bibliography JSON for citations        │
@@ -250,7 +250,7 @@ Input Document (text / file / URL / PDF)
                             │  state/summaries/summary_{domain}.json
                             ▼
 ┌───────────────────────────────────────────────────────┐
-│ Stage 4.5: ALIGN (langgraph ReAct per domain)         │
+│ Stage 6: ALIGN (langgraph ReAct per domain)           │
 │ Pedagogy checklist agent: what-is intro, symbol       │
 │ tables, worked examples, Where-to-Go-Next, citations  │
 │ Sentinel: section_{domain}.aligned                    │
@@ -258,7 +258,7 @@ Input Document (text / file / URL / PDF)
                             │  state/sections/section_{domain}.md (patched)
                             ▼
 ┌───────────────────────────────────────────────────────┐
-│ Stage 5: SYNTHESIZE                                   │
+│ Stage 7: SYNTHESIZE                                   │
 │ Inputs: graph.json + summary_*.json ONLY              │
 │ Structural agent + Semantic agent                     │
 │ Adversarial critic loop                               │
@@ -266,14 +266,14 @@ Input Document (text / file / URL / PDF)
                             │  state/sections/section_synthesis.md
                             ▼
 ┌───────────────────────────────────────────────────────┐
-│ Stage 6: VERIFY                                       │
+│ Stage 8: VERIFY                                       │
 │ Structural citation audit (keys vs bibliography)      │
 │ Crossref → Semantic Scholar → arXiv (CS/Math only)    │
 └───────────────────────────┬───────────────────────────┘
                             │  state/audit/needs_citation.md
                             ▼
 ┌───────────────────────────────────────────────────────┐
-│ Stage 6.5: PREREQ (single langgraph ReAct pass)       │
+│ Stage 9: PREREQ (single langgraph ReAct pass)         │
 │ Threading agent: scan all sections for forward        │
 │ references; insert inline primers for opaque terms    │
 │ Format: > **Primer:** *term* — explanation            │
@@ -281,7 +281,7 @@ Input Document (text / file / URL / PDF)
                             │  state/sections/*.md (patched)
                             ▼
 ┌───────────────────────────────────────────────────────┐
-│ Stage 7: ASSEMBLE + BUILD                             │
+│ Stage 10: ASSEMBLE + BUILD                            │
 │ Topological sort → stitch → preprocess → xelatex ×2  │
 └───────────────────────────┬───────────────────────────┘
                             │  output/expanded.md
@@ -321,16 +321,16 @@ External arbiter applies hard veto
 
 | Stage | Critic? | Reason |
 |---|---|---|
-| Stage 0.5 — Assess | No | Deterministic question generation |
-| Stage 1 — Extract | No | Reduce reconciliation is the error-correction step; per-chunk critics add cost without signal |
-| Stage 2 — Graph | No | Taxonomy decision handled by human review or `--auto-taxonomy`; critic loop would be redundant |
-| Stage 3 — Audit | **Yes** | Gap Finder vs. Defender — the sharpest epistemic step; gaps must survive rebuttal |
-| Stage 4 — Research | **Yes** | Logical leaps and citation discipline; top-down and bottom-up agents produce divergent claims |
-| Stage 4.5 — Align | **ReAct** | langgraph ReAct agent per domain; self-directed tool use against pedagogy checklist; no separate critic — agent reads its own output and decides what to fix |
-| Stage 5 — Synthesize | **Yes** | Cross-domain connections are the most hallucination-prone output in the pipeline |
-| Stage 6 — Verify | No | Structural audit; deterministic bibliography key lookup |
-| Stage 6.5 — Prereq | **ReAct** | Single langgraph ReAct pass over all sections; agent identifies and inserts primers autonomously |
-| Stage 7 — Assemble | No | Mechanical stitching |
+| Stage 1 — Assess | No | Deterministic question generation |
+| Stage 2 — Extract | No | Reduce reconciliation is the error-correction step; per-chunk critics add cost without signal |
+| Stage 3 — Graph | No | Taxonomy decision handled by human review or `--auto-taxonomy`; critic loop would be redundant |
+| Stage 4 — Audit | **Yes** | Gap Finder vs. Defender — the sharpest epistemic step; gaps must survive rebuttal |
+| Stage 5 — Research | **Yes** | Logical leaps and citation discipline; top-down and bottom-up agents produce divergent claims |
+| Stage 6 — Align | **ReAct** | langgraph ReAct agent per domain; self-directed tool use against pedagogy checklist; no separate critic — agent reads its own output and decides what to fix |
+| Stage 7 — Synthesize | **Yes** | Cross-domain connections are the most hallucination-prone output in the pipeline |
+| Stage 8 — Verify | No | Structural audit; deterministic bibliography key lookup |
+| Stage 9 — Prereq | **ReAct** | Single langgraph ReAct pass over all sections; agent identifies and inserts primers autonomously |
+| Stage 10 — Assemble | No | Mechanical stitching |
 
 **Implementation — litellm structured calls + intermediate file checkpointing:**
 
@@ -394,7 +394,7 @@ structural_zones: set[str] = set()
 for item, _ in doc.iterate_items():
     if item.label in STRUCTURAL_LABELS:
         structural_zones.update(spacy_extract_noun_chunks(item.text))
-# structural_zones feeds the centrality weight multiplier in Stage 1
+# structural_zones feeds the centrality weight multiplier in Stage 2
 ```
 
 **URL fetch:** `httpx` with timeout; PotatoMCP `fetch` as fallback for Cloudflare-blocked pages.
@@ -423,9 +423,9 @@ Overlap at the semantic level: if a paragraph doesn't fit in the remaining token
 
 ---
 
-#### Stage 0.5 — Assess (User Calibration)
+#### Stage 1 — Assess (User Calibration)
 
-**Position:** Immediately after Stage 0, before Stage 1. Skipped by default. Activated with `--interactive` for direct human use; takes ~2 minutes.
+**Position:** Immediately after Stage 0, before Stage 2. Skipped by default. Activated with `--interactive` for direct human use; takes ~2 minutes.
 
 **Purpose:** Understand the user's background, existing knowledge, and learning goal before any research runs. The answers become a `UserProfile` JSON that calibrates every downstream stage — which concepts to explain from first principles, how much LaTeX to show, what the synthesis roadmap should optimize for.
 
@@ -437,11 +437,11 @@ Overlap at the semantic level: if a paragraph doesn't fit in the remaining token
 
 | # | Type | Dimension assessed | Signal used downstream |
 |---|---|---|---|
-| Q1 | MCQ Likert | Domain familiarity | `familiarity_level` → Stage 4 opening depth |
-| Q2 | Open-ended | Background field | `background_field` → Stage 4 analogy framing |
+| Q1 | MCQ Likert | Domain familiarity | `familiarity_level` → Stage 5 opening depth |
+| Q2 | Open-ended | Background field | `background_field` → Stage 5 analogy framing |
 | Q3 | MCQ 4-option | Knowledge probe on a core document concept | `q3_correct` → `known_concepts` / `unknown_concepts` |
-| Q4 | MCQ 4-option | Mathematical comfort | `math_mode` → Stage 4 LaTeX vs. prose ratio |
-| Q5 | MCQ 4-option | Learning goal | `learning_goal` → Stage 5 synthesis roadmap |
+| Q4 | MCQ 4-option | Mathematical comfort | `math_mode` → Stage 5 LaTeX vs. prose ratio |
+| Q5 | MCQ 4-option | Learning goal | `learning_goal` → Stage 7 synthesis roadmap |
 | Q6 | Open-ended free | Explain a supporting concept in their own words | `q6_known` → first-principles tracing depth |
 | Q7 | MCQ or True/False | Technical depth probe on a specific document claim | `q7_correct` → practitioner vs. expert boundary |
 
@@ -553,7 +553,7 @@ Emit it as a single JSON object (not wrapped in prose):
   ],
   "effective_depth": "survey|standard|deep",
   "math_mode": "intuition|equations_explained|full_derivations",
-  "reading_goal_note": "<one sentence: what Stage 5 synthesis roadmap should optimize for>"
+  "reading_goal_note": "<one sentence: what Stage 7 synthesis roadmap should optimize for>"
 }
 
 Rules for effective_depth:
@@ -570,7 +570,7 @@ Rules for known_concepts / unknown_concepts:
 - known: terms the user correctly identified in Q3, correctly explained in Q6, 
   or correctly answered in Q7
 - unknown: terms the user got wrong or said they didn't know — these get first-principles 
-  treatment in Stage 4, regardless of how central they are
+  treatment in Stage 5, regardless of how central they are
 
 Emit the result as:
 {"event": "assessment_complete", "user_profile": { ...schema above... }}
@@ -588,30 +588,30 @@ I'll report progress after each stage."
 
 | Stage | Signal consumed | Concrete effect |
 |---|---|---|
-| Stage 1 | `unknown_concepts` | Reduce agent promotes these terms to `core` tier regardless of frequency |
-| Stage 4 | `math_mode` | Agent A/B system prompt includes exact math mode instruction |
-| Stage 4 | `known_concepts` | "Assume the reader already understands [X]. Do not re-explain it." |
-| Stage 4 | `unknown_concepts` | "Trace [X] from first principles before using it." |
-| Stage 4 | `familiarity_level` | Sets the depth of domain opening paragraphs (overview vs. expert framing) |
-| Stage 4 | `background_field` | Agent B uses analogies from `background_field` (e.g. "for a biologist: ...") |
-| Stage 5 | `learning_goal` | Synthesis reading roadmap is ordered by stated goal: apply → implementations first; research → open problems first |
-| Stage 5 | `effective_depth` | Overrides `--depth` flag if UserProfile recommends different depth |
-| Stage 7 | `reading_goal_note` | Included in document frontmatter as "Reader profile" note |
+| Stage 2 | `unknown_concepts` | Reduce agent promotes these terms to `core` tier regardless of frequency |
+| Stage 5 | `math_mode` | Agent A/B system prompt includes exact math mode instruction |
+| Stage 5 | `known_concepts` | "Assume the reader already understands [X]. Do not re-explain it." |
+| Stage 5 | `unknown_concepts` | "Trace [X] from first principles before using it." |
+| Stage 5 | `familiarity_level` | Sets the depth of domain opening paragraphs (overview vs. expert framing) |
+| Stage 5 | `background_field` | Agent B uses analogies from `background_field` (e.g. "for a biologist: ...") |
+| Stage 7 | `learning_goal` | Synthesis reading roadmap is ordered by stated goal: apply → implementations first; research → open problems first |
+| Stage 7 | `effective_depth` | Overrides `--depth` flag if UserProfile recommends different depth |
+| Stage 10 | `reading_goal_note` | Included in document frontmatter as "Reader profile" note |
 
 **Activation options:**
 
 ```
---interactive             Run Stage 0.5 interactively (~2 min); default is to skip
---user-profile <path>     Load a pre-computed UserProfile JSON (also skips Stage 0.5)
+--interactive             Run Stage 1 interactively (~2 min); default is to skip
+--user-profile <path>     Load a pre-computed UserProfile JSON (also skips Stage 1)
 ```
 
-The pipeline defaults to autonomous mode. `--interactive` is an opt-in for direct human use. An LLM orchestrator never needs to pass any flag to bypass Stage 0.5 — skipping is the default. No implicit coupling between flags.
+The pipeline defaults to autonomous mode. `--interactive` is an opt-in for direct human use. An LLM orchestrator never needs to pass any flag to bypass Stage 1 — skipping is the default. No implicit coupling between flags.
 
-**Idempotency:** `state/user_profile.json` is the sentinel. If it exists and is valid on `--resume`, Stage 0.5 is skipped unconditionally.
+**Idempotency:** `state/user_profile.json` is the sentinel. If it exists and is valid on `--resume`, Stage 1 is skipped unconditionally.
 
 ---
 
-#### Stage 1 — Extract (Map-Reduce)
+#### Stage 2 — Extract (Map-Reduce)
 
 **Map phase — per chunk, parallel:**
 
@@ -703,7 +703,7 @@ def compute_centrality(term, occurrences, chunk_count, structural_zones,
 
 ---
 
-#### Stage 2 — Graph (Two-Phase Lock)
+#### Stage 3 — Graph (Two-Phase Lock)
 
 **Phase 1 — Ontology Lock:**
 
@@ -765,7 +765,7 @@ Two agents classify the full term inventory against the locked taxonomy:
 | Strategy | Assign each term to its most fundamental domain | Assign each term to its most applied/downstream domain |
 | Constraint | Each term maps to exactly one domain from `taxonomy.json`. No new domains. |
 
-Divergences between A and B written to `state/audit/classification_conflicts.json`. These flow to Stage 3 as primary gap candidates — if A and B can't agree where a term belongs, the domain boundary there is ambiguous and needs external anchoring.
+Divergences between A and B written to `state/audit/classification_conflicts.json`. These flow to Stage 4 as primary gap candidates — if A and B can't agree where a term belongs, the domain boundary there is ambiguous and needs external anchoring.
 
 **Graph schema:**
 ```json
@@ -793,12 +793,12 @@ Divergences between A and B written to `state/audit/classification_conflicts.jso
 
 ---
 
-#### Stage 3 — Audit (Anchored)
+#### Stage 4 — Audit (Anchored)
 
 **Two fetches per domain:**
 
 1. **Anchors** (3 papers): Semantic Scholar top-cited papers for the domain label. Used for gap diff.
-2. **Bibliography** (10/30/50 papers by depth): Two-bucket fetch — foundational papers (all-time citation rank) combined with frontier papers (recent window, citation-ranked within it). These are the **only papers Stage 4 agents are permitted to cite.**
+2. **Bibliography** (10/30/50 papers by depth): Two-bucket fetch — foundational papers (all-time citation rank) combined with frontier papers (recent window, citation-ranked within it). These are the **only papers Stage 5 agents are permitted to cite.**
 
 **Why two buckets:** sorting by `citationCount` descending guarantees blindness to the last 24 months. A dead-end 2017 survey with 4,000 citations outranks a state-of-the-art 2025 paper with 12. A pipeline claiming to build a "research frontier" expansion must structurally include the frontier.
 
@@ -877,14 +877,14 @@ A gap survives to `gap_analysis.md` only if the Gap Finder rebuts the Defender. 
 - Semantic Scholar covers CS/ML with citation counts and field tagging
 - arXiv is CS/Math/Physics only; using it as primary oracle breaks the domain-agnostic principle
 
-**Why pre-fetch bibliography before Stage 4, not verify after:**
+**Why pre-fetch bibliography before Stage 5, not verify after:**
 - Agents without web access hallucinate citations
-- Verifying hallucinated titles yields 100% failure rate at Stage 6
+- Verifying hallucinated titles yields 100% failure rate at Stage 8
 - A bounded pre-fetched bibliography makes citations verified by construction
 
 ---
 
-#### Stage 4 — Research (Parallel per domain)
+#### Stage 5 — Research (Parallel per domain)
 
 Three persona agents per domain, all domains launched simultaneously via `asyncio.gather`. Within each domain, the three personas run in parallel, then a Reconciler merges them. The critic loop then runs on the reconciled output.
 
@@ -892,7 +892,7 @@ Three persona agents per domain, all domains launched simultaneously via `asynci
 - Domain nodes from `state/graph.json`
 - Gap analysis for this domain from `state/audit/gap_analysis.md`
 - `state/audit/bibliography_{domain}.json` — the only permitted citation pool
-- Reader profile from `state/user_profile.json` — including specific `unknown_concepts` (concepts the reader got wrong in Stage 0.5 calibration, which get first-principles treatment) and `known_concepts` (skipped)
+- Reader profile from `state/user_profile.json` — including specific `unknown_concepts` (concepts the reader got wrong in Stage 1 calibration, which get first-principles treatment) and `known_concepts` (skipped)
 - Full math protocol: intuition → symbol table → formal definition → worked example → why it matters
 - Per-persona drift guard: each agent is constrained to its epistemic scope
 
@@ -909,7 +909,7 @@ Three persona agents per domain, all domains launched simultaneously via `asynci
 
 **Each domain writes:**
 1. `state/sections/section_{domain}.md` — full narrative (atomically written)
-2. `state/summaries/summary_{domain}.json` — structured summary for Stage 5:
+2. `state/summaries/summary_{domain}.json` — structured summary for Stage 7:
 
 ```json
 {
@@ -942,17 +942,17 @@ if resume:
             path.unlink(missing_ok=True)
 ```
 
-**Why summary JSON, not narrative sections:** at "deep" depth, 10 section `.md` files easily exceed 150k tokens. Summary JSONs are designed to be tight (under 2k tokens each). Stage 5 can safely receive all of them simultaneously without truncation risk.
+**Why summary JSON, not narrative sections:** at "deep" depth, 10 section `.md` files easily exceed 150k tokens. Summary JSONs are designed to be tight (under 2k tokens each). Stage 7 can safely receive all of them simultaneously without truncation risk.
 
 **Output:** `state/sections/section_{domain}.md`, `state/summaries/summary_{domain}.json`
 
 ---
 
-#### Stage 4.5 — Align (Pedagogical Alignment)
+#### Stage 6 — Align (Pedagogical Alignment)
 
-**Position:** After Stage 4, before Stage 5. Runs once per domain, sequentially.
+**Position:** After Stage 5, before Stage 7. Runs once per domain, sequentially.
 
-**Purpose:** Stage 4 produces accurate, deep content, but often in dense academic prose that assumes background the reader may not have. Stage 4.5 runs an autonomous alignment agent that checks a five-item pedagogy checklist against each domain section and surgically adds missing elements.
+**Purpose:** Stage 5 produces accurate, deep content, but often in dense academic prose that assumes background the reader may not have. Stage 6 runs an autonomous alignment agent that checks a five-item pedagogy checklist against each domain section and surgically adds missing elements.
 
 **Checklist:**
 1. "What is {domain}?" — plain-English intro accessible to a newcomer
@@ -976,7 +976,7 @@ if resume:
 
 ---
 
-#### Stage 5 — Synthesize
+#### Stage 7 — Synthesize
 
 **Inputs: `state/graph.json` + `state/summaries/summary_*.json` ONLY.**
 Never the narrative section `.md` files.
@@ -1003,7 +1003,7 @@ Three agents run in parallel:
 
 ---
 
-#### Stage 6 — Verify
+#### Stage 8 — Verify
 
 Structural citation audit, not a verification grind.
 
@@ -1020,11 +1020,11 @@ Structural citation audit, not a verification grind.
 
 ---
 
-#### Stage 6.5 — Prereq (Prerequisite Threading)
+#### Stage 9 — Prereq (Prerequisite Threading)
 
-**Position:** After Stage 6, before Stage 7.
+**Position:** After Stage 8, before Stage 10.
 
-**Purpose:** A multi-domain document accumulates forward references — terms used in one domain section that aren't defined until a later section, or concepts assumed without introduction. A first-time reader hits these as dead ends. Stage 6.5 threads primers inline so no reader encounters an unexplained term.
+**Purpose:** A multi-domain document accumulates forward references — terms used in one domain section that aren't defined until a later section, or concepts assumed without introduction. A first-time reader hits these as dead ends. Stage 9 threads primers inline so no reader encounters an unexplained term.
 
 **Implementation:** single langgraph ReAct graph pass over all sections. Tools:
 - `list_sections()` — returns domain IDs and labels
@@ -1044,7 +1044,7 @@ Structural citation audit, not a verification grind.
 
 ---
 
-#### Stage 7 — Assemble + Build
+#### Stage 10 — Assemble + Build
 
 **Assembly order:** topological sort of domains by dependency depth in `graph.json` (domains with more prerequisite edges come later). Mechanical stitch:
 
@@ -1056,9 +1056,9 @@ Bibliography compiled from all verified citation entries, deduplicated by DOI/ar
 
 **Bibliography format — CSL-JSON, not BibTeX:**
 
-Stage 3 citation objects are stored in **CSL-JSON format** (the native bibliography format for Pandoc's `--bibliography` flag). No `.bib` file is generated or needed. Pandoc accepts CSL-JSON directly alongside a `--csl` citation style file, eliminating a format conversion step and a `bibtexparser` dependency.
+Stage 4 citation objects are stored in **CSL-JSON format** (the native bibliography format for Pandoc's `--bibliography` flag). No `.bib` file is generated or needed. Pandoc accepts CSL-JSON directly alongside a `--csl` citation style file, eliminating a format conversion step and a `bibtexparser` dependency.
 
-Stage 7 assembly merges all per-domain `bibliography_{domain}.json` files into a single `state/bibliography.json`, deduplicates by DOI (then arXiv ID as fallback), and passes it to pandoc.
+Stage 10 assembly merges all per-domain `bibliography_{domain}.json` files into a single `state/bibliography.json`, deduplicates by DOI (then arXiv ID as fallback), and passes it to pandoc.
 
 Each citation object uses the CSL-JSON schema (a direct mapping from Semantic Scholar / Crossref API responses):
 ```json
@@ -1148,36 +1148,36 @@ state/
 ├── source.txt                                  Stage 0 output
 ├── source_meta.json
 ├── structural_zones.json                       Docling SECTION_HEADER/TITLE extraction (Stage 0)
-├── user_profile.json                           Stage 0.5 output (also acts as sentinel)
+├── user_profile.json                           Stage 1 output (also acts as sentinel)
 ├── chunks/
 │   ├── chunk_{N:04d}.json
 │   └── chunk_{N:04d}.done                      ← idempotency sentinel per chunk
 ├── map_outputs/
-│   ├── map_a_{chunk_id}.json                   Stage 1 Map Agent A
+│   ├── map_a_{chunk_id}.json                   Stage 2 Map Agent A
 │   ├── map_a_{chunk_id}.done                   ← sentinel
-│   ├── map_b_{chunk_id}.json                   Stage 1 Map Agent B
+│   ├── map_b_{chunk_id}.json                   Stage 2 Map Agent B
 │   └── map_b_{chunk_id}.done                   ← sentinel
-├── terms.json                                  Stage 1 Reduce output
+├── terms.json                                  Stage 2 Reduce output
 ├── audit/
-│   ├── taxonomy_a.json                         Stage 2 Phase 1 Agent A (Lumper)
-│   ├── taxonomy_b.json                         Stage 2 Phase 1 Agent B (Splitter)
-│   ├── classification_conflicts.json           Stage 2 Phase 2 divergences
-│   ├── anchors_{domain_id}.json               Stage 3 gap diff anchors
-│   ├── bibliography_{domain_id}.json          Stage 3 citation pool
-│   ├── gap_analysis.md                         Stage 3 output
-│   ├── corrections.md                          Stage 3 output
-│   ├── needs_citation.md                       Stage 6 output
+│   ├── taxonomy_a.json                         Stage 3 Phase 1 Agent A (Lumper)
+│   ├── taxonomy_b.json                         Stage 3 Phase 1 Agent B (Splitter)
+│   ├── classification_conflicts.json           Stage 3 Phase 2 divergences
+│   ├── anchors_{domain_id}.json               Stage 4 gap diff anchors
+│   ├── bibliography_{domain_id}.json          Stage 4 citation pool
+│   ├── gap_analysis.md                         Stage 4 output
+│   ├── corrections.md                          Stage 4 output
+│   ├── needs_citation.md                       Stage 8 output
 │   ├── model_usage.jsonl                       Per-call model log: model, tokens, cost, switches
 │   └── critique_{stage}_{id}.md               Adversarial loop logs (all stages)
 ├── taxonomy.json                               Human-approved locked taxonomy (status: approved)
-├── graph.json                                  Stage 2 knowledge graph
+├── graph.json                                  Stage 3 knowledge graph
 ├── sections/
-│   ├── section_{domain_id}.md                  Stage 4 narrative output; patched by S4.5 + S6.5
-│   ├── section_{domain_id}.done                ← S4 completion sentinel
-│   ├── section_{domain_id}.aligned             ← S4.5 completion sentinel
-│   └── section_synthesis.md                    Stage 5 output
+│   ├── section_{domain_id}.md                  Stage 5 narrative output; patched by S6 + S9
+│   ├── section_{domain_id}.done                ← S5 completion sentinel
+│   ├── section_{domain_id}.aligned             ← S6 completion sentinel
+│   └── section_synthesis.md                    Stage 7 output
 └── summaries/
-    ├── summary_{domain_id}.json               Stage 4 → Stage 5 JSON contract
+    ├── summary_{domain_id}.json               Stage 5 → Stage 7 JSON contract
     └── summary_{domain_id}.done               ← sentinel
 ```
 
@@ -1212,8 +1212,8 @@ Pipeline control:
   --status                  Emit pipeline_status event from pipeline.json; no work runs
   --resume STAGE            Resume from stage N (integer; e.g. --resume 4)
   --stage STAGE             Run only stage N then stop
-  --interactive             Run Stage 0.5 user calibration interactively (default: skipped)
-  --user-profile <path>     Load pre-computed UserProfile JSON; skips Stage 0.5
+  --interactive             Run Stage 1 user calibration interactively (default: skipped)
+  --user-profile <path>     Load pre-computed UserProfile JSON; skips Stage 1
   --auto-taxonomy           Skip $EDITOR; orchestrating LLM decides taxonomy (fully autonomous)
 
 Paths:
@@ -1480,7 +1480,7 @@ doc-expand paper.pdf
 
 Both cloud and local providers require bounded concurrency, for different reasons:
 - **Local (Ollama):** single GPU/unified memory; concurrent requests spike VRAM and cause thermal throttling. Default: 1.
-- **Cloud (Anthropic, OpenAI, etc.):** concurrent request limits exist at every tier. 16 simultaneous Opus requests (8 domains × 2 agents at Stage 4) will hit Anthropic's concurrent request ceiling for non-enterprise accounts and return HTTP 429s. Without a semaphore, the `QuotaAwareRouter` misreads these transient 429s as quota exhaustion and immediately downgrades the entire remaining run to the weakest fallback model.
+- **Cloud (Anthropic, OpenAI, etc.):** concurrent request limits exist at every tier. 16 simultaneous Opus requests (8 domains × 2 agents at Stage 5) will hit Anthropic's concurrent request ceiling for non-enterprise accounts and return HTTP 429s. Without a semaphore, the `QuotaAwareRouter` misreads these transient 429s as quota exhaustion and immediately downgrades the entire remaining run to the weakest fallback model.
 
 Separate semaphores are applied per provider class at the LiteLLM call site:
 
@@ -1574,7 +1574,7 @@ With `--profile local`, no API keys are required. The entire pipeline runs on-de
 - LLMs served by Ollama (llama3.2, qwen2.5, mistral, etc.)
 - GROBID and AnyStyle run in containers (Java/Ruby, no GPU needed)
 - Phoenix observability runs locally
-- OpenAlex, Semantic Scholar, Crossref API calls still require internet for bibliography fetch — disable with `--no-bibliography-fetch` to go fully air-gapped (Stage 3 then relies on GROBID+AnyStyle source extraction only)
+- OpenAlex, Semantic Scholar, Crossref API calls still require internet for bibliography fetch — disable with `--no-bibliography-fetch` to go fully air-gapped (Stage 4 then relies on GROBID+AnyStyle source extraction only)
 
 **Recommended local models by role:**
 
@@ -1585,7 +1585,7 @@ With `--profile local`, no API keys are required. The entire pipeline runs on-de
 
 Expected quality at local depth: roughly `survey` regardless of `--depth` flag. The structure, citations, and adversarial audit are all intact; the narrative depth and mathematical derivations are shallower.
 
-**Concurrency note for local mode:** parallel Stage 4 domain agents are serialized via `asyncio.Semaphore(1)` when Ollama is the provider. This prevents unified memory exhaustion and thermal throttling on laptop hardware. Stage 4 on local at standard depth runs sequentially across domains rather than in parallel — slower wall-clock time, but thermally stable. Increase with `--local-concurrency 2` only on workstations with ≥32GB VRAM/unified memory.
+**Concurrency note for local mode:** parallel Stage 5 domain agents are serialized via `asyncio.Semaphore(1)` when Ollama is the provider. This prevents unified memory exhaustion and thermal throttling on laptop hardware. Stage 5 on local at standard depth runs sequentially across domains rather than in parallel — slower wall-clock time, but thermally stable. Increase with `--local-concurrency 2` only on workstations with ≥32GB VRAM/unified memory.
 
 ---
 
@@ -1603,11 +1603,11 @@ state/
 ├── chunks/
 │   └── chunk_{N:04d}.done    ← sentinel per chunk (Stage 0)
 ├── map_outputs/
-│   └── map_{ab}_{id}.done    ← sentinel per map agent output (Stage 1)
+│   └── map_{ab}_{id}.done    ← sentinel per map agent output (Stage 2)
 ├── sections/
-│   └── section_{domain}.done ← sentinel per domain section (Stage 4)
+│   └── section_{domain}.done ← sentinel per domain section (Stage 5)
 └── summaries/
-    └── summary_{domain}.done ← sentinel per domain summary (Stage 4)
+    └── summary_{domain}.done ← sentinel per domain summary (Stage 5)
 ```
 
 `state/pipeline.json` tracks the overall run:
@@ -1647,9 +1647,9 @@ async def run_stage(stage_id: int, state: PipelineState, force: bool = False) ->
     mark_stage_complete(stage_id, state)
 ```
 
-#### Parallel-Stage Idempotency (Stage 1 Map, Stage 4 Research)
+#### Parallel-Stage Idempotency (Stage 2 Map, Stage 5 Research)
 
-For parallel stages, each unit (chunk, domain) is independently idempotent. On resume, only units without a `.done` sentinel are re-run. Complete units are skipped. This means a Stage 4 crash that completed 5 of 8 domains only re-runs the 3 incomplete ones.
+For parallel stages, each unit (chunk, domain) is independently idempotent. On resume, only units without a `.done` sentinel are re-run. Complete units are skipped. This means a Stage 5 crash that completed 5 of 8 domains only re-runs the 3 incomplete ones.
 
 ```python
 async def run_stage4_research(state: PipelineState) -> None:
@@ -1693,7 +1693,7 @@ def clear_partial_outputs(stage_id: int, state: PipelineState) -> None:
 
 #### The Human Checkpoint Is Idempotent
 
-Stage 2 Phase 1 (taxonomy review) pauses for `$EDITOR`. After the editor exits, the pipeline re-reads `state/taxonomy.json` and checks for an explicit `"status": "approved"` field set by the human. Quitting without saving (`:q!` in vi) leaves the field as `"pending"` — the pipeline detects this and pauses cleanly rather than launching an 8-domain Opus fan-out on unreviewed taxonomy.
+Stage 3 Phase 1 (taxonomy review) pauses for `$EDITOR`. After the editor exits, the pipeline re-reads `state/taxonomy.json` and checks for an explicit `"status": "approved"` field set by the human. Quitting without saving (`:q!` in vi) leaves the field as `"pending"` — the pipeline detects this and pauses cleanly rather than launching an 8-domain Opus fan-out on unreviewed taxonomy.
 
 ```python
 def taxonomy_checkpoint(state: PipelineState) -> None:
@@ -1831,25 +1831,25 @@ A fully consistent run (no switches) carries `"model_consistency": "uniform"`.
 
 These are not dependencies to install and forget — each replaces or augments a specific pipeline step with proven, maintained work rather than a hand-rolled equivalent.
 
-#### STORM / Co-STORM (Stanford) → Stage 4 researcher agent design
+#### STORM / Co-STORM (Stanford) → Stage 5 researcher agent design
 
-STORM's core contribution is **perspective-guided questioning**: before writing, agents embodying different expert personas generate questions about the topic from their angle, then the answers drive the research. This maps directly onto Stage 4's top-down / bottom-up complementary agents. Concretely: Stage 4 agents draw their expert persona from the domain's OpenAlex concept level — an L1 concept agent (survey-level) vs. an L4 concept agent (specialist-level) — mirroring STORM's multi-perspective structure. STORM is installable (`pip install knowledge-storm`; Co-STORM integrated since v1.0.0, September 2024); its prompting patterns for adversarial multi-agent research are directly applicable even if the full library isn't used.
+STORM's core contribution is **perspective-guided questioning**: before writing, agents embodying different expert personas generate questions about the topic from their angle, then the answers drive the research. This maps directly onto Stage 5's top-down / bottom-up complementary agents. Concretely: Stage 5 agents draw their expert persona from the domain's OpenAlex concept level — an L1 concept agent (survey-level) vs. an L4 concept agent (specialist-level) — mirroring STORM's multi-perspective structure. STORM is installable (`pip install knowledge-storm`; Co-STORM integrated since v1.0.0, September 2024); its prompting patterns for adversarial multi-agent research are directly applicable even if the full library isn't used.
 
-**What it replaces:** ad-hoc "write a section about X" prompts. Gives Stage 4 agents a structured, debate-tested framework for generating deep, non-redundant coverage.
+**What it replaces:** ad-hoc "write a section about X" prompts. Gives Stage 5 agents a structured, debate-tested framework for generating deep, non-redundant coverage.
 
-#### GROBID + AnyStyle → Stage 3 bibliography seeding
+#### GROBID + AnyStyle → Stage 4 bibliography seeding
 
-Before fetching any papers from Semantic Scholar, GROBID (ML-based, 87-90% F1 on reference extraction, TEI-XML output) and AnyStyle (CRF-based, v1.6.0, self-hostable) extract and parse the references the source document itself already contains. These are the most relevant papers by definition — the authors chose them. Two independent extractors provide cross-validation: papers appearing in both outputs get `confidence: high` in `bibliography_{domain}.json`; papers in one only get `confidence: medium`. This seeds Stage 3 with ground-truth signal before any API call happens.
+Before fetching any papers from Semantic Scholar, GROBID (ML-based, 87-90% F1 on reference extraction, TEI-XML output) and AnyStyle (CRF-based, v1.6.0, self-hostable) extract and parse the references the source document itself already contains. These are the most relevant papers by definition — the authors chose them. Two independent extractors provide cross-validation: papers appearing in both outputs get `confidence: high` in `bibliography_{domain}.json`; papers in one only get `confidence: medium`. This seeds Stage 4 with ground-truth signal before any API call happens.
 
-**What it replaces:** fetching cold from Semantic Scholar with no prior signal. GROBID+AnyStyle make Stage 3 bibliography fetch targeted, not exploratory.
+**What it replaces:** fetching cold from Semantic Scholar with no prior signal. GROBID+AnyStyle make Stage 4 bibliography fetch targeted, not exploratory.
 
-#### OpenAlex concept taxonomy → Stage 2 Phase 1 taxonomy validation + Stage 3 anchor fetch
+#### OpenAlex concept taxonomy → Stage 3 Phase 1 taxonomy validation + Stage 4 anchor fetch
 
 OpenAlex (~297M works, 65,000 hierarchical concepts, 2B+ citation edges, free API) does two jobs:
 
-1. **Stage 2 Phase 1:** proposed domain taxonomy nodes must resolve to real OpenAlex concept IDs via `api.openalex.org/concepts?search={label}`. Concept level (L0–L5) validates lumper vs. splitter — lumper proposals should land at L0-L2; splitter at L3-L5. This is the external anchor that prevents the ontologist from inventing unprincipled domains.
+1. **Stage 3 Phase 1:** proposed domain taxonomy nodes must resolve to real OpenAlex concept IDs via `api.openalex.org/concepts?search={label}`. Concept level (L0–L5) validates lumper vs. splitter — lumper proposals should land at L0-L2; splitter at L3-L5. This is the external anchor that prevents the ontologist from inventing unprincipled domains.
 
-2. **Stage 3 anchor fetch:** OpenAlex's concept-filtered paper search (`/works?filter=concepts.id:{id}&sort=cited_by_count:desc`) returns top-cited papers for each locked domain. More comprehensive than Semantic Scholar for non-CS fields (biology, law, economics, materials science).
+2. **Stage 4 anchor fetch:** OpenAlex's concept-filtered paper search (`/works?filter=concepts.id:{id}&sort=cited_by_count:desc`) returns top-cited papers for each locked domain. More comprehensive than Semantic Scholar for non-CS fields (biology, law, economics, materials science).
 
 **What it replaces:** Semantic Scholar alone for domain taxonomy validation. OpenAlex is domain-agnostic at scale; Semantic Scholar skews CS/ML.
 
@@ -1859,9 +1859,9 @@ Docling (MIT license, ~30k stars, integrated into LangChain/LlamaIndex, DocLayNe
 
 **What it replaces:** raw `pdfplumber` text extraction. Docling understands document semantics; pdfplumber extracts characters.
 
-#### KeyBERT + BGE-M3 → Stage 1 third Map signal
+#### KeyBERT + BGE-M3 → Stage 2 third Map signal
 
-KeyBERT with BGE-M3 embeddings (BAAI, strong MTEB performer for multilingual and technical text, fully local, MIT license) provides a non-LLM, embedding-based keyword extraction signal independent of the Claude agents' weights. The three Stage 1 Map signals are: Agent A (lexical LLM), Agent B (conceptual LLM), KeyBERT/BGE-M3 (semantic embeddings). The Reduce phase reconciles: in all three → `core`; in two → frequency/structural decides; in KeyBERT only, not LLMs → likely a genuine term the LLMs glossed over; in LLMs only, not KeyBERT → possible boilerplate. The LLM/KeyBERT disagreement is the highest-signal input to the Reduce critic.
+KeyBERT with BGE-M3 embeddings (BAAI, strong MTEB performer for multilingual and technical text, fully local, MIT license) provides a non-LLM, embedding-based keyword extraction signal independent of the Claude agents' weights. The three Stage 2 Map signals are: Agent A (lexical LLM), Agent B (conceptual LLM), KeyBERT/BGE-M3 (semantic embeddings). The Reduce phase reconciles: in all three → `core`; in two → frequency/structural decides; in KeyBERT only, not LLMs → likely a genuine term the LLMs glossed over; in LLMs only, not KeyBERT → possible boilerplate. The LLM/KeyBERT disagreement is the highest-signal input to the Reduce critic.
 
 **What it replaces:** pure LLM extraction, which shares the same weight-space biases across both agents. BGE-M3 is an entirely independent signal source.
 
@@ -1873,7 +1873,7 @@ DSPy was removed from the dependency list. The adversarial loop is implemented d
 
 #### LangGraph → pipeline orchestration + checkpointing
 
-LangGraph provides stateful graph execution with production-grade checkpointing (pause, resume, time-travel, state inspection). The `doc-expand` pipeline IS a directed graph; using a graph execution framework is the natural implementation. The `state/` directory layout maps 1:1 to LangGraph's TypedDict state schema. `--resume N` becomes `graph.invoke(state, config={"checkpoint_id": ...})`. Parallel Map agents in Stage 1 and parallel domain agents in Stage 4 are LangGraph `Send` API fan-out patterns.
+LangGraph provides stateful graph execution with production-grade checkpointing (pause, resume, time-travel, state inspection). The `doc-expand` pipeline IS a directed graph; using a graph execution framework is the natural implementation. The `state/` directory layout maps 1:1 to LangGraph's TypedDict state schema. `--resume N` becomes `graph.invoke(state, config={"checkpoint_id": ...})`. Parallel Map agents in Stage 2 and parallel domain agents in Stage 5 are LangGraph `Send` API fan-out patterns.
 
 **What it replaces:** hand-rolled stage orchestration, manual `--resume` directory scanning, and `asyncio.gather` without structured cancellation.
 
@@ -1923,7 +1923,7 @@ Typst (v0.14+, pre-1.0 but production-ready, actively maintained, millisecond in
 | **Local LLM inference** | `Ollama` (Docker profile: local) | Runs Llama, Qwen, Mistral locally; no API keys; activated with `--profile local` |
 | **Structured outputs** | `Instructor` + `Pydantic` v2 | Wraps tool use with schema validation + auto-retry; works across all providers; preferred for LLM-agnostic design. Anthropic has a grammar-constrained structured outputs beta (announced Nov 2025) but model support is in flux — do not depend on it as primary |
 | **Schema validation** | `Pydantic` v2 | All JSON contracts (`TermInventory`, `KnowledgeGraph`, `DomainSummary`) defined as `BaseModel` |
-| **NLP pipeline** | `spaCy` (en_core_web_sm or domain model) | Stage 1 Signal A: NER, noun chunks, acronym detection; deterministic, zero LLM cost |
+| **NLP pipeline** | `spaCy` (en_core_web_sm or domain model) | Stage 2 Signal A: NER, noun chunks, acronym detection; deterministic, zero LLM cost |
 | **API rate limiting** | `aiolimiter` (MIT) | Async token bucket; one limiter per external API (Semantic Scholar, Crossref, OpenAlex); `AsyncLimiter(max_rate, time_period)` |
 | **Local inference throttle** | `asyncio.Semaphore(N)` | Bounds concurrent Ollama calls to `--local-concurrency N` (default 1); cloud providers bypass |
 | **Async orchestration** | `asyncio.TaskGroup()` (Python 3.11+) | Native structured concurrency; consistent with `asyncio.Semaphore`; no backend mismatch. Replaces anyio. |
@@ -1964,19 +1964,19 @@ This project is the reference implementation. Every pattern below was validated 
 
 | Pattern | Source | Applied in |
 |---|---|---|
-| Scaffold before content | methodology_trace.md P7 | Stage 7 assembly fills a pre-written template |
-| Structural audit before web research | P4 | Stage 3 runs after Stage 2; external anchors fetched before any gap analysis |
-| DAG-model tasks, identify true parallelism | P5 | Stage 1 Map, Stage 4 research all parallel; Reduce and Phase locks are sequential |
+| Scaffold before content | methodology_trace.md P7 | Stage 10 assembly fills a pre-written template |
+| Structural audit before web research | P4 | Stage 4 runs after Stage 3; external anchors fetched before any gap analysis |
+| DAG-model tasks, identify true parallelism | P5 | Stage 2 Map, Stage 5 research all parallel; Reduce and Phase locks are sequential |
 | Constrained prompts → structured outputs | P6 | Every agent has strict JSON output schema |
-| Anti-hallucination in all subagent prompts | P8 | Explicit in all Stage 4 researcher prompts |
-| Main session citation sweep | P12 | Stage 6 runs in the main process, not a subagent |
-| Isolated output files for parallel writers | P13 | Each Stage 4 agent writes to its own `section_{id}.md` |
-| Citation index in assembly prompts | P14 | Bibliography JSON passed to Stage 4 agents before writing begins |
-| WebSearch denied in subagents | F3 | Stage 6 is entirely main process; subagents tag `[UNVERIFIED]` for main session |
+| Anti-hallucination in all subagent prompts | P8 | Explicit in all Stage 5 researcher prompts |
+| Main session citation sweep | P12 | Stage 8 runs in the main process, not a subagent |
+| Isolated output files for parallel writers | P13 | Each Stage 5 agent writes to its own `section_{id}.md` |
+| Citation index in assembly prompts | P14 | Bibliography JSON passed to Stage 5 agents before writing begins |
+| WebSearch denied in subagents | F3 | Stage 8 is entirely main process; subagents tag `[UNVERIFIED]` for main session |
 | brace expansion fails in MCP bash | F1 | No brace expansion anywhere in shell commands |
 | cp in background hangs | CLAUDE.md | Use `cp -f`; never background a cp command |
 | rsync for bulk sync, not write_file | CLAUDE.md | Bulk output transfer uses rsync; `write_file` only for small files |
-| XP totals must not be hand-counted | content review M7 | Stage 7 derives all aggregate numbers from `graph.json` |
+| XP totals must not be hand-counted | content review M7 | Stage 10 derives all aggregate numbers from `graph.json` |
 | PDF needs double xelatex pass | build experience | Encoded in `build_pdf()` — two passes, no exceptions |
 
 ### Anti-Patterns (never do these)
@@ -2001,20 +2001,20 @@ This project is the reference implementation. Every pattern below was validated 
 - **Running two PDF parsers over the same file:** Docling + PyMuPDF double ingestion time and spike memory. Docling's `SECTION_HEADER`/`TITLE` labels replace PyMuPDF's `span["flags"]` heuristic — single pass, cleaner structural signal.
 - **Implicit flag coupling:** flags must never silently activate or suppress each other. Explicit is better than implicit.
 - **Mixing anyio task groups with asyncio synchronization primitives:** `asyncio.Semaphore` inside `anyio.create_task_group()` causes cancellation propagation mismatches. Use native `asyncio.TaskGroup()` (Python 3.11+) throughout.
-- **Trusting xelatex exit code 0 as proof of a valid PDF:** xelatex exits 0 on font errors while producing a partial/corrupt file. Always verify PDF structural integrity with `pypdf` (page count + stream check) before the Stage 7 node returns — LangGraph writes the completion checkpoint on node return, not on subprocess exit. A byte-size floor is not a substitute: a short valid document can be under 100KB, and a silently truncated large document can be over it.
+- **Trusting xelatex exit code 0 as proof of a valid PDF:** xelatex exits 0 on font errors while producing a partial/corrupt file. Always verify PDF structural integrity with `pypdf` (page count + stream check) before the Stage 10 node returns — LangGraph writes the completion checkpoint on node return, not on subprocess exit. A byte-size floor is not a substitute: a short valid document can be under 100KB, and a silently truncated large document can be over it.
 - **Unconditional structural promotion:** `if name in structural_zones: return "core"` floods the core tier with bolded dataset names, italicized variables, and highlighted metrics. Structural presence is a weight multiplier (`effective = occurrences × 2.0`), not a frequency bypass.
 - **Bibliography sorted by citation count only:** guarantees blindness to the last 24 months. Use two buckets: 65% foundational (all-time citation rank) + 35% frontier (last 24 months, citation-ranked within window).
-- **Generating a `.bib` file for bibliography:** Pandoc accepts CSL-JSON natively via `--bibliography`. Stage 3 citation objects are already in CSL-JSON format. No BibTeX intermediate, no `bibtexparser` dependency, no format conversion step.
-- **Applying semaphore only to local inference:** cloud APIs have concurrent request limits too. 16 simultaneous Opus calls in Stage 4 will hit Anthropic's ceiling and generate 429s. Without a cloud semaphore, the `QuotaAwareRouter` misreads these transient rate limits as quota exhaustion and degrades the run to local models within seconds. Apply `asyncio.Semaphore(--cloud-concurrency)` to all providers.
+- **Generating a `.bib` file for bibliography:** Pandoc accepts CSL-JSON natively via `--bibliography`. Stage 4 citation objects are already in CSL-JSON format. No BibTeX intermediate, no `bibtexparser` dependency, no format conversion step.
+- **Applying semaphore only to local inference:** cloud APIs have concurrent request limits too. 16 simultaneous Opus calls in Stage 5 will hit Anthropic's ceiling and generate 429s. Without a cloud semaphore, the `QuotaAwareRouter` misreads these transient rate limits as quota exhaustion and degrades the run to local models within seconds. Apply `asyncio.Semaphore(--cloud-concurrency)` to all providers.
 - **Treating all HTTP 429s as quota exhaustion:** 429 + `Retry-After` header = transient rate limit; back off and retry the same model. 429 without `Retry-After` = true exhaustion; switch model. Conflating them wastes the fallback list on recoverable errors.
 - **Running two LLM agents for lexical extraction:** named entities, acronyms, and noun phrases are deterministic NLP tasks. spaCy handles them in milliseconds with no API call. Reserve LLM calls for conceptual extraction (Agent B), where reasoning over implicit domain knowledge actually matters.
 - **Fan-out parallel inference against local Ollama without a semaphore:** concurrent requests against a single-GPU Ollama instance do not parallelize — they spike memory and trigger thermal throttling. Always apply `asyncio.Semaphore(--local-concurrency)` at the LiteLLM call site when the provider is `ollama/`.
 - **Storing orchestrating LLM context as pipeline state:** the orchestrating LLM's conversation history is ephemeral. `pipeline.json` and `.done` sentinels are the canonical state store. Use `doc-expand --status` to re-orient after any pause — never rely on the LLM remembering previous events.
 - **Skipping `pipeline.json` status tracking:** without it, `--resume` cannot know which stages are truly complete vs. partially written.
-- **Human review checkpoints beyond Stage 2:** the pipeline must be fully autonomous from Stage 3 onward. Any `input()`, `subprocess.call([editor, ...])`, or `pause_for_review()` call outside Stage 0.5 and Stage 2 is a design defect. Route all other decisions through the adversarial loop or the orchestrating LLM.
+- **Human review checkpoints beyond Stage 3:** the pipeline must be fully autonomous from Stage 4 onward. Any `input()`, `subprocess.call([editor, ...])`, or `pause_for_review()` call outside Stage 1 and Stage 3 is a design defect. Route all other decisions through the adversarial loop or the orchestrating LLM.
 - **Generic assessment questions that don't use structural_zones:** Q3, Q6, and Q7 must be tailored to the actual document's vocabulary. Questions like "Do you know what a neural network is?" on a transformer architecture paper are uncalibrated and useless.
 - **Treating Q3/Q7 wrong answers as problems:** they are the most useful signal in the assessment. An expert who gets Q7 wrong has found a gap. A novice who gets Q3 right has found prior knowledge. Neither outcome is bad.
-- **Adding `--interactive` to LLM-orchestrated invocations:** an orchestrating LLM has no terminal. The default autonomous mode already skips Stage 0.5. `--interactive` is for direct human use only.
+- **Adding `--interactive` to LLM-orchestrated invocations:** an orchestrating LLM has no terminal. The default autonomous mode already skips Stage 1. `--interactive` is for direct human use only.
 - **Requiring `--auto-taxonomy` explicitly for LLM-driven runs:** when the orchestrating LLM is driving the pipeline end-to-end, `--auto-taxonomy` should be the default invocation. The `$EDITOR` path is a convenience for direct human use, not the canonical operating mode.
 - **Leaving parallel domain tasks without a hard timeout:** `asyncio.TaskGroup` waits for all tasks. A domain agent stuck in exponential API backoff will idle the entire group indefinitely at 99% completion. Wrap each domain task with `asyncio.timeout(2700)` and emit a clean `domain_timeout` event on expiry so the group can finish and the stage can be resumed.
 - **Calling `mark_taxonomy_approved` unconditionally after editor exit:** `subprocess.call` returns when the user closes the editor — it does not indicate they saved. If the user quits without saving (`:q!`), the taxonomy file is unchanged and still has `"status": "pending"`. Always re-read the file after editor exit and verify the status field before proceeding. Unconditional approval launches an 8-domain Opus fan-out on unreviewed garbage.
@@ -2024,19 +2024,19 @@ This project is the reference implementation. Every pattern below was validated 
 
 ## Implementation Plan
 
-### Phase 1 — Core extraction pipeline (Stages 0–2)
-Build and validate on a known document (a paper from this repo's bibliography). Validate Stage 1 centrality output against manually identified key terms. Validate Stage 2 taxonomy against known domain structure.
+### Phase 1 — Core extraction pipeline (Stages 0–3)
+Build and validate on a known document (a paper from this repo's bibliography). Validate Stage 2 centrality output against manually identified key terms. Validate Stage 3 taxonomy against known domain structure.
 
-### Phase 2 — Anchored audit + bibliography (Stage 3)
+### Phase 2 — Anchored audit + bibliography (Stage 4)
 Validate Crossref and Semantic Scholar API integration. Test with a biology paper (non-CS) to confirm domain-agnostic oracle works.
 
-### Phase 3 — Wire research pipeline (Stage 4)
+### Phase 3 — Wire research pipeline (Stage 5)
 Adapt domain researcher prompt from LLM KG project. Validate bibliography constraint is enforced. Validate `summary_{domain}.json` schema output.
 
-### Phase 4 — Synthesis + verify (Stages 5–6)
+### Phase 4 — Synthesis + verify (Stages 7–8)
 Validate synthesis consumes only JSON summaries. Validate citation structural audit catches agent defections.
 
-### Phase 5 — Assembly + build (Stage 7)
+### Phase 5 — Assembly + build (Stage 10)
 Reuse `preprocess.py` and `llm_paper_style.tex` directly. Validate double xelatex pass resolves TOC page numbers.
 
 ### Phase 6 — Adversarial loops + complementary redundancy

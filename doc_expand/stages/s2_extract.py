@@ -302,11 +302,11 @@ def _alias_clusters(
 async def run(state: PipelineState, cfg: Config) -> None:
     state_dir = Path(state["state_dir"])
 
-    if stage_is_complete(state_dir, 1):
-        emit({"event": "stage_skipped", "stage": 1, "reason": "already_complete"})
+    if stage_is_complete(state_dir, 2):
+        emit({"event": "stage_skipped", "stage": 2, "reason": "already_complete"})
         return
 
-    emit({"event": "stage_start", "stage": 1})
+    emit({"event": "stage_start", "stage": 2})
 
     chunks_dir = state_dir / "chunks"
     map_dir = state_dir / "map_outputs"
@@ -406,10 +406,10 @@ async def run(state: PipelineState, cfg: Config) -> None:
     )
 
     core_count = sum(1 for t in canonical_terms if t.centrality == "core")
-    mark_stage_complete(state_dir, 1)
+    mark_stage_complete(state_dir, 2)
     emit({
         "event": "stage_complete",
-        "stage": 1,
+        "stage": 2,
         "total_terms": len(canonical_terms),
         "core_terms": core_count,
         "supporting_terms": sum(1 for t in canonical_terms if t.centrality == "supporting"),

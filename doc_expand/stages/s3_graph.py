@@ -214,11 +214,11 @@ async def run(
     audit_dir = state_dir / "audit"
     audit_dir.mkdir(exist_ok=True)
 
-    if stage_is_complete(state_dir, 2):
-        emit({"event": "stage_skipped", "stage": 2, "reason": "already_complete"})
+    if stage_is_complete(state_dir, 3):
+        emit({"event": "stage_skipped", "stage": 3, "reason": "already_complete"})
         return
 
-    emit({"event": "stage_start", "stage": 2})
+    emit({"event": "stage_start", "stage": 3})
 
     terms_data = json.loads((state_dir / "terms.json").read_text())
     core_terms = [t["name"] for t in terms_data if t["centrality"] == "core"]
@@ -352,10 +352,10 @@ async def run(
     # Update state with domain IDs
     state["domain_ids"] = domain_ids
 
-    mark_stage_complete(state_dir, 2)
+    mark_stage_complete(state_dir, 3)
     emit({
         "event": "stage_complete",
-        "stage": 2,
+        "stage": 3,
         "node_count": len(nodes),
         "domain_count": len(domains),
         "conflict_count": len(conflicts),

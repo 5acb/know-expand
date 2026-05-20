@@ -1,4 +1,4 @@
-"""Stage 6.5 — Prerequisite Threading Agent.
+"""Stage 9 — Prerequisite Threading Agent.
 
 Uses langgraph.prebuilt.create_react_agent to scan all domain sections for
 forward references — concepts used before they are defined — and inserts
@@ -135,15 +135,15 @@ async def run(state: PipelineState, cfg: Config) -> None:
     state_dir = Path(state["state_dir"])
     sections_dir = state_dir / "sections"
 
-    if stage_is_complete(state_dir, "6.5"):
-        emit({"event": "stage_skipped", "stage": "6.5", "reason": "already_complete"})
+    if stage_is_complete(state_dir, 9):
+        emit({"event": "stage_skipped", "stage": 9, "reason": "already_complete"})
         return
 
-    emit({"event": "stage_start", "stage": "6.5"})
+    emit({"event": "stage_start", "stage": 9})
 
     if "agent" not in cfg.models:
-        emit({"event": "s6_5_skipped", "reason": "no_agent_role_in_models"})
-        mark_stage_complete(state_dir, "6.5")
+        emit({"event": "s9_prereq_skipped", "reason": "no_agent_role_in_models"})
+        mark_stage_complete(state_dir, 9)
         return
 
     taxonomy = json.loads((state_dir / "taxonomy.json").read_text())
@@ -200,9 +200,9 @@ async def run(state: PipelineState, cfg: Config) -> None:
             "elapsed_s": round(time.monotonic() - t0, 2),
         })
 
-    mark_stage_complete(state_dir, "6.5")
+    mark_stage_complete(state_dir, 9)
     emit({
         "event": "stage_complete",
-        "stage": "6.5",
+        "stage": 9,
         "primers_inserted": primers_inserted,
     })

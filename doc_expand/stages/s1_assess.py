@@ -25,23 +25,23 @@ async def run(state: PipelineState, interactive: bool = False) -> None:
     state_dir = Path(state["state_dir"])
     profile_path = state_dir / "user_profile.json"
 
-    if stage_is_complete(state_dir, "0.5"):
-        emit({"event": "stage_skipped", "stage": "0.5", "reason": "already_complete"})
+    if stage_is_complete(state_dir, 1):
+        emit({"event": "stage_skipped", "stage": 1, "reason": "already_complete"})
         return
 
     if not interactive:
         profile_path.write_text(_DEFAULT_PROFILE.model_dump_json(indent=2))
-        mark_stage_complete(state_dir, "0.5")
+        mark_stage_complete(state_dir, 1)
         emit({
             "event": "stage_complete",
-            "stage": "0.5",
+            "stage": 1,
             "mode": "default_profile",
             "artifact": str(profile_path),
         })
         return
 
     # Interactive path — requires a TTY
-    emit({"event": "stage_start", "stage": "0.5", "mode": "interactive"})
+    emit({"event": "stage_start", "stage": 1, "mode": "interactive"})
     zones = json.loads((state_dir / "structural_zones.json").read_text())
     meta = json.loads((state_dir / "source_meta.json").read_text())
 
@@ -58,10 +58,10 @@ async def run(state: PipelineState, interactive: bool = False) -> None:
     # fixed questions so the interactive path is exercisable.
     print("(Interactive calibration not yet fully implemented — using default profile.)")
     profile_path.write_text(_DEFAULT_PROFILE.model_dump_json(indent=2))
-    mark_stage_complete(state_dir, "0.5")
+    mark_stage_complete(state_dir, 1)
     emit({
         "event": "stage_complete",
-        "stage": "0.5",
+        "stage": 1,
         "mode": "interactive_stub",
         "artifact": str(profile_path),
     })
