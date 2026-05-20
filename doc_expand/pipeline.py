@@ -122,6 +122,14 @@ async def run_pipeline(
     pipeline_json = load_pipeline_json(state_dir)
     run_id = pipeline_json.get("run_id") or f"run_{uuid.uuid4().hex[:8]}"
 
+    # Persist run_id and input_path into pipeline.json immediately so the
+    # web UI can show them and use input_path for resume without waiting
+    # for the first stage to complete.
+    pipeline_json["run_id"] = run_id
+    pipeline_json.setdefault("input_path", input_path)
+    from doc_expand.state import save_pipeline_json
+    save_pipeline_json(state_dir, pipeline_json)
+
     state: PipelineState = {
         "run_id": run_id,
         "state_dir": str(state_dir),
