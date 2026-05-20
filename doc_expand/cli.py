@@ -1,11 +1,20 @@
 import argparse
 import asyncio
 import json
+import signal
 import sys
 from pathlib import Path
 
 from doc_expand.config import load_config
 from doc_expand.state import emit, load_pipeline_json, new_run_id, setup_logging
+
+
+def _install_sigterm_handler() -> None:
+    """Emit run_stopped and exit cleanly when SIGTERM arrives (e.g. from web UI stop)."""
+    def _handler(signum, frame):
+        emit({"event": "run_stopped", "reason": "sigterm"})
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _handler)
 
 
 def _status(state_dir: Path) -> None:
@@ -112,6 +121,7 @@ def main() -> None:
 
     run_id = args.run_id or new_run_id()
     log_dir = setup_logging(run_id, log_base=args.log_dir)
+    _install_sigterm_handler()
     print(f"run  {run_id}", flush=True)
     print(f"logs {log_dir}", flush=True)
 
