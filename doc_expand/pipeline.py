@@ -83,9 +83,9 @@ def build_graph(
     graph.add_node("assemble", node_assemble)
 
     graph.set_entry_point("ingest")
-    graph.add_edge("ingest", "assess")
-    graph.add_edge("assess", "extract")
-    graph.add_edge("extract", "graph")
+    graph.add_edge("ingest", "extract")
+    graph.add_edge("extract", "assess")
+    graph.add_edge("assess", "graph")
     graph.add_edge("graph", "audit")
     graph.add_edge("audit", "research")
     graph.add_edge("research", "align")
