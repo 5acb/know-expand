@@ -478,6 +478,10 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
           <input type="checkbox" id="run-no-pdf" checked />
           Skip PDF render
         </label>
+        <label class="rf-check">
+          <input type="checkbox" id="run-resume" />
+          Resume (keep completed stages)
+        </label>
 
         <!-- Models & Keys collapsible -->
         <div class="mk-section">
@@ -1138,6 +1142,7 @@ async function startRun() {
   const depth = $('run-depth').value;
   const autoTax = $('run-auto-tax').checked;
   const noPdf = $('run-no-pdf').checked;
+  const resume = $('run-resume').checked;
 
   const apiKeys = {
     anthropic: $('key-anthropic').value.trim(),
@@ -1154,6 +1159,7 @@ async function startRun() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         input, depth, auto_taxonomy: autoTax, no_pdf: noPdf,
+        resume,
         api_keys: apiKeys,
         primary_model: selectedModel || '',
       }),
@@ -1851,11 +1857,23 @@ def _list_files(dir_param: str) -> dict:
 
 
 def _spawn_pipeline(state_dir: Path, params: dict) -> int:
-    """Clear Q&A state, spawn pipeline subprocess, return PID."""
+    """Clear Q&A state (and stage markers unless resuming), spawn pipeline subprocess, return PID."""
     for fname in ("qa_queue.jsonl", "qa_answers.jsonl", "qa_complete"):
         p = state_dir / fname
         if p.exists():
             p.unlink()
+
+    # Fresh run: wipe stage completion markers so every stage re-runs.
+    # Resume run: preserve markers so only incomplete stages run.
+    if not params.get("resume", False):
+        pipeline_path = state_dir / "pipeline.json"
+        if pipeline_path.exists():
+            try:
+                data = json.loads(pipeline_path.read_text())
+                data["stages"] = {}
+                pipeline_path.write_text(json.dumps(data, indent=2))
+            except Exception:
+                pass
 
     cli_path = Path(sys.executable).parent / "doc-expand"
     if cli_path.exists():
