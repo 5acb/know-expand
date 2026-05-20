@@ -432,11 +432,11 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
 <div id="main">
   <!-- Left: stage list -->
   <div id="stage-list">
-    <div id="sl-stages"></div>
-    <div class="sl-divider"></div>
     <div class="sl-meta" id="sl-all-events" data-view="all-events">
       <span class="sl-meta-label">all events</span>
     </div>
+    <div class="sl-divider"></div>
+    <div id="sl-stages"></div>
   </div>
 
   <!-- Right: detail pane -->
@@ -574,7 +574,8 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
       </div>
       <!-- mode: running -->
       <div id="run-active" style="display:none; padding:14px">
-        <div style="color:var(--muted); font-size:12px; font-family:var(--font-mono); margin-bottom:8px">pipeline running…</div>
+        <div style="color:var(--muted); font-size:11px; font-family:var(--font-mono); margin-bottom:6px">pipeline running…</div>
+        <div id="run-active-info" style="font-size:10px; font-family:var(--font-mono); color:var(--muted); word-break:break-all; margin-bottom:10px; line-height:1.6"></div>
         <button class="inline-stop-btn" onclick="stopRun()">■ Stop run</button>
       </div>
     </div>
@@ -594,6 +595,9 @@ let stageData = {};       // { [stageId]: status + timing from /api/status }
 let domainData = [];
 let selectedView = null;  // stageId string or 'all-events'
 let stageArtifacts = {};  // cache { [stageId]: artifact data }
+let _pipelineRunning = false;
+let _runId = '';
+let _stateDir = '';
 
 // ── Stage list ──────────────────────────────────────────────────────────────
 function renderStageList(stages, pipelineRunning) {
@@ -991,10 +995,19 @@ async function poll() {
     if (sr.status !== 304) {
       lastStatusEtag = sr.headers.get('ETag') || '';
       const s = await sr.json();
+      const wasRunning = _pipelineRunning;
+      _pipelineRunning = s.pipeline_running;
       renderStageList(s.stages || {}, s.pipeline_running);
       domainData = s.domains || [];
+      _runId = s.run_id || '';
+      _stateDir = s.state_dir || '';
       $('run-label').textContent = s.run_id || '';
       $('top-status').textContent = s.summary || '';
+      // Auto-switch to all-events when pipeline first starts
+      if (s.pipeline_running && !wasRunning && selectedView !== 'all-events') {
+        $('sl-all-events').click();
+      }
+      updateRunActiveInfo();
       const alive = !s.stages?.['10']?.status || s.stages?.['10']?.status === 'running';
       $('pulse').className = 'pulse' + (alive ? ' live' : '');
 
@@ -1041,6 +1054,15 @@ setInterval(poll, 2000);
     });
   } catch {}
 })();
+
+function updateRunActiveInfo() {
+  const el = $('run-active-info');
+  if (!el) return;
+  const parts = [];
+  if (_stateDir) parts.push(_stateDir);
+  if (_runId)    parts.push('run: ' + _runId);
+  el.textContent = parts.join('\n');
+}
 
 // ── Stop / clear ─────────────────────────────────────────────────────────
 async function stopRun() {
@@ -1271,6 +1293,9 @@ async function startRun() {
 
     // Always start in running mode; pollQa/pollTaxonomy switch reactively
     setRunMode('running');
+
+    // Show all-events view so user sees live log immediately
+    $('sl-all-events').click();
   } catch(e) {
     $('run-start-btn').disabled = false;
     $('run-start-btn').textContent = '▶ Start Run';
@@ -1555,7 +1580,8 @@ def _pipeline_is_running(state_dir: Path) -> bool:
 
 def _load_state(state_dir: Path) -> dict:
     result: dict = {"stages": {}, "domains": [], "run_id": "", "summary": "",
-                    "pipeline_running": _pipeline_is_running(state_dir)}
+                    "pipeline_running": _pipeline_is_running(state_dir),
+                    "state_dir": str(state_dir)}
 
     pipeline_path = state_dir / "pipeline.json"
     if pipeline_path.exists():
