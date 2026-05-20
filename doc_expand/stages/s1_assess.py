@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import InterviewDecision, UserProfile
+from doc_expand.agents.schemas import ConceptList, InterviewDecision, UserProfile
 from doc_expand.config import Config
 from doc_expand.state import (
     PipelineState,
@@ -90,16 +90,58 @@ def _get_document_context(state_dir: Path) -> str:
     return f"Title: {title}\n\nDocument excerpt:\n{text}"
 
 
-def _get_key_concepts(state_dir: Path) -> list[str]:
-    """Return top 15 terms by occurrence_count from state/terms.json, or []."""
+def _get_key_concepts(state_dir: Path) -> list[str]:  # kept for import compat, prefer _identify_key_concepts
     terms_path = state_dir / "terms.json"
     if not terms_path.exists():
         return []
     try:
         terms = json.loads(terms_path.read_text())
-        # terms is a list of dicts with at least "name" and "occurrence_count"
-        sorted_terms = sorted(terms, key=lambda t: t.get("occurrence_count", 0), reverse=True)
-        return [t["name"] for t in sorted_terms[:15]]
+        return [t["name"] for t in sorted(terms, key=lambda t: t.get("occurrence_count", 0), reverse=True)[:15]]
+    except Exception:
+        return []
+
+
+def _get_raw_document_text(state_dir: Path, max_chars: int = 6000) -> str:
+    """Best-effort: return a long slice of the document for concept extraction."""
+    source = state_dir / "source.txt"
+    if source.exists():
+        return source.read_text(errors="replace")[:max_chars]
+    # Fall back to stitching first few chunks
+    chunks_dir = state_dir / "chunks"
+    if chunks_dir.exists():
+        parts = []
+        total = 0
+        for p in sorted(chunks_dir.glob("*.json")):
+            try:
+                text = json.loads(p.read_text()).get("text", "")
+                parts.append(text)
+                total += len(text)
+                if total >= max_chars:
+                    break
+            except Exception:
+                continue
+        return " ".join(parts)[:max_chars]
+    return ""
+
+
+async def _identify_key_concepts(doc_text: str, router) -> list[str]:
+    """Single LLM call: read the document and return the 6-10 most important concepts."""
+    if not doc_text.strip():
+        return []
+    messages = [{
+        "role": "user",
+        "content": (
+            "Read this document excerpt and identify the 6-10 most important specific "
+            "technical concepts a reader would need to understand. "
+            "Return them as a ConceptList. Each concept should be a precise noun phrase "
+            "(e.g. 'knowledge graph', 'attention mechanism', 'topological sort') — "
+            "not vague categories like 'mathematics' or 'algorithms'.\n\n"
+            f"Document excerpt:\n{doc_text}"
+        ),
+    }]
+    try:
+        result: ConceptList = await router.call(messages, ConceptList)
+        return result.concepts[:10]
     except Exception:
         return []
 
@@ -109,50 +151,60 @@ def _get_key_concepts(state_dir: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 _INTERVIEW_SYSTEM = """\
-You are conducting a focused user research interview to personalise a complex technical document for one reader.
+You are personalising a technical document for one specific reader. \
+Ask sharp, document-specific questions so the pipeline knows exactly what to explain, skip, and emphasise.
 
-Document context:
+=== Document ===
 {document_context}
 
-Key concepts in this document: {key_concepts_str}
+=== Key concepts identified in this document ===
+{key_concepts_str}
 
-Fields you must assess:
-- familiarity_level: how well does the reader know THIS document's specific topic?
-  (novice=never encountered it / aware=heard the terms / practitioner=used it / expert=could teach it)
-- known_concepts: which of the key concepts above do they already understand well?
-- unknown_concepts: which concepts do they need explained from scratch?
-- math_comfort: intuition_only / skim / engage / formal
-- learning_goal: explain (to others) / critique / apply / research
-- time_available: skim (30 min) / study (2–3 hrs) / deep_dive (days)
-- primary_use_case: the specific task or problem they want to solve with this knowledge
-- preferred_analogy_domain: the field they know best (used to build cross-domain analogies)
-- frustration_points: what usually trips them up in topics like this
+=== What you must learn (in roughly this order) ===
+Turn 1 — FAMILIARITY: Ask "Which of these specific concepts from the document do you already know well?" \
+Present ALL key concepts above as checkbox options. Include "None of these" and "All of them".
 
-Do NOT ask a generic "what is your job title / professional background" question.
-Background is irrelevant unless tied to a specific concept in the document.
-Ask instead: "How familiar are you with [specific concept from the document]?"
+Turn 2 — GOAL: Ask what the reader wants to DO after reading this document. \
+Options must be specific to what this document enables — not generic categories. \
+Example options: "Build [X described in the doc]", "Evaluate whether to adopt this approach", \
+"Understand it deeply enough to teach it", "Get a quick mental model to follow discussions", \
+"Research extensions or open problems".
 
-Interview so far (turn {turn}/{max_turns}):
+Turn 3 — DEPTH & TIME: Ask how deep they want to go. \
+Options: "Quick overview (30 min)", "Solid working understanding (2–3 hrs)", \
+"Deep mastery including the math (days)", "Just the parts relevant to [their goal from turn 2]".
+
+Turn 4 — GAPS: Based on turn 1 answers, ask about the ONE concept they said they don't know \
+that is most central to the document. Ask what specifically confuses them about it. Open question.
+
+Turn 5+ — Fill remaining fields: \
+- math_comfort (ask with reference to actual notation in this document, not generic "math in AI") \
+- primary_use_case (what specific problem / project / decision will this knowledge feed into?) \
+- preferred_analogy_domain (what field do they know very well — used to build analogies for them) \
+- frustration_points (what has tripped them up before with topics like this?)
+
+=== Interview so far (turn {turn}/{max_turns}) ===
 {history_text}
 
-Fields still uncertain: {remaining_fields}
+=== Fields still uncertain ===
+{remaining_fields}
 
-Generate the single best next question. Rules:
-- Start with domain-specific familiarity (use key concepts from THIS document)
-- Multiple-choice questions are strongly preferred — include an "Other / write your own" option
-- CRITICAL: NEVER embed options in the question text (e.g. "A) ... B) ...").
-  Options MUST go in the `options` list field. The question text should be just the question sentence.
-- If all critical fields are assessed OR turn >= {max_turns}, set interview_complete=true
-- Do not repeat questions already asked
+=== Rules (NON-NEGOTIABLE) ===
+1. `text` field = the question sentence ONLY. No options, no A)/B)/C)/D), no lists.
+2. ALL choices go in the `options` list. Never in `text`.
+3. MC questions must have 4–7 options including one free-form escape ("Other — describe below").
+4. Never ask about job title or professional background as a standalone question. \
+   Infer background from what they know and what they want to do.
+5. Set interview_complete=true once turns 1–3 and at least two of turns 4–5+ are done, \
+   or turn >= {max_turns}.
 """
 
 _CRITICAL_FIELDS = [
     "familiarity_level",
-    "known_concepts",
-    "unknown_concepts",
-    "math_comfort",
     "learning_goal",
     "time_available",
+    "unknown_concepts",
+    "math_comfort",
     "primary_use_case",
     "preferred_analogy_domain",
     "frustration_points",
@@ -524,14 +576,12 @@ async def run(state: PipelineState, cfg: Config) -> None:
 
     # Gather document context
     document_context = _get_document_context(state_dir)
-    key_concepts = _get_key_concepts(state_dir)
-
-    emit({"event": "stage1_interview_start", "use_web_ipc": use_web_ipc, "key_concept_count": len(key_concepts)})
 
     # Check if the "agent" role is configured
     has_agent = "agent" in cfg.models and bool(cfg.models["agent"])
 
     if not has_agent:
+        emit({"event": "stage1_interview_start", "use_web_ipc": use_web_ipc, "key_concept_count": 0})
         # Minimal fallback — no LLM for interviewing
         qa_pairs = await _minimal_fallback_interview(state_dir, use_web_ipc)
         _create_qa_complete_sentinel(state_dir)
@@ -539,6 +589,12 @@ async def run(state: PipelineState, cfg: Config) -> None:
         emit({"event": "stage1_profile_synthesized", "mode": "fallback_heuristic"})
     else:
         router = make_router("agent", cfg)
+
+        # Identify key concepts from the actual document before the interview starts
+        doc_text = _get_raw_document_text(state_dir)
+        key_concepts = await _identify_key_concepts(doc_text, router)
+        emit({"event": "stage1_interview_start", "use_web_ipc": use_web_ipc,
+              "key_concept_count": len(key_concepts), "key_concepts": key_concepts})
 
         qa_pairs = await _conduct_interview(
             document_context=document_context,

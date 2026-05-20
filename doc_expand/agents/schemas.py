@@ -88,15 +88,19 @@ class KnowledgeGraph(BaseModel):
 # Stage 0.5 — User profile + interview models
 # ---------------------------------------------------------------------------
 
+class ConceptList(BaseModel):
+    concepts: list[str]   # 6-10 specific technical concepts identified in the document
+
+
 class InterviewQuestion(BaseModel):
-    text: str
-    question_type: Literal["mc", "open"]  # mc = multiple choice, open = free text
-    options: list[str] = []               # non-empty for mc
+    text: str             # question sentence ONLY — no options, no A)/B)/C) in this field
+    question_type: Literal["mc", "open"]
+    options: list[str] = []   # ALL choices go here, never in text
 
 
 class InterviewDecision(BaseModel):
-    next_question: InterviewQuestion | None = None  # None means interview is complete
-    reasoning: str = ""                             # internal — why ask this / why done
+    next_question: InterviewQuestion | None = None
+    reasoning: str = ""
     interview_complete: bool = False
 
 
