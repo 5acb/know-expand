@@ -11,6 +11,7 @@ from doc_expand.agents.schemas import AssemblyManifest
 from doc_expand.config import Config
 from doc_expand.state import (
     PipelineState,
+    atomic_write,
     emit,
     mark_stage_complete,
     stage_is_complete,
@@ -305,10 +306,61 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
                 "expected_path": str(section_path),
             })
 
-    # Add synthesis section
+    # Add synthesis section, optionally prepending a Reading Roadmap from S5 metadata
     synthesis_path = sections_dir / "section_synthesis.md"
     if synthesis_path.exists():
-        doc_parts.append(_clean_section_text(synthesis_path.read_text()))
+        synthesis_text = _clean_section_text(synthesis_path.read_text())
+
+        # Inject structured Reading Roadmap from summary_synthesis.json if available
+        summary_synthesis_path = state_dir / "summaries" / "summary_synthesis.json"
+        if summary_synthesis_path.exists():
+            try:
+                syn_meta = json.loads(summary_synthesis_path.read_text())
+                roadmap: list[str] = syn_meta.get("reading_roadmap", [])
+                domain_count: int = syn_meta.get("domain_count", len(ordered_domain_ids))
+                if roadmap:
+                    # Deduplicate and strip any leading "N. " numbering the LLM may have added
+                    seen_keys: set[str] = set()
+                    unique_steps: list[str] = []
+                    for step in roadmap:
+                        import re as _re
+                        clean = _re.sub(r'^\d+[\.\)]\s*', '', step.strip())
+                        key = clean.lower()
+                        if key not in seen_keys:
+                            seen_keys.add(key)
+                            unique_steps.append(clean)
+
+                    roadmap_lines = [
+                        f"## Reading Roadmap\n",
+                        f"This document covers {domain_count} domain"
+                        + ("s" if domain_count != 1 else "")
+                        + ". For a reader working through this material for the"
+                        " first time, the recommended sequence is:\n",
+                    ]
+                    for i, step in enumerate(unique_steps, 1):
+                        # Steps may be plain domain names or "Domain — reason" strings
+                        if " — " in step or " - " in step:
+                            roadmap_lines.append(f"{i}. **{step}**")
+                        else:
+                            roadmap_lines.append(f"{i}. **{step}**")
+                    roadmap_section = "\n".join(roadmap_lines)
+
+                    # Prepend roadmap before synthesis body (after the first # heading if present)
+                    syn_lines = synthesis_text.splitlines(keepends=True)
+                    insert_at = 0
+                    for idx, line in enumerate(syn_lines):
+                        if line.startswith("# "):
+                            insert_at = idx + 1
+                            # Skip blank lines immediately after the heading
+                            while insert_at < len(syn_lines) and syn_lines[insert_at].strip() == "":
+                                insert_at += 1
+                            break
+                    syn_lines.insert(insert_at, roadmap_section + "\n\n")
+                    synthesis_text = "".join(syn_lines)
+            except Exception as _exc:
+                _logger.warning("s7: could not load summary_synthesis.json: %s", _exc)
+
+        doc_parts.append(synthesis_text)
         section_files_used.append(synthesis_path.name)
 
     # Add bibliography section
@@ -319,7 +371,7 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
     total_words = _word_count(full_text)
 
     output_md = output_dir / "expanded.md"
-    output_md.write_text(full_text)
+    atomic_write(output_md, full_text)
 
     emit({
         "event": "s7_markdown_written",

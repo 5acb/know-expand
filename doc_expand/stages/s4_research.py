@@ -3,19 +3,25 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from pathlib import Path
 
+import httpx
+
 from doc_expand.agents.base import make_router
 from doc_expand.agents.schemas import (
+    CitationRecord,
     CritiqueResult,
     DomainSummary,
     PersonaOutput,
     ReconcilerOutput,
 )
+from doc_expand.bibliography import _ss_search, _get_ss_limiter, _to_citation_record, _make_id
 from doc_expand.config import Config
 from doc_expand.state import (
     PipelineState,
+    atomic_write,
     emit,
     mark_stage_complete,
     stage_is_complete,
@@ -370,12 +376,184 @@ domain_label="{domain_label}".
 
 
 # ---------------------------------------------------------------------------
+# Bibliography expansion helpers (A-3)
+# ---------------------------------------------------------------------------
+
+_NEEDS_CITATION_RE = re.compile(r"\[NEEDS_CITATION\]")
+# Capture the sentence containing [NEEDS_CITATION] — up to ~300 chars around it
+_SENTENCE_CONTEXT_RE = re.compile(
+    r"(?:^|(?<=[.!?])\s+)([^.!?\n]{0,200}\[NEEDS_CITATION\][^.!?\n]{0,200})",
+    re.MULTILINE,
+)
+
+
+def _title_relevance(query: str, title: str) -> float:
+    """Word-overlap relevance between query and paper title (0.0–1.0)."""
+    stopwords = {"the", "a", "an", "of", "in", "for", "and", "to", "is"}
+    q_words = set(query.lower().split()) - stopwords
+    t_words = set(title.lower().split())
+    return len(q_words & t_words) / max(len(q_words), 1)
+
+
+async def _expand_bibliography(
+    domain_id: str,
+    personas: list[PersonaOutput],
+    bibliography: list[dict],
+    bib_path: Path,
+    cfg: Config,
+) -> tuple[list[dict], list[PersonaOutput]]:
+    """Scan persona outputs for citation gaps and [NEEDS_CITATION] markers.
+
+    For each missing citation ID and each [NEEDS_CITATION] marker:
+    - Search Semantic Scholar
+    - If a confident match is found, add it to the bibliography
+    - Replace [NEEDS_CITATION] markers in persona section bodies
+
+    Returns (updated_bibliography, updated_personas).
+    Never raises — all SS errors are swallowed and logged.
+    """
+    existing_ids: set[str] = {b.get("id", "") for b in bibliography}
+    seen_ids: set[str] = set(existing_ids)
+    new_papers: list[dict] = []
+
+    # Collect all citation IDs referenced by personas that are NOT in the bibliography
+    all_cited_ids: set[str] = set()
+    for p in personas:
+        all_cited_ids.update(p.citations_used)
+        for section in p.sections:
+            for c in section.citations:
+                all_cited_ids.add(c.citation_id)
+
+    missing_ids = all_cited_ids - existing_ids
+
+    # Collect [NEEDS_CITATION] contexts from all persona section bodies
+    needs_citation_contexts: list[tuple[int, int, str]] = []  # (persona_idx, section_idx, sentence)
+    for pi, persona in enumerate(personas):
+        for si, section in enumerate(persona.sections):
+            for m in _SENTENCE_CONTEXT_RE.finditer(section.body):
+                needs_citation_contexts.append((pi, si, m.group(1).strip()))
+
+    if not missing_ids and not needs_citation_contexts:
+        return bibliography, personas
+
+    emit({
+        "event": "s4_bibliography_expansion_start",
+        "domain_id": domain_id,
+        "missing_citation_ids": len(missing_ids),
+        "needs_citation_markers": len(needs_citation_contexts),
+    })
+
+    _get_ss_limiter(cfg)
+
+    async def _search_one(query: str, http: httpx.AsyncClient) -> list[dict]:
+        try:
+            return await _ss_search(query, http, cfg, limit=5)
+        except Exception as exc:
+            _logger.warning("s4 bib expansion: SS search failed for %r: %s", query[:60], exc)
+            return []
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            # Search for missing citation IDs
+            missing_id_tasks = {mid: asyncio.create_task(_search_one(mid, http)) for mid in missing_ids}
+            # Search for [NEEDS_CITATION] contexts
+            nc_tasks = [
+                asyncio.create_task(_search_one(ctx, http))
+                for (_, _, ctx) in needs_citation_contexts
+            ]
+            await asyncio.gather(
+                *missing_id_tasks.values(), *nc_tasks, return_exceptions=True
+            )
+    except Exception as exc:
+        _logger.warning("s4 bibliography expansion: SS unavailable, skipping (%s)", exc)
+        emit({"event": "s4_bibliography_expansion_skipped", "domain_id": domain_id, "reason": str(exc)[:120]})
+        return bibliography, personas
+
+    # Process missing-ID results
+    for mid, task in missing_id_tasks.items():
+        if task.exception():
+            continue
+        papers = task.result()
+        for paper in papers:
+            title = paper.get("title") or ""
+            if _title_relevance(mid, title) >= 0.4:
+                rec = _to_citation_record(paper, "frontier", seen_ids)
+                new_papers.append(rec.model_dump())
+                break  # take the first confident match per missing ID
+
+    # Process [NEEDS_CITATION] results — build replacement map per (persona, section)
+    replacement_map: dict[tuple[int, int], list[tuple[str, str]]] = {}
+    nc_resolved = 0
+
+    for idx, ((pi, si, sentence), task) in enumerate(zip(needs_citation_contexts, nc_tasks)):
+        if task.exception():
+            continue
+        papers = task.result()
+        best_paper = None
+        best_score = 0.0
+        for paper in papers:
+            title = paper.get("title") or ""
+            score = _title_relevance(sentence, title)
+            if score > best_score:
+                best_score = score
+                best_paper = paper
+        if best_paper and best_score >= 0.4:
+            rec = _to_citation_record(best_paper, "frontier", seen_ids)
+            new_papers.append(rec.model_dump())
+            new_sentence = sentence.replace("[NEEDS_CITATION]", f"[@{rec.id}]", 1)
+            replacement_map.setdefault((pi, si), []).append((sentence, new_sentence))
+            nc_resolved += 1
+
+    # Apply body replacements to persona sections
+    updated_personas: list[PersonaOutput] = []
+    for pi, persona in enumerate(personas):
+        updated_sections = []
+        for si, section in enumerate(persona.sections):
+            body = section.body
+            for (old_s, new_s) in replacement_map.get((pi, si), []):
+                body = body.replace(old_s, new_s, 1)
+            updated_sections.append(section.model_copy(update={"body": body}))
+        updated_personas.append(persona.model_copy(update={"sections": updated_sections}))
+
+    updated_bibliography = bibliography + new_papers
+    emit({
+        "event": "s4_bibliography_expanded",
+        "domain_id": domain_id,
+        "new_papers": len(new_papers),
+        "needs_citation_resolved": nc_resolved,
+    })
+
+    if new_papers and bib_path.exists():
+        try:
+            bib_path.write_text(json.dumps(updated_bibliography, indent=2))
+        except Exception as exc:
+            _logger.warning("s4 bib expansion: could not write updated bib for %s: %s", domain_id, exc)
+
+    return updated_bibliography, updated_personas
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _narrative_to_markdown(output: ReconcilerOutput) -> str:
     """Return the full Markdown content of a reconciler output."""
     return output.narrative
+
+
+def _compact_narrative(narrative: str, domain_label: str, max_chars: int = 8000) -> str:
+    """Trim narrative to max_chars for critic context, preserving structure.
+
+    The critic only needs the intro and the most recently revised content; the
+    reviser always receives the full text so it can edit any part of the chapter.
+    """
+    if len(narrative) <= max_chars:
+        return narrative
+    # Keep first 3000 chars (intro + what-is section) and last 5000 chars (most recent content)
+    head = narrative[:3000]
+    tail = narrative[-5000:]
+    truncated = len(narrative) - max_chars
+    return head + f"\n\n[... {truncated} chars truncated ...]\n\n" + tail
 
 
 def _domain_summary_to_markdown(summary: DomainSummary) -> str:
@@ -592,6 +770,20 @@ async def _research_domain(
           "engineer_sections": len(engineer_result.sections),
           "practitioner_sections": len(practitioner_result.sections)})
 
+    # Bibliography expansion (A-3): fill citation gaps before reconciler sees the text
+    _expanded_bib, _expanded_personas = await _expand_bibliography(
+        domain_id=domain_id,
+        personas=[theoretician_result, engineer_result, practitioner_result],
+        bibliography=bibliography,
+        bib_path=bib_path,
+        cfg=cfg,
+    )
+    bibliography = _expanded_bib
+    theoretician_result, engineer_result, practitioner_result = _expanded_personas
+    # Refresh derived bibliography strings after expansion
+    bib_str = _bib_summary(bibliography)
+    bib_ids = [b.get("id", "") for b in bibliography]
+
     # Reconciler: merge all three persona outputs
     reconciler_msg = [{"role": "user", "content": _RECONCILER_PROMPT.format(
         domain_label=domain_label,
@@ -628,7 +820,7 @@ async def _research_domain(
             domain_id=domain_id,
             bibliography_ids=json.dumps(bib_ids),
             gap_analysis=gap_context,
-            narrative=current_reconciled.narrative,
+            narrative=_compact_narrative(current_reconciled.narrative, domain_label),
         )}]
         critique: CritiqueResult = await router.call(critic_msg, CritiqueResult)
 
@@ -696,12 +888,12 @@ async def _research_domain(
     if final_summary is None:
         final_summary = current_reconciled.summary
 
-    # Write outputs
+    # Write outputs (atomic to prevent partial writes on crash)
     section_path = sections_dir / f"section_{domain_id}.md"
-    section_path.write_text(current_reconciled.narrative)
+    atomic_write(section_path, current_reconciled.narrative)
 
     summary_path = summaries_dir / f"summary_{domain_id}.json"
-    summary_path.write_text(final_summary.model_dump_json(indent=2))
+    atomic_write(summary_path, final_summary.model_dump_json(indent=2))
 
     # Write sentinel
     sentinel.touch()

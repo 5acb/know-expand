@@ -13,6 +13,7 @@ stderr — nothing; all output is routed to files or stdout
 
 import json
 import logging
+import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -367,3 +368,14 @@ def _kv(ev: dict, skip: set[str] = frozenset({"event"})) -> str:
 def emit_human(message: str) -> None:
     """Interactive/human-mode output; goes to stdout."""
     print(message, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Atomic file write
+# ---------------------------------------------------------------------------
+
+def atomic_write(path: Path, content: str) -> None:
+    """Write content to path atomically via a tmp+rename guard (POSIX atomic)."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content)
+    os.replace(tmp, path)

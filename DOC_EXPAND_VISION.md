@@ -166,12 +166,12 @@ A paper uses "Theorem" 80 times. It introduces its core mechanism "Speculative C
 ### 8. Adversarial quality where logical leaps occur
 A single agent producing an output with no challenge has no error-correction mechanism. But critics at every step is redundancy theater — it burns tokens to resolve artificially introduced non-determinism in stages where a deterministic check or structural reconciliation is sufficient. Critics are applied only where logical leaps happen: Stage 3 (gap analysis), Stage 4 (domain research), Stage 5 (cross-domain synthesis). Stages 1 and 2 use structural reconciliation instead.
 
-**Consequence:** Adversarial loops with 1/2/3 rounds (survey/standard/deep) in Stages 3, 4, and 5 only.
+**Consequence:** Adversarial loops with convergence-based termination (not fixed rounds) in Stages 3, 4, and 5. Loop exits when the critic's issue set is empty, identical to the prior round (stalled), or the critic explicitly accepts — whichever comes first. Hard cap (1/2/3 rounds for survey/standard/deep) prevents infinite loops if convergence fails.
 
 ### 9. Complementary redundancy where strategy divergence is genuine
 Two agents with structurally different strategies (top-down vs. bottom-up, lexical vs. conceptual) run in parallel where the strategies actually produce different coverage. Divergence between them is signal, not error. Running two LLMs with slightly different prompts over the same chunk is non-determinism theater — it does not yield higher truth.
 
-**Consequence:** Complementary agents in Stages 2 (Lumper/Splitter), 4 (top-down/bottom-up), and 5 (structural/semantic). Stage 1 uses spaCy (deterministic) + LLM (conceptual) + KeyBERT (embedding) — three genuinely different signal types, not two LLMs.
+**Consequence:** Stage 4 runs three genuinely distinct persona agents in parallel (Theoretician, Engineer, Practitioner), each covering a different epistemic dimension, reconciled by a fourth agent. Stage 5 runs three agents (Structural, Semantic, Cross-domain Connector). Stage 2 uses Lumper/Splitter. Stage 1 uses spaCy + LLM + KeyBERT — three fundamentally different signal types.
 
 ### 10. Idempotent stages
 If the pipeline crashes at Stage 4 and `--resume 4` is run, it must not silently append to partially-written files from the crashed run. Each stage that writes parallel outputs explicitly clears those outputs before restarting.
@@ -886,26 +886,29 @@ A gap survives to `gap_analysis.md` only if the Gap Finder rebuts the Defender. 
 
 #### Stage 4 — Research (Parallel per domain)
 
-One pair of Opus agents per domain, all domain pairs launched simultaneously via `asyncio.gather`.
+Three persona agents per domain, all domains launched simultaneously via `asyncio.gather`. Within each domain, the three personas run in parallel, then a Reconciler merges them. The critic loop then runs on the reconciled output.
 
 **Each agent receives:**
 - Domain nodes from `state/graph.json`
 - Gap analysis for this domain from `state/audit/gap_analysis.md`
-- Corrections for this domain from `state/audit/corrections.md`
 - `state/audit/bibliography_{domain}.json` — the only permitted citation pool
-- Format spec verbatim (skill tier, XP, Trace Up/Down/Sideways, math protocol)
-- Anti-hallucination constraint: *cite only from the provided bibliography JSON. If a claim requires a citation not in the list, write the claim without citation and mark it `[NEEDS_CITATION]`. Tag speculative claims `[INFERRED]`.*
+- Reader profile from `state/user_profile.json` — including specific `unknown_concepts` (concepts the reader got wrong in Stage 0.5 calibration, which get first-principles treatment) and `known_concepts` (skipped)
+- Full math protocol: intuition → symbol table → formal definition → worked example → why it matters
+- Per-persona drift guard: each agent is constrained to its epistemic scope
 
-| | Agent A | Agent B |
-|---|---|---|
-| Strategy | Top-down: field overview → paradigms → specific mechanisms → implementation | Bottom-up: implementation details → theoretical basis → first principles |
+| | Theoretician | Engineer | Practitioner |
+|---|---|---|---|
+| Scope | Mathematical foundations, formal definitions, historical context, theoretical guarantees | Algorithms, architectures, implementation patterns, failure modes | Real-world trade-offs, benchmarks, gotchas, "Where to Go Next" |
+| Strategy | Top-down: axiomatic basis → mechanisms → derivations | From mechanism to theory: show how it's built, explain why | From usage to mechanism: practitioner workflow → underlying reasons |
 
-**Adversarial critic loop:**
-- Critic challenges: unsupported claims; missing Trace Down implementations; math derivations with missing steps; `[INFERRED]` that should be citable from the bibliography
-- External truth: `bibliography_{domain}.json` — critic can directly challenge any citation not in the provided pool
+**Reconciler:** fourth agent merges all three outputs into a single coherent chapter. Deduplicates overlapping content, ensures smooth transitions.
 
-**Each domain pair writes:**
-1. `state/sections/section_{domain}.md` — full narrative with LaTeX, examples, Trace tables (reconciled from A and B)
+**Adversarial critic loop (convergence-based):** terminates when issue set is empty, identical to prior round (stalled), or critic accepts. Hard cap: 1/2/3 rounds for survey/standard/deep. Compact narrative (8k chars) sent to critic; full narrative sent to reviser.
+
+**Bibliography expansion:** after personas complete, `[NEEDS_CITATION]` markers are resolved via Semantic Scholar search using surrounding sentence as query. Papers with title relevance ≥ 0.4 are added to the domain bibliography.
+
+**Each domain writes:**
+1. `state/sections/section_{domain}.md` — full narrative (atomically written)
 2. `state/summaries/summary_{domain}.json` — structured summary for Stage 5:
 
 ```json
@@ -967,8 +970,6 @@ if resume:
 
 **Constraints:** only ADD content; never delete or rewrite existing text. Max 12 tool calls per domain. Context window: last 20 messages per turn.
 
-**Known limitation:** when the `insert_content` tool cannot locate the target pattern in the section text, the agent may append content to the end of the document instead of inserting it inline. This produces orphaned "Editor's Note" blocks and duplicate worked examples in the assembled output. **Fix (planned):** represent the document as a named-section node list rather than a flat string; insertion tools target section nodes by name rather than string patterns (see Improvement O-3 in the roadmap).
-
 **Resumability:** sentinel file `state/sections/section_{domain_id}.aligned`. On resume, domains with this file are skipped.
 
 **Output:** `state/sections/section_{domain}.md` (patched in-place), `state/sections/section_{domain}.aligned` (sentinel)
@@ -982,20 +983,23 @@ Never the narrative section `.md` files.
 
 Total token budget at "deep" depth on an 8-domain paper: ~15,000 tokens. Well within context.
 
-| | Agent A | Agent B |
-|---|---|---|
-| Strategy | Structural: identify cross-domain insights from typed edges in the KG | Semantic: identify cross-domain insights from `perspectives` fields in summaries |
-| External truth | `graph.json` topology — synthesis cannot assert a cross-domain connection without a typed edge path in the graph |
+Three agents run in parallel:
+
+| | Structural | Semantic | Connector |
+|---|---|---|---|
+| Strategy | Identify cross-domain insights from typed edges in the KG | Identify cross-domain insights from `perspectives` fields in summaries | Produce `CrossDomainBridge` objects: for each domain pair, identify a shared concept and write a 1–2 paragraph bridge explanation |
+| External truth | `graph.json` topology — synthesis cannot assert a cross-domain connection without a typed edge path in the graph | `summary_*.json` perspectives fields | Both — bridge `evidence` field must reference a KG edge path or summary field |
 
 **Adversarial critic:**
 - Challenges: trivial connections (A requires B is not a synthesis insight — that's just a prerequisite edge); connections asserted without graph edge support; redundancy with single-domain content
 - External truth: same graph topology
+- Convergence-based termination: exits when issue set empty, stalled (identical to prior round), or critic accepts
 
-**Outputs 3–5 synthesis boss nodes** plus a **reading roadmap** — topologically sorted path from "understands the source doc" to "can do independent research."
+**Outputs 3–5 synthesis boss nodes** plus a **reading roadmap** — topologically sorted path from "understands the source doc" to "can do independent research." Reading roadmap is also persisted as `state/summaries/summary_synthesis.json` and injected as a `## Reading Roadmap` section at the top of the assembled document.
 
-**Reconciliation:** structural framing from Agent A, narrative depth from Agent B, merged by a lightweight reconciliation pass.
+**Reconciliation:** structural framing from Structural agent, narrative depth from Semantic agent, cross-domain bridges from Connector — merged by a lightweight reconciliation pass that adds a "How the Domains Connect" subsection.
 
-**Output:** `state/sections/section_synthesis.md`
+**Output:** `state/sections/section_synthesis.md`, `state/summaries/summary_synthesis.json`
 
 ---
 
@@ -1903,6 +1907,8 @@ Typst (v0.14+, pre-1.0 but production-ready, actively maintained, millisecond in
 | All | LLM routing | `LiteLLM` + `QuotaAwareRouter` | Provider-agnostic fallback chains from `models.yaml`. Retry-After header distinguishes burst 429 (sleep+retry) from quota exhaustion (next model) |
 | All | LLM agents (default) | `gemini/gemini-2.5-pro` (agent role) | Frontier cloud model. `llamacpp/qwen2.5-7b-instruct` as local tool-calling fallback. Researcher/synthesizer: claude-opus-4-7 primary with gemini-2.5-pro fallback. |
 | All | Pipeline orchestration | `LangGraph` | Stateful graph execution, fan-out/fan-in, `--resume` via stage-complete sentinel files |
+| 1 | Pre-taxonomy concept grounding | Semantic Scholar title search | Core-tier terms fire one SS query each (concurrent, rate-limited). Zero hits → demote `core → supporting`, `grounded=False`. SS failure skipped with warning; pipeline never fails here. |
+| 7 | Output deduplication | Trigram Jaccard (stdlib) | `_deduplicate_blocks()` in S7: exact-deduplicates `**Primer:**` lines; Jaccard threshold 0.85 on blocks >150 chars. Applied before writing `expanded.md`. |
 | 7 | Preprocessing | `style/preprocess.py` | Reused from LLM KG project |
 | 7 | LaTeX style | `style/llm_paper_style.tex` | Reused from LLM KG project |
 | 7 | PDF build (default) | `pandoc` + `xelatex` ×2 | Proven pipeline; complex math support |
@@ -1927,7 +1933,7 @@ Typst (v0.14+, pre-1.0 but production-ready, actively maintained, millisecond in
 | **Observability (default)** | flat `model_usage.jsonl` | Zero-dependency; `cat state/audit/model_usage.jsonl \| jq` answers every debug question |
 | **Observability (optional)** | `Phoenix` (Arize, ELv2) or `Langfuse` (MIT) | Enable with `--observability phoenix\|langfuse`; useful for multi-run tuning and agent session replay. Not required for single-document CLI use. |
 | **Graph storage** | `NetworkX` + `graph.json` | In-memory ops: topological sort, DAG traversal, neighbor lookup. Sufficient at ≤200 nodes; no compiled binary dependency. |
-| **Terminal UI** | `Rich` | Progress bars, panels, tables, syntax highlighting; pipeline stage display |
+| **Terminal UI** | `doc-expand tail` + `doc-expand serve` | `tail` streams `state/audit/events.jsonl` to terminal; `serve` runs a local HTTP dashboard (:7842) with Pipeline/Domains/Events/Gaps tabs. No Rich dependency. |
 | **Data validation (bulk)** | `Pandera` | DataFrame-level schema validation for batch term inventory and citation index |
 | **HTTP client** | `httpx` | Async; timeout support; used for all external API calls |
 

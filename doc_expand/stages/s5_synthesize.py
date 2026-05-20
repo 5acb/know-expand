@@ -17,6 +17,7 @@ from doc_expand.agents.schemas import (
 from doc_expand.config import Config
 from doc_expand.state import (
     PipelineState,
+    atomic_write,
     emit,
     mark_stage_complete,
     stage_is_complete,
@@ -296,7 +297,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
             "reason": "no_summaries",
         })
         synthesis_path = sections_dir / "section_synthesis.md"
-        synthesis_path.write_text("# Cross-Domain Synthesis\n\n(No domain summaries available.)\n")
+        atomic_write(synthesis_path, "# Cross-Domain Synthesis\n\n(No domain summaries available.)\n")
         mark_stage_complete(state_dir, 5)
         return
 
@@ -448,7 +449,18 @@ async def run(state: PipelineState, cfg: Config) -> None:
         )
 
     synthesis_path = sections_dir / "section_synthesis.md"
-    synthesis_path.write_text(_synthesis_draft_to_markdown(final_draft, connector_output))
+    atomic_write(synthesis_path, _synthesis_draft_to_markdown(final_draft, connector_output))
+
+    # Persist roadmap + metadata so S7 can inject a structured frontmatter section
+    summary_synthesis = {
+        "reading_roadmap": final_draft.reading_roadmap,
+        "boss_nodes": final_draft.boss_nodes,
+        "insights_count": len(final_draft.insights),
+        "domain_count": len(summaries),
+    }
+    summary_synthesis_path = summaries_dir / "summary_synthesis.json"
+    summaries_dir.mkdir(exist_ok=True)
+    atomic_write(summary_synthesis_path, json.dumps(summary_synthesis, indent=2))
 
     mark_stage_complete(state_dir, 5)
     emit({
