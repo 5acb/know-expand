@@ -492,33 +492,6 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
     <div id="run-body">
       <!-- mode: setup -->
       <div id="run-setup">
-        <div>
-          <div class="rf-label">Input (file path or URL)</div>
-          <div class="rf-input-row">
-            <input id="run-input" class="rf-input" placeholder="./paper.pdf or https://…" />
-            <button id="browse-btn" onclick="toggleBrowser()">⋯</button>
-          </div>
-          <div id="file-browser">
-            <div id="fb-crumb">/</div>
-            <div id="fb-list"></div>
-          </div>
-        </div>
-        <div>
-          <div class="rf-label">Depth</div>
-          <select id="run-depth" class="rf-select">
-            <option value="standard" selected>standard</option>
-            <option value="survey">survey</option>
-            <option value="deep">deep</option>
-          </select>
-        </div>
-        <label class="rf-check">
-          <input type="checkbox" id="run-auto-tax" checked />
-          Auto-taxonomy (skip manual review)
-        </label>
-        <label class="rf-check">
-          <input type="checkbox" id="run-no-pdf" checked />
-          Skip PDF render
-        </label>
         <!-- Resume status card (populated by JS from /api/status) -->
         <div id="resume-card" style="display:none">
           <div class="rf-label">Prior run</div>
@@ -530,8 +503,38 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
         </div>
         <input type="hidden" id="run-resume" value="0" />
 
-        <!-- Models & Keys collapsible -->
-        <div class="mk-section">
+        <!-- Fresh-run options (hidden in resume mode) -->
+        <div id="fresh-options">
+          <div>
+            <div class="rf-label">Input (file path or URL)</div>
+            <div class="rf-input-row">
+              <input id="run-input" class="rf-input" placeholder="./paper.pdf or https://…" />
+              <button id="browse-btn" onclick="toggleBrowser()">⋯</button>
+            </div>
+            <div id="file-browser">
+              <div id="fb-crumb">/</div>
+              <div id="fb-list"></div>
+            </div>
+          </div>
+          <div>
+            <div class="rf-label">Depth</div>
+            <select id="run-depth" class="rf-select">
+              <option value="standard" selected>standard</option>
+              <option value="survey">survey</option>
+              <option value="deep">deep</option>
+            </select>
+          </div>
+          <label class="rf-check">
+            <input type="checkbox" id="run-auto-tax" checked />
+            Auto-taxonomy (skip manual review)
+          </label>
+          <label class="rf-check">
+            <input type="checkbox" id="run-no-pdf" checked />
+            Skip PDF render
+          </label>
+
+          <!-- Models & Keys collapsible -->
+          <div class="mk-section">
           <div class="mk-header" onclick="toggleMkPanel()">
             <span>⚙</span> Models &amp; Keys
             <span class="mk-chevron" id="mk-chevron">▶</span>
@@ -566,6 +569,7 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
                    oninput="onCustomModelInput(this.value)" />
           </div>
         </div>
+        </div><!-- /#fresh-options -->
 
         <button id="run-start-btn" onclick="startRun()">▶ Start Run</button>
       </div>
@@ -1089,9 +1093,13 @@ function updateResumeCard(stages, inputPath, runId) {
   if (completedIds.length === 0) {
     card.style.display = 'none';
     $('run-resume').value = '0';
+    $('fresh-options').style.display = 'flex';
+    $('run-start-btn').textContent = '▶ Start Run';
+    _resumeInputPath = '';
     return;
   }
 
+  _resumeInputPath = inputPath || '';
   card.style.display = 'block';
 
   // Health check: any error stages?
@@ -1112,10 +1120,17 @@ function updateResumeCard(stages, inputPath, runId) {
     + inputSnippet + runSnippet;
 }
 
+let _resumeInputPath = '';   // set by updateResumeCard from prior run's input_path
+
 function setResumeMode(doResume) {
   $('run-resume').value = doResume ? '1' : '0';
   $('resume-btn-fresh').classList.toggle('active', !doResume);
   $('resume-btn-resume').classList.toggle('active', doResume);
+  $('fresh-options').style.display = doResume ? 'none' : 'flex';
+  $('run-start-btn').textContent = doResume ? '▶ Resume Run' : '▶ Start Run';
+  if (doResume && _resumeInputPath) {
+    $('run-input').value = _resumeInputPath;
+  }
 }
 
 function updateRunActiveInfo() {
@@ -1129,12 +1144,21 @@ function updateRunActiveInfo() {
 
 // ── Stop / clear ─────────────────────────────────────────────────────────
 async function stopRun() {
-  await fetch('/api/stop', {method: 'POST'});
+  const r = await fetch('/api/stop', {method: 'POST'});
+  const d = await r.json().catch(() => ({}));
   lastStatusEtag = '';
+  lastEventsEtag = '';   // force events refresh so run_stopped appears immediately
   $('stop-btn').style.display = 'none';
   currentQaId = null;
   qaHistory = [];
   setRunMode('setup');
+  // Switch to all-events so the run_stopped log line is visible
+  if (selectedView !== 'all-events') $('sl-all-events').click();
+  // Flash outcome in the events filter bar
+  const bar = $('evt-filter-input');
+  const prev = bar.placeholder;
+  bar.placeholder = d.killed ? '■ run stopped' : '■ stop sent (no process found)';
+  setTimeout(() => { bar.placeholder = prev; }, 3000);
 }
 
 async function clearStage(sid) {
@@ -1323,7 +1347,8 @@ function onCustomModelInput(val) {
 }
 
 async function startRun() {
-  const input = $('run-input').value.trim();
+  const isResume = $('run-resume').value === '1';
+  const input = isResume ? _resumeInputPath : $('run-input').value.trim();
   if (!input) { $('run-input').focus(); return; }
   const depth = $('run-depth').value;
   const autoTax = $('run-auto-tax').checked;
@@ -2344,6 +2369,7 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
 
             elif self.path == "/api/stop":
                 killed = False
+                pid = None
                 pid_file = state_dir / "pipeline_pid"
                 if pid_file.exists():
                     try:
