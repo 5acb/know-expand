@@ -1769,8 +1769,10 @@ async function pollQa() {
     const r = await fetch('/api/qa');
     const d = await r.json();
 
-    // If a question exists and we're not in qa mode yet, switch into it
-    if ((d.question || (d.history && d.history.length > 0)) && runPaneMode === 'running') {
+    // If a live question exists and we're not in qa mode yet, switch into it.
+    // Do NOT use history.length here — history persists after interview_complete,
+    // which would cause running→qa→running oscillation on every poll.
+    if (d.question && !d.interview_complete && runPaneMode === 'running') {
       setRunMode('qa');
     }
 

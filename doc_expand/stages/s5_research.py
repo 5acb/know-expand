@@ -75,6 +75,8 @@ ANTI-HALLUCINATION RULES:
 - Mark unciteable claims [NEEDS_CITATION].
 - Tag speculative claims [INFERRED].
 - Do not invent paper titles, authors, or results.
+- For tool/library descriptions, prefer the fetched knowledge sources over parametric memory.
+- You may reference fetched source URLs inline as (source: URL) for non-academic claims.
 """
 
 _PERSONA_DRIFT_GUARD = """\
@@ -111,6 +113,9 @@ Gap analysis findings for this domain:
 
 Bibliography (cite ONLY from this list using the citation id field):
 {bibliography}
+
+Fetched Knowledge Sources (retrieved documentation — use for technical accuracy on tools and concepts):
+{knowledge_sources}
 
 STRUCTURE (follow this section order exactly):
 1. "What is {domain_label}?" — 3–5 paragraphs. One-sentence definition. \
@@ -159,6 +164,9 @@ Gap analysis findings for this domain:
 Bibliography (cite ONLY from this list using the citation id field):
 {bibliography}
 
+Fetched Knowledge Sources (retrieved documentation — use for technical accuracy on tools and concepts):
+{knowledge_sources}
+
 STRUCTURE (follow this section order exactly):
 1. "Key Algorithms" — The main algorithms with pseudocode. Derive from first \
    principles where possible. Apply MATHEMATICS PROTOCOL to any non-trivial \
@@ -204,6 +212,9 @@ Gap analysis findings for this domain:
 
 Bibliography (cite ONLY from this list using the citation id field):
 {bibliography}
+
+Fetched Knowledge Sources (retrieved documentation — use for technical accuracy on tools and concepts):
+{knowledge_sources}
 
 STRUCTURE (follow this section order exactly):
 1. "Minimal Working Example" — The simplest possible demonstration of \
@@ -258,6 +269,9 @@ Reader profile: {reader_profile}
 
 Bibliography (cite ONLY from this list using the citation id field):
 {bibliography}
+
+Fetched Knowledge Sources (retrieved documentation — use for technical accuracy on tools and concepts):
+{knowledge_sources}
 
 --- THEORETICIAN OUTPUT ---
 {theoretician_sections}
@@ -712,6 +726,17 @@ async def _research_domain(
     if bib_path.exists():
         bibliography = json.loads(bib_path.read_text())
 
+    # Load fetched knowledge sources (written by s4_audit)
+    from doc_expand.sources import format_sources  # noqa: PLC0415
+    sources_cache = audit_dir / "sources" / f"sources_{domain_id}.json"
+    term_sources: dict = {}
+    if sources_cache.exists():
+        try:
+            term_sources = json.loads(sources_cache.read_text())
+        except Exception as exc:
+            _logger.warning("s5 sources load failed for %r: %s", domain_id, exc)
+    knowledge_sources_str = format_sources(term_sources)
+
     gap_context = _extract_gap_context(gap_md, domain_id, domain_label)
     bib_str = _bib_summary(bibliography)
     bib_ids = [b.get("id", "") for b in bibliography]
@@ -737,6 +762,7 @@ async def _research_domain(
         graph_nodes=nodes_str,
         gap_analysis=gap_context,
         bibliography=bib_str,
+        knowledge_sources=knowledge_sources_str,
         reader_profile=reader_profile_str,
         reader_profile_note=reader_profile_note,
         math_protocol=_MATH_PROTOCOL,
@@ -790,6 +816,7 @@ async def _research_domain(
         domain_id=domain_id,
         reader_profile=reader_profile_str,
         bibliography=bib_str,
+        knowledge_sources=knowledge_sources_str,
         theoretician_sections=_persona_sections_to_text(theoretician_result),
         engineer_sections=_persona_sections_to_text(engineer_result),
         practitioner_sections=_persona_sections_to_text(practitioner_result),
