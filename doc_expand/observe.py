@@ -165,8 +165,8 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
 .sl-name { flex: 1; font-size: 12px; font-weight: 500; }
 .sl-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
 .sl-dot.done { background: var(--green); }
-.sl-dot.running { background: var(--accent); animation: blink 1.4s infinite; }
-.sl-dot.skipped { background: var(--muted); }
+.sl-dot.running { background: var(--green); animation: blink 1.4s infinite; }
+.sl-dot.skipped { background: var(--accent); }
 .sl-dot.error { background: var(--red); }
 .sl-divider { height: 1px; background: var(--border); margin: 4px 0; }
 .sl-meta { display: flex; align-items: center; gap: 9px; padding: 8px 12px;
@@ -183,10 +183,10 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
 .dh-meta { display: flex; gap: 14px; font-size: 11px; font-family: var(--font-mono); color: var(--muted); flex-wrap: wrap; }
 .badge { font-size: 10px; font-family: var(--font-mono); padding: 2px 7px; border-radius: 3px; }
 .badge-done { background: #1a3a1a; color: var(--green); }
-.badge-running { background: #1a2a3a; color: var(--accent); }
+.badge-running { background: #1a3a1a; color: var(--green); }
 .badge-pending { background: var(--border); color: var(--muted); }
 .badge-error { background: #3a1a1a; color: var(--red); }
-.badge-skipped { background: var(--border); color: var(--muted); }
+.badge-skipped { background: #1a2a3a; color: var(--accent); }
 
 #detail-body { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
 
