@@ -16,6 +16,7 @@ IPC file protocol (all files inside state_dir/):
 
 import asyncio
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -108,24 +109,28 @@ def _get_key_concepts(state_dir: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 _INTERVIEW_SYSTEM = """\
-You are conducting a precise user research interview to tailor a complex technical document to one reader.
+You are conducting a focused user research interview to personalise a complex technical document for one reader.
 
 Document context:
 {document_context}
 
-Key concepts to assess familiarity with: {key_concepts_str}
+Key concepts in this document: {key_concepts_str}
 
-Fields you must assess to build the reader profile:
-- familiarity_level: novice/aware/practitioner/expert in this domain
-- background_field: their professional background (ML engineer, biologist, student, etc.)
-- math_comfort: intuition_only/skim/engage/formal
+Fields you must assess:
+- familiarity_level: how well does the reader know THIS document's specific topic?
+  (novice=never encountered it / aware=heard the terms / practitioner=used it / expert=could teach it)
+- known_concepts: which of the key concepts above do they already understand well?
+- unknown_concepts: which concepts do they need explained from scratch?
+- math_comfort: intuition_only / skim / engage / formal
 - learning_goal: explain (to others) / critique / apply / research
-- known_concepts: which of the key concepts they already understand well
-- unknown_concepts: which concepts they specifically need explained from scratch
-- time_available: skim (30min) / study (2-3hrs) / deep_dive (days)
-- primary_use_case: what they will do with this knowledge
-- preferred_analogy_domain: their home domain for cross-domain analogies
-- frustration_points: what usually confuses them in this area
+- time_available: skim (30 min) / study (2–3 hrs) / deep_dive (days)
+- primary_use_case: the specific task or problem they want to solve with this knowledge
+- preferred_analogy_domain: the field they know best (used to build cross-domain analogies)
+- frustration_points: what usually trips them up in topics like this
+
+Do NOT ask a generic "what is your job title / professional background" question.
+Background is irrelevant unless tied to a specific concept in the document.
+Ask instead: "How familiar are you with [specific concept from the document]?"
 
 Interview so far (turn {turn}/{max_turns}):
 {history_text}
@@ -133,25 +138,61 @@ Interview so far (turn {turn}/{max_turns}):
 Fields still uncertain: {remaining_fields}
 
 Generate the single best next question. Rules:
-- Ask about the most uncertain field first
-- For domain-specific concepts, ask about THIS document's concepts (not generic questions)
-- Multiple-choice questions are preferred (easier to answer); include an "other / write your own" option
-- If all critical fields are assessed OR turn >= {max_turns}, set interview_complete=true and next_question=null
+- Start with domain-specific familiarity (use key concepts from THIS document)
+- Multiple-choice questions are strongly preferred — include an "Other / write your own" option
+- CRITICAL: NEVER embed options in the question text (e.g. "A) ... B) ...").
+  Options MUST go in the `options` list field. The question text should be just the question sentence.
+- If all critical fields are assessed OR turn >= {max_turns}, set interview_complete=true
 - Do not repeat questions already asked
 """
 
 _CRITICAL_FIELDS = [
     "familiarity_level",
-    "background_field",
+    "known_concepts",
+    "unknown_concepts",
     "math_comfort",
     "learning_goal",
     "time_available",
     "primary_use_case",
-    "known_concepts",
-    "unknown_concepts",
     "preferred_analogy_domain",
     "frustration_points",
 ]
+
+
+def _extract_embedded_options(text: str, existing_options: list[str]) -> tuple[str, list[str]]:
+    """
+    If the LLM embedded options in the question text (e.g. "A) Foo  B) Bar"),
+    extract them into a list and strip them from the text.
+    Returns (cleaned_text, options_list). No-ops if options already populated.
+    """
+    if existing_options:
+        return text, existing_options
+
+    # Match patterns: "A) ...", "A. ...", "1) ...", "1. ..." on same line or across lines
+    pattern = re.compile(
+        r'\b([A-Da-d])[).]\s+(.+?)(?=\s+[A-Da-d][).]\s+|\s*$)',
+        re.DOTALL,
+    )
+    matches = pattern.findall(text)
+    if len(matches) >= 2:
+        options = [m[1].strip().rstrip('.') for m in matches]
+        # Remove the options block from the text (everything from first match onwards)
+        split_pos = text.find(matches[0][0] + ')')
+        if split_pos == -1:
+            split_pos = text.find(matches[0][0] + '.')
+        clean = text[:split_pos].strip() if split_pos > 0 else text
+        return clean, options
+
+    # Numbered list: "1) ...\n2) ..."
+    num_pattern = re.compile(r'(?:^|\n)\s*(\d+)[).]\s+(.+)', re.MULTILINE)
+    num_matches = num_pattern.findall(text)
+    if len(num_matches) >= 2:
+        options = [m[1].strip() for m in num_matches]
+        split_pos = re.search(r'\n\s*1[).]\s+', text)
+        clean = text[:split_pos.start()].strip() if split_pos else text
+        return clean, options
+
+    return text, existing_options
 
 
 def _build_interview_prompt(
@@ -281,11 +322,12 @@ async def _conduct_interview(
             break
 
         q = decision.next_question
+        clean_text, options = _extract_embedded_options(q.text, q.options)
         q_dict = {
             "id": f"q{turn}",
-            "text": q.text,
-            "question_type": q.question_type,
-            "options": q.options,
+            "text": clean_text,
+            "question_type": "mc" if options else q.question_type,
+            "options": options,
             "turn": turn,
         }
 
