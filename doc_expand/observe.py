@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -282,6 +283,50 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
 
 /* empty / loading */
 .empty { color: var(--muted); font-size: 12px; padding: 24px 0; font-family: var(--font-mono); }
+
+/* run pane */
+#run-pane { width: 300px; flex-shrink: 0; border-left: 1px solid var(--border);
+            display: flex; flex-direction: column; overflow: hidden; }
+#run-header { padding: 10px 14px; background: var(--surface); border-bottom: 1px solid var(--border);
+              display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+#run-pane-title { font-size: 13px; font-weight: 600; flex: 1; }
+#run-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+#run-setup { display: flex; flex-direction: column; gap: 10px; padding: 14px; }
+.rf-label { font-size: 10px; color: var(--muted); font-family: var(--font-mono);
+            text-transform: uppercase; letter-spacing: .06em; margin-bottom: 2px; }
+.rf-input { background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+            padding: 6px 10px; color: var(--text); font-family: var(--font-mono);
+            font-size: 12px; width: 100%; outline: none; }
+.rf-input:focus { border-color: var(--accent); }
+.rf-select { background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+             padding: 6px 10px; color: var(--text); font-size: 12px; width: 100%; outline: none; }
+.rf-check { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
+.rf-check input { accent-color: var(--accent); }
+#run-start-btn { background: var(--accent); color: #fff; border: none; border-radius: 4px;
+                 padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer; width: 100%; margin-top: 4px; }
+#run-start-btn:hover { filter: brightness(1.1); }
+#run-start-btn:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+
+/* Chat UI */
+#chat-messages { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.chat-msg { display: flex; flex-direction: column; gap: 4px; }
+.chat-msg.agent { align-items: flex-start; }
+.chat-msg.user-msg { align-items: flex-end; }
+.chat-bubble { max-width: 90%; border-radius: 8px; padding: 8px 11px; font-size: 12px; line-height: 1.5; }
+.chat-bubble.agent { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+.chat-bubble.user-bub { background: var(--accent); color: #fff; }
+.chat-options { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; max-width: 90%; }
+.chat-opt { background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+            padding: 5px 10px; font-size: 11px; cursor: pointer; text-align: left; color: var(--text); }
+.chat-opt:hover { border-color: var(--accent); color: var(--accent); }
+.chat-opt:disabled { opacity: 0.5; cursor: default; }
+.chat-opt.chosen { background: #1a2a3a; border-color: var(--accent); color: var(--accent); }
+#chat-input-area { padding: 10px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-shrink: 0; }
+#chat-input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+              padding: 6px 10px; color: var(--text); font-family: var(--font-mono); font-size: 12px; outline: none; }
+#chat-input:focus { border-color: var(--accent); }
+#chat-send { background: var(--accent); border: none; border-radius: 4px; padding: 6px 10px;
+             color: #fff; cursor: pointer; font-size: 13px; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -331,6 +376,52 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
           <input id="evt-filter-input" placeholder="filter by event name…" />
         </div>
         <div id="all-events-log"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Far right: run pane -->
+  <div id="run-pane">
+    <div id="run-header">
+      <span id="run-pane-title">Run</span>
+      <span id="run-state-badge" class="badge badge-pending">idle</span>
+    </div>
+    <div id="run-body">
+      <!-- mode: setup -->
+      <div id="run-setup">
+        <div>
+          <div class="rf-label">Input (file path or URL)</div>
+          <input id="run-input" class="rf-input" placeholder="./paper.pdf or https://…" />
+        </div>
+        <div>
+          <div class="rf-label">Depth</div>
+          <select id="run-depth" class="rf-select">
+            <option value="standard" selected>standard</option>
+            <option value="survey">survey</option>
+            <option value="deep">deep</option>
+          </select>
+        </div>
+        <label class="rf-check">
+          <input type="checkbox" id="run-auto-tax" checked />
+          Auto-taxonomy (skip manual review)
+        </label>
+        <label class="rf-check">
+          <input type="checkbox" id="run-no-pdf" checked />
+          Skip PDF render
+        </label>
+        <button id="run-start-btn" onclick="startRun()">▶ Start Run</button>
+      </div>
+      <!-- mode: qa (chat interface) -->
+      <div id="run-qa" style="display:none; flex-direction:column; flex:1">
+        <div id="chat-messages"></div>
+        <div id="chat-input-area" style="display:none">
+          <input id="chat-input" placeholder="type your answer…" />
+          <button id="chat-send">→</button>
+        </div>
+      </div>
+      <!-- mode: running -->
+      <div id="run-active" style="display:none; padding:14px">
+        <div style="color:var(--muted); font-size:12px; font-family:var(--font-mono)">pipeline running…</div>
       </div>
     </div>
   </div>
@@ -772,10 +863,194 @@ async function poll() {
   } catch {
     $('top-status').textContent = 'disconnected';
   }
+  await pollQa();
 }
 
 poll();
 setInterval(poll, 2000);
+
+// ── Run pane ──────────────────────────────────────────────────────────────────
+let runPaneMode = 'setup'; // 'setup' | 'qa' | 'running'
+let currentQaId = null;
+let qaHistory = []; // [{question: str, answer: str}]
+
+function setRunMode(mode) {
+  runPaneMode = mode;
+  $('run-setup').style.display = mode === 'setup' ? 'flex' : 'none';
+  $('run-qa').style.display = mode === 'qa' ? 'flex' : 'none';
+  $('run-active').style.display = mode === 'running' ? 'block' : 'none';
+  const badge = $('run-state-badge');
+  badge.className = 'badge ' + {setup:'badge-pending', qa:'badge-running', running:'badge-running'}[mode];
+  badge.textContent = {setup:'idle', qa:'interview', running:'running'}[mode];
+}
+
+async function startRun() {
+  const input = $('run-input').value.trim();
+  if (!input) { $('run-input').focus(); return; }
+  const depth = $('run-depth').value;
+  const autoTax = $('run-auto-tax').checked;
+  const noPdf = $('run-no-pdf').checked;
+
+  $('run-start-btn').disabled = true;
+  $('run-start-btn').textContent = 'starting…';
+
+  try {
+    await fetch('/api/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({input, depth, auto_taxonomy: autoTax, no_pdf: noPdf}),
+    });
+
+    // Invalidate status cache so stage list refreshes
+    lastStatusEtag = '';
+
+    if (!autoTax) {
+      setRunMode('qa');
+      $('run-qa').style.flexDirection = 'column';
+    } else {
+      setRunMode('running');
+    }
+  } catch(e) {
+    $('run-start-btn').disabled = false;
+    $('run-start-btn').textContent = '▶ Start Run';
+  }
+}
+
+// Q&A polling (called from main poll loop)
+async function pollQa() {
+  if (runPaneMode !== 'qa') return;
+
+  try {
+    const r = await fetch('/api/qa');
+    const d = await r.json();
+
+    // Rebuild history messages if history changed
+    const hist = d.history || [];
+    if (hist.length !== qaHistory.length) {
+      qaHistory = hist;
+      rebuildChatHistory();
+    }
+
+    if (d.interview_complete) {
+      // Remove thinking indicator, show completion
+      removeThinking();
+      appendAgentBubble('Profile complete. Running pipeline…');
+      setRunMode('running');
+      return;
+    }
+
+    if (d.question && d.question.id !== currentQaId) {
+      removeThinking();
+      currentQaId = d.question.id;
+      renderQuestion(d.question);
+    } else if (!d.question && currentQaId) {
+      // Waiting for next question
+      ensureThinking();
+    }
+  } catch(e) {}
+}
+
+function rebuildChatHistory() {
+  // Only add bubbles for history items not already shown
+  // (Simple: clear and re-add all — but that loses in-progress state)
+  // Better: track which IDs we've shown
+}
+
+function renderQuestion(q) {
+  const area = $('chat-messages');
+
+  // Agent bubble
+  const msgEl = document.createElement('div');
+  msgEl.className = 'chat-msg agent';
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-bubble agent';
+  bubble.textContent = q.text;
+  msgEl.appendChild(bubble);
+
+  if (q.question_type === 'mc' && q.options?.length) {
+    const opts = document.createElement('div');
+    opts.className = 'chat-options';
+    q.options.forEach(opt => {
+      const btn = document.createElement('button');
+      btn.className = 'chat-opt';
+      btn.textContent = opt;
+      btn.onclick = () => submitAnswer(q.id, opt, msgEl);
+      opts.appendChild(btn);
+    });
+    msgEl.appendChild(opts);
+    $('chat-input-area').style.display = 'none';
+  } else {
+    $('chat-input-area').style.display = 'flex';
+    $('chat-input').focus();
+    $('chat-send').onclick = () => {
+      const val = $('chat-input').value.trim();
+      if (val) submitAnswer(q.id, val, msgEl);
+    };
+    $('chat-input').onkeydown = (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        const val = $('chat-input').value.trim();
+        if (val) submitAnswer(q.id, val, msgEl);
+      }
+    };
+  }
+
+  area.appendChild(msgEl);
+  area.scrollTop = area.scrollHeight;
+}
+
+async function submitAnswer(qid, answer, questionEl) {
+  // Disable options
+  questionEl.querySelectorAll('.chat-opt').forEach(b => {
+    b.disabled = true;
+    if (b.textContent === answer) b.classList.add('chosen');
+  });
+  $('chat-input').value = '';
+  $('chat-input-area').style.display = 'none';
+
+  // User bubble
+  const area = $('chat-messages');
+  const userEl = document.createElement('div');
+  userEl.className = 'chat-msg user-msg';
+  const bub = document.createElement('div');
+  bub.className = 'chat-bubble user-bub';
+  bub.textContent = answer;
+  userEl.appendChild(bub);
+  area.appendChild(userEl);
+  area.scrollTop = area.scrollHeight;
+
+  ensureThinking();
+  currentQaId = null;
+
+  await fetch('/api/qa/answer', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: qid, answer}),
+  });
+}
+
+function appendAgentBubble(text) {
+  const area = $('chat-messages');
+  const el = document.createElement('div');
+  el.className = 'chat-msg agent';
+  el.innerHTML = `<div class="chat-bubble agent">${text}</div>`;
+  area.appendChild(el);
+  area.scrollTop = area.scrollHeight;
+}
+
+let thinkingEl = null;
+function ensureThinking() {
+  if (thinkingEl) return;
+  const area = $('chat-messages');
+  thinkingEl = document.createElement('div');
+  thinkingEl.className = 'chat-msg agent';
+  thinkingEl.innerHTML = '<div class="chat-bubble agent" style="color:var(--muted)">thinking…</div>';
+  area.appendChild(thinkingEl);
+  area.scrollTop = area.scrollHeight;
+}
+function removeThinking() {
+  if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+}
 </script>
 </body>
 </html>
@@ -1125,6 +1400,89 @@ def _render_section(section_path: Path) -> str:
         return "<pre>" + _h.escape(text) + "</pre>"
 
 
+def _spawn_pipeline(state_dir: Path, params: dict) -> int:
+    """Clear Q&A state, spawn pipeline subprocess, return PID."""
+    for fname in ("qa_queue.jsonl", "qa_answers.jsonl", "qa_complete"):
+        p = state_dir / fname
+        if p.exists():
+            p.unlink()
+
+    cli_path = Path(sys.executable).parent / "doc-expand"
+    if cli_path.exists():
+        cmd: list = [str(cli_path)]
+    else:
+        cmd = [sys.executable, "-m", "doc_expand.cli"]
+
+    input_path = params.get("input", "")
+    depth = params.get("depth", "standard")
+    auto_taxonomy = params.get("auto_taxonomy", False)
+    no_pdf = params.get("no_pdf", False)
+
+    args = [input_path, "--state-dir", str(state_dir), "--depth", str(depth)]
+    if auto_taxonomy:
+        args.append("--auto-taxonomy")
+    if no_pdf:
+        args.append("--no-pdf")
+
+    proc = subprocess.Popen(
+        cmd + args,
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return proc.pid
+
+
+def _get_qa_state(state_dir: Path) -> dict:
+    """Return current Q&A state: current question, history, completion flag."""
+    complete_flag = state_dir / "qa_complete"
+    queue_file = state_dir / "qa_queue.jsonl"
+    answers_file = state_dir / "qa_answers.jsonl"
+
+    def _read_jsonl(path: Path) -> list[dict]:
+        if not path.exists():
+            return []
+        out = []
+        for line in path.read_text(errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+        return out
+
+    questions = _read_jsonl(queue_file)
+    answers = _read_jsonl(answers_file)
+    answered_ids = {a["id"]: a["answer"] for a in answers}
+
+    history = []
+    for q in questions:
+        qid = q.get("id", "")
+        if qid in answered_ids:
+            history.append({"question": q.get("text", ""), "answer": answered_ids[qid]})
+
+    if complete_flag.exists():
+        return {"question": None, "interview_complete": True, "history": history}
+
+    first_unanswered = None
+    for q in questions:
+        if q.get("id", "") not in answered_ids:
+            first_unanswered = q
+            break
+
+    return {"question": first_unanswered, "interview_complete": False, "history": history}
+
+
+def _post_answer(state_dir: Path, qid: str, answer: str) -> None:
+    """Append an answer to qa_answers.jsonl."""
+    answers_file = state_dir / "qa_answers.jsonl"
+    record = json.dumps({"id": qid, "answer": answer, "ts": time.time()})
+    with answers_file.open("a") as f:
+        f.write(record + "\n")
+
+
 def cmd_serve(state_dir: Path, port: int = 7842) -> None:
     import hashlib
 
@@ -1172,6 +1530,41 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
                 sid = self.path[len("/api/section/"):].split("?")[0].strip("/")
                 path = state_dir / "sections" / f"section_{sid}.md"
                 _json_response(self, {"html": _render_section(path)})
+
+            elif self.path == "/api/qa":
+                _json_response(self, _get_qa_state(state_dir))
+
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                data = {}
+
+            if self.path == "/api/run":
+                pid = _spawn_pipeline(state_dir, data)
+                payload = json.dumps({"ok": True, "pid": pid}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            elif self.path == "/api/qa/answer":
+                qid = data.get("id", "")
+                answer = data.get("answer", "")
+                _post_answer(state_dir, qid, answer)
+                payload = json.dumps({"ok": True}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
 
             else:
                 self.send_response(404)
