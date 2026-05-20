@@ -214,13 +214,56 @@ _MATH_CMDS = (
     r"|arcsin|arccos|arctan|sinh|cosh|tanh|cot|sec|csc"
     r"|text|mathrm|operatorname"
 )
-_BARE_MATH_RE = re.compile(
-    # Match a bare LaTeX math command + all immediately following {arg}, ^{}, _{}
-    r"\\(?:" + _MATH_CMDS + r")"    # command name
-    r"(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\})* "  # {arg} groups (one level of nesting)
-    r"(?:[_^]\{[^{}]*\}|[_^][A-Za-z0-9])*"   # subscripts / superscripts
-    .replace(" ", "")               # strip formatting whitespace from above
+# Matches a bare math command name followed by a non-letter (word-boundary guard).
+# The (?![A-Za-z]) lookahead prevents \sec matching inside \section, \text inside \textbf, etc.
+_CMD_NAME_RE = re.compile(
+    r"\\(?:" + _MATH_CMDS + r")(?![A-Za-z])"
 )
+
+
+def _wrap_bare_math_in_segment(seg: str) -> str:
+    """Scan *seg* for bare math commands and wrap each (plus all its brace/script args)
+    in $...$. Uses a brace-depth walker so arbitrary nesting is handled correctly."""
+    result: list[str] = []
+    pos = 0
+    n = len(seg)
+
+    def _consume_brace(p: int) -> int:
+        """Advance p past one balanced {…} group starting at seg[p]=='{'."""
+        depth = 0
+        while p < n:
+            if seg[p] == '{':
+                depth += 1
+            elif seg[p] == '}':
+                depth -= 1
+                if depth == 0:
+                    return p + 1
+            p += 1
+        return p  # unclosed brace — return where we stopped
+
+    while pos < n:
+        m = _CMD_NAME_RE.search(seg, pos)
+        if m is None:
+            result.append(seg[pos:])
+            break
+        result.append(seg[pos:m.start()])
+        p = m.end()
+        # Consume any immediately-following {brace} groups and ^ _ scripts
+        while p < n:
+            if seg[p] == '{':
+                p = _consume_brace(p)
+            elif seg[p] in ('^', '_') and p + 1 < n:
+                if seg[p + 1] == '{':
+                    p = _consume_brace(p + 1)  # skip ^ or _, then consume brace
+                elif seg[p + 1].isalnum():
+                    p += 2  # e.g. ^2 or _n
+                else:
+                    break
+            else:
+                break
+        result.append(f"${seg[m.start():p]}$")
+        pos = p
+    return "".join(result)
 
 
 def _fix_bare_math(text: str) -> str:
@@ -257,7 +300,7 @@ def _fix_bare_math(text: str) -> str:
                 fixed_segments.append(seg)
             else:
                 # Even segments are plain text — wrap bare math commands
-                fixed_segments.append(_BARE_MATH_RE.sub(lambda m: f"${m.group(0)}$", seg))
+                fixed_segments.append(_wrap_bare_math_in_segment(seg))
         result_lines.append("".join(fixed_segments))
 
     return "\n".join(result_lines)

@@ -15,22 +15,27 @@ import sys
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _find_events_file(run_id: str | None, log_base: Path) -> Path | None:
+def _find_events_file(run_id: str | None, runs_dir: Path) -> Path | None:
     if run_id:
-        p = log_base / run_id / "events.jsonl"
+        p = runs_dir / run_id / "logs" / "events.jsonl"
         return p if p.exists() else None
+    if not runs_dir.exists():
+        return None
     dirs = sorted(
-        (d for d in log_base.iterdir() if d.is_dir()),
+        (d for d in runs_dir.iterdir() if d.is_dir()),
         key=lambda d: d.stat().st_mtime,
         reverse=True,
     )
     for d in dirs:
-        p = d / "events.jsonl"
+        p = d / "logs" / "events.jsonl"
         if p.exists():
             return p
     return None
@@ -61,13 +66,19 @@ def _fmt(evt: dict) -> str | None:
     if e in ("s9_primer_inserted", "s6_5_primer_inserted"):
         return f"{ts}    primer  {evt.get('section_id')}  term={evt.get('term')}"
     if e == "llm_call_done":
-        return (f"{ts}    llm [{evt.get('role')}] {evt.get('model')}  "
-                f"{evt.get('tok_out')}tok  {evt.get('tok_s')}tok/s  {evt.get('elapsed_s')}s")
+        schema = evt.get('schema', '')
+        tok = evt.get('tok_out', '?')
+        toks = evt.get('tok_s', '?')
+        el = evt.get('elapsed_s', '?')
+        return (f"{ts}    LLM [{evt.get('role')}] {schema} done ({el}s)"
+                f"  {tok}tok @ {toks}tok/s  ← {evt.get('model')}")
     if e == "agent_tool_call_done":
         return (f"{ts}    agent [{evt.get('role')}] {evt.get('model')}  "
                 f"calls={evt.get('tool_calls')}  {evt.get('elapsed_s')}s")
     if e in ("model_quota_switch", "model_auth_skip"):
-        return f"{ts}  model switch  {evt.get('skipped_model')} -> {evt.get('next_model')}"
+        return f"{ts}  ⚠ model switch  {evt.get('skipped_model')} → {evt.get('next_model')}"
+    if e == "llm_call_error":
+        return f"{ts}  ✗ LLM [{evt.get('role')}] {evt.get('model')}  {evt.get('error', '')[:80]}"
     if e == "ss_request":
         return f"{ts}    ss search  {evt.get('query', '')[:60]}"
     if e == "ss_429_retry":
@@ -76,14 +87,21 @@ def _fmt(evt: dict) -> str | None:
         return f"{ts}  run {evt.get('run_id')}  depth={evt.get('depth')}"
     if e == "model_probe_done":
         avail = " ".join(evt.get("available", []))
-        return f"{ts}  models  {avail}"
+        skip  = " ".join(evt.get("unavailable", []))
+        parts = [f"probe  available: {avail}"]
+        if skip:
+            parts.append(f"skipping: {skip}")
+        return f"{ts}  {'  |  '.join(parts)}"
+    if e == "model_role_assignments":
+        pairs = "  ".join(f"{r}={m or '—'}" for r, m in sorted(evt.get("assignments", {}).items()))
+        return f"{ts}  assignments  {pairs}"
     return None
 
 
-def cmd_tail(run_id: str | None, log_base: Path) -> None:
-    events_file = _find_events_file(run_id, log_base)
+def cmd_tail(run_id: str | None, runs_dir: Path) -> None:
+    events_file = _find_events_file(run_id, runs_dir)
     if not events_file:
-        print(f"no events.jsonl found under {log_base}", file=sys.stderr)
+        print(f"no events.jsonl found under {runs_dir}", file=sys.stderr)
         sys.exit(1)
 
     print(f"# {events_file}", flush=True)
@@ -283,7 +301,7 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, -apple
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   overflow-y: auto; max-height: 260px; font-family: var(--font-mono); font-size: 11px;
 }
-.pl-row { display: flex; gap: 10px; padding: 3px 12px; border-bottom: 1px solid var(--bg); }
+.pl-row { display: flex; gap: 10px; padding: 3px 12px; border-bottom: 1px solid var(--bg); align-items: baseline; }
 .pl-row:hover { background: var(--surface2); }
 .pl-ts { color: var(--muted); flex-shrink: 0; width: 90px; }
 .pl-evt { flex-shrink: 0; width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -291,9 +309,22 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, -apple
 .pl-evt.llm { color: var(--purple); }
 .pl-evt.agent { color: #79c0ff; }
 .pl-evt.error { color: var(--red); }
+.pl-evt.warn { color: var(--yellow); }
+.pl-evt.probe { color: var(--muted2); }
 .pl-evt.ss { color: var(--yellow); }
-.pl-body { color: var(--muted2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.pl-body { color: var(--muted2); overflow: hidden; flex: 1; font-size: 11px; }
 .pl-empty { padding: 14px 12px; color: var(--muted); font-size: 11px; }
+/* rich log tokens */
+.pl-role { color: var(--accent); font-weight: 600; margin-right: 4px; }
+.pl-schema { color: var(--text); margin-right: 4px; }
+.pl-model { color: var(--purple); font-family: var(--font-mono); font-size: 10px; }
+.pl-dim { color: var(--muted2); }
+.pl-warn { color: var(--yellow); font-weight: 600; }
+/* role assignment grid */
+.pl-assign { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 3px; }
+.pl-assign-row { display: flex; gap: 4px; align-items: center; }
+.pl-assign-row .pl-role { font-size: 10px; min-width: 80px; }
+.pl-assign-row .pl-model { font-size: 10px; }
 
 /* results area */
 #results-area { display: flex; flex-direction: column; gap: 12px; }
@@ -503,26 +534,25 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, -apple
 .mk-chevron.open { transform: rotate(90deg); }
 .mk-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 .mk-body.collapsed { display: none; }
-.key-row { display: flex; align-items: center; gap: 6px; }
-.key-row .rf-input { flex: 1; font-size: 11px; padding: 5px 8px; }
-.key-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
-.key-dot.set { background: var(--green); }
-.key-eye { background: none; border: none; color: var(--muted2); cursor: pointer; font-size: 12px; padding: 0 3px; flex-shrink: 0; }
-.key-eye:hover { color: var(--text); }
 .mk-divider { height: 1px; background: var(--border); }
-.model-chip {
-  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 3px 8px; font-size: 10px; font-family: var(--font-mono); cursor: pointer;
-  color: var(--muted2); white-space: nowrap; transition: all .1s;
+/* provider status grid */
+.prov-grid { display: flex; flex-direction: column; gap: 3px; }
+.prov-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: var(--radius-sm);
+  background: var(--surface2); font-size: 11px;
 }
-.model-chip:hover { border-color: var(--accent); color: var(--accent); }
-.model-chip.active { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
-.provider-section { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; margin-bottom: 5px; }
-.provider-section-hdr {
-  background: var(--surface3); padding: 3px 9px; font-size: 9px; color: var(--muted);
-  font-family: var(--font-mono); text-transform: uppercase; letter-spacing: .1em; font-weight: 700;
+.prov-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+.prov-dot.set { background: var(--green); }
+.prov-name { flex: 1; font-family: var(--font-mono); color: var(--muted2); }
+.prov-name.set { color: var(--text); }
+.prov-badge {
+  font-size: 9px; font-family: var(--font-mono); font-weight: 700;
+  padding: 1px 5px; border-radius: 3px; text-transform: uppercase; letter-spacing: .06em;
 }
-.provider-section-chips { padding: 6px 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+.prov-badge.env { background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
+.prov-badge.oauth { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+.prov-badge.missing { background: var(--surface3); color: var(--muted); }
 
 /* file browser */
 .rf-input-row { display: flex; gap: 6px; align-items: center; }
@@ -786,37 +816,10 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, -apple
               </div>
               <div class="mk-body collapsed" id="mk-body">
                 <div>
-                  <div class="rf-label" style="margin-bottom:8px">API Keys</div>
-                  <div style="display:flex;flex-direction:column;gap:7px">
-                    <div class="key-row">
-                      <span class="key-dot" id="dot-anthropic"></span>
-                      <input class="rf-input" id="key-anthropic" type="password" placeholder="Anthropic sk-ant-…"
-                             oninput="updateKeyDot('anthropic')" />
-                      <button class="key-eye" onclick="toggleKeyVis('key-anthropic')">&#128065;</button>
-                    </div>
-                    <div class="key-row">
-                      <span class="key-dot" id="dot-openai"></span>
-                      <input class="rf-input" id="key-openai" type="password" placeholder="OpenAI sk-…"
-                             oninput="updateKeyDot('openai')" />
-                      <button class="key-eye" onclick="toggleKeyVis('key-openai')">&#128065;</button>
-                    </div>
-                    <div class="key-row">
-                      <span class="key-dot" id="dot-gemini"></span>
-                      <input class="rf-input" id="key-gemini" type="password" placeholder="Gemini AIza…"
-                             oninput="updateKeyDot('gemini')" />
-                      <button class="key-eye" onclick="toggleKeyVis('key-gemini')">&#128065;</button>
-                    </div>
-                  </div>
-                </div>
-                <div class="mk-divider"></div>
-                <div>
-                  <div class="rf-label" style="margin-bottom:8px">Primary model</div>
-                  <div id="provider-sections">
+                  <div class="rf-label" style="margin-bottom:8px">Providers</div>
+                  <div class="prov-grid" id="prov-grid">
                     <span style="color:var(--muted);font-size:11px;font-family:var(--font-mono)">loading…</span>
                   </div>
-                  <input class="rf-input" id="custom-model-input" placeholder="or type any model ID…"
-                         style="font-size:11px;padding:5px 9px;margin-top:6px"
-                         oninput="onCustomModelInput(this.value)" />
                 </div>
               </div>
             </div>
@@ -986,6 +989,62 @@ function renderDetailHeader(sid) {
 }
 
 // ── Progress log ─────────────────────────────────────────────────────────────
+function fmtEvent(evt) {
+  const e = evt.event || '';
+  const ts = (evt.ts || '').slice(11, 23);
+
+  if (e === 'llm_call_done') {
+    const tok = evt.tok_out ?? '?', toks = evt.tok_s ?? '?', el = evt.elapsed_s ?? '?';
+    return { cls: 'llm',
+      body: `<span class="pl-role">${evt.role}</span> <span class="pl-schema">${evt.schema}</span> `
+          + `<span class="pl-dim">${el}s · ${tok}tok · ${toks}tok/s</span> `
+          + `<span class="pl-model">← ${evt.model}</span>` };
+  }
+  if (e === 'agent_tool_call_done') {
+    return { cls: 'agent',
+      body: `<span class="pl-role">${evt.role}</span> `
+          + `<span class="pl-dim">calls=${evt.tool_calls}  ${evt.elapsed_s}s</span> `
+          + `<span class="pl-model">← ${evt.model}</span>` };
+  }
+  if (e === 'llm_call_error') {
+    return { cls: 'error',
+      body: `<span class="pl-role">${evt.role}</span> `
+          + `<span class="pl-model">${evt.model}</span> `
+          + `<span class="pl-dim">${(evt.error||'').slice(0,100)}</span>` };
+  }
+  if (e === 'model_auth_skip' || e === 'model_quota_switch') {
+    return { cls: 'warn',
+      body: `<span class="pl-warn">model switch</span> `
+          + `<span class="pl-model">${evt.skipped_model}</span>`
+          + ` → <span class="pl-model">${evt.next_model||'—'}</span>` };
+  }
+  if (e === 'model_probe_done') {
+    const avail = (evt.available||[]).join('  ');
+    const skip  = (evt.unavailable||[]).join('  ');
+    return { cls: 'probe',
+      body: `<span class="pl-dim">available: </span><span class="pl-model">${avail}</span>`
+          + (skip ? `<span class="pl-dim">  |  skipping: ${skip}</span>` : '') };
+  }
+  if (e === 'model_role_assignments') {
+    const rows = Object.entries(evt.assignments||{}).sort(([a],[b])=>a.localeCompare(b))
+      .map(([r,m]) => `<span class="pl-assign-row"><span class="pl-role">${r}</span>`
+                    + `<span class="pl-model">${m||'—'}</span></span>`).join('');
+    return { cls: 'probe', body: `<span class="pl-dim">role assignments</span><div class="pl-assign">${rows}</div>` };
+  }
+
+  // fallback: raw key=value
+  let cls = '';
+  if (e.startsWith('stage')) cls = 'stage';
+  else if (e.startsWith('llm')) cls = 'llm';
+  else if (e.startsWith('agent')) cls = 'agent';
+  else if (e.includes('error') || e.includes('fail')) cls = 'error';
+  else if (e.startsWith('ss')) cls = 'ss';
+  const body = Object.entries(evt)
+    .filter(([k]) => !['event','ts','stage'].includes(k))
+    .map(([k,v]) => `${k}=${JSON.stringify(v)}`).join('  ');
+  return { cls, body };
+}
+
 function renderProgress(events) {
   const log = $('progress-log');
   if (!events.length) {
@@ -996,15 +1055,7 @@ function renderProgress(events) {
   log.innerHTML = events.slice(-400).map(evt => {
     const e = evt.event || '';
     const ts = (evt.ts || '').slice(11, 23);
-    let cls = '';
-    if (e.startsWith('stage')) cls = 'stage';
-    else if (e.startsWith('llm')) cls = 'llm';
-    else if (e.startsWith('agent')) cls = 'agent';
-    else if (e.includes('error') || e.includes('fail')) cls = 'error';
-    else if (e.startsWith('ss')) cls = 'ss';
-    const body = Object.entries(evt)
-      .filter(([k]) => !['event', 'ts', 'stage'].includes(k))
-      .map(([k, v]) => `${k}=${JSON.stringify(v)}`).join('  ');
+    const { cls, body } = fmtEvent(evt);
     return `<div class="pl-row">
       <span class="pl-ts">${ts}</span>
       <span class="pl-evt ${cls}">${e}</span>
@@ -1278,15 +1329,7 @@ function renderAllEvents() {
   log.innerHTML = filtered.slice(-500).map(evt => {
     const e = evt.event || '';
     const ts = (evt.ts || '').slice(11, 23);
-    let cls = '';
-    if (e.startsWith('stage')) cls = 'stage';
-    else if (e.startsWith('llm')) cls = 'llm';
-    else if (e.startsWith('agent')) cls = 'agent';
-    else if (e.includes('error') || e.includes('fail')) cls = 'error';
-    else if (e.startsWith('ss')) cls = 'ss';
-    const body = Object.entries(evt)
-      .filter(([k]) => !['event','ts'].includes(k))
-      .map(([k,v]) => `${k}=${JSON.stringify(v)}`).join('  ');
+    const { cls, body } = fmtEvent(evt);
     return `<div class="pl-row">
       <span class="pl-ts">${ts}</span>
       <span class="pl-evt ${cls}">${e}</span>
@@ -1299,11 +1342,23 @@ $('evt-filter-input').addEventListener('input', renderAllEvents);
 
 // ── Polling ───────────────────────────────────────────────────────────────────
 let lastStatusEtag = '', lastEventsEtag = '';
+let _serverDown = false;  // true while server is unreachable
 
 async function poll() {
   try {
     // Status
     const sr = await fetch('/api/status', {headers: lastStatusEtag ? {'If-None-Match': lastStatusEtag} : {}});
+
+    // Server came back after a disconnect — clear stale ETags so we get fresh data
+    if (_serverDown) {
+      _serverDown = false;
+      lastStatusEtag = '';
+      lastEventsEtag = '';
+      $('top-status').textContent = 'reattached';
+      setTimeout(() => { if ($('top-status').textContent === 'reattached') $('top-status').textContent = ''; }, 2000);
+      return;  // let the next poll cycle fetch with cleared ETags
+    }
+
     if (sr.status !== 304) {
       lastStatusEtag = sr.headers.get('ETag') || '';
       const s = await sr.json();
@@ -1358,7 +1413,12 @@ async function poll() {
       }
     }
   } catch {
-    $('top-status').textContent = 'disconnected';
+    if (!_serverDown) {
+      _serverDown = true;
+      lastStatusEtag = '';
+      lastEventsEtag = '';
+    }
+    $('top-status').textContent = 'reconnecting…';
   }
   await pollQa();
   await pollTaxonomy();
@@ -1367,14 +1427,11 @@ async function poll() {
 poll();
 setInterval(poll, 2000);
 
-// Initialize key dots from server env on load
+// Initialize provider status grid on load
 (async () => {
   try {
     const d = await (await fetch('/api/keys')).json();
-    ['anthropic', 'openai', 'gemini'].forEach(p => {
-      _envKeysSet[p] = !!d[p];
-      $('dot-' + p).classList.toggle('set', !!d[p]);
-    });
+    renderProvGrid(d);
   } catch {}
 })();
 
@@ -1480,6 +1537,7 @@ let currentQaId = null;
 let qaHistory = []; // [{question: str, answer: str}]
 
 function setRunMode(mode) {
+  const prev = runPaneMode;
   runPaneMode = mode;
   $('run-setup').style.display = mode === 'setup' ? 'flex' : 'none';
   $('run-taxonomy').style.display = mode === 'taxonomy' ? 'flex' : 'none';
@@ -1493,8 +1551,9 @@ function setRunMode(mode) {
   const pane = $('run-pane');
   if (mode === 'setup') { pane.classList.remove('active'); }
   else { pane.classList.add('active'); }
-  // Auto-open drawer when pipeline needs interaction
-  if (mode !== 'setup') ensureDrawerOpen();
+  // Only open the drawer on mode transitions that need user interaction,
+  // never re-open it on repeated polls of the same mode.
+  if (mode !== prev && (mode === 'qa' || mode === 'taxonomy')) ensureDrawerOpen();
 }
 
 // ── Taxonomy review ───────────────────────────────────────────────────────
@@ -1552,109 +1611,49 @@ async function submitTaxonomy(choice) {
 
 // Models & Keys panel
 let mkOpen = false;
-let selectedModel = null;
 
 function toggleMkPanel() {
   mkOpen = !mkOpen;
   $('mk-body').classList.toggle('collapsed', !mkOpen);
   $('mk-chevron').classList.toggle('open', mkOpen);
-  if (mkOpen && $('provider-sections').children.length <= 1) loadModels();
+  if (mkOpen) loadProviders();
 }
 
-function toggleKeyVis(id) {
-  const el = $(id);
-  el.type = el.type === 'password' ? 'text' : 'password';
+const PROV_META = [
+  { id: 'geminicli', label: 'Gemini CLI',  note: 'oauth' },
+  { id: 'gemini',    label: 'Gemini API'  },
+  { id: 'groq',      label: 'Groq'        },
+  { id: 'mistral',   label: 'Mistral'     },
+  { id: 'anthropic', label: 'Anthropic'   },
+  { id: 'openai',    label: 'OpenAI'      },
+];
+
+function renderProvGrid(keys) {
+  const grid = $('prov-grid');
+  if (!grid) return;
+  grid.innerHTML = '';
+  for (const p of PROV_META) {
+    const set = !!keys[p.id];
+    const row = document.createElement('div');
+    row.className = 'prov-row';
+    const dot = document.createElement('span');
+    dot.className = 'prov-dot' + (set ? ' set' : '');
+    const name = document.createElement('span');
+    name.className = 'prov-name' + (set ? ' set' : '');
+    name.textContent = p.label;
+    const badge = document.createElement('span');
+    badge.className = 'prov-badge ' + (set ? (p.note === 'oauth' ? 'oauth' : 'env') : 'missing');
+    badge.textContent = set ? (p.note === 'oauth' ? 'oauth' : 'env') : 'missing';
+    row.appendChild(dot); row.appendChild(name); row.appendChild(badge);
+    grid.appendChild(row);
+  }
 }
 
-const _envKeysSet = {};  // populated by /api/keys on load
-
-function updateKeyDot(provider) {
-  const val = $('key-' + provider).value.trim();
-  $('dot-' + provider).classList.toggle('set', val.length > 0 || !!_envKeysSet[provider]);
-}
-
-async function loadModels() {
+async function loadProviders() {
   try {
-    const r = await fetch('/api/models');
-    const d = await r.json();
-
-    // Pre-green dots for keys already set in server env
-    if (d.keys_set) {
-      ['anthropic', 'openai', 'gemini'].forEach(p => {
-        if (d.keys_set[p]) $('dot-' + p).classList.add('set');
-      });
-    }
-
-    const container = $('provider-sections');
-    container.innerHTML = '';
-
-    // "auto" chip at top (no model override)
-    const autoRow = document.createElement('div');
-    autoRow.style.cssText = 'padding-bottom:5px';
-    const auto = document.createElement('span');
-    auto.className = 'model-chip active';
-    auto.textContent = 'auto';
-    auto.dataset.model = '';
-    auto.onclick = () => selectModel('', auto);
-    autoRow.appendChild(auto);
-    container.appendChild(autoRow);
-
-    const PROVIDER_LABEL = {anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Google Gemini'};
-
-    // Group by provider, then float providers with env keys to top
-    const sections = {};
-    const order = [];
-    for (const m of d.models) {
-      if (!sections[m.provider]) { sections[m.provider] = []; order.push(m.provider); }
-      sections[m.provider].push(m);
-    }
-    const keysSet = d.keys_set || {};
-    order.sort((a, b) => (!!keysSet[b] - !!keysSet[a]));
-
-    for (const prov of order) {
-      const section = document.createElement('div');
-      section.className = 'provider-section';
-      const hdr = document.createElement('div');
-      hdr.className = 'provider-section-hdr';
-      hdr.textContent = PROVIDER_LABEL[prov] || prov;
-      section.appendChild(hdr);
-      const chips = document.createElement('div');
-      chips.className = 'provider-section-chips';
-      for (const m of sections[prov]) {
-        const chip = document.createElement('span');
-        chip.className = 'model-chip';
-        chip.textContent = m.label;
-        chip.title = m.id;
-        chip.dataset.model = m.id;
-        chip.onclick = () => selectModel(m.id, chip);
-        chips.appendChild(chip);
-      }
-      section.appendChild(chips);
-      container.appendChild(section);
-    }
-  } catch(e) {
-    $('provider-sections').innerHTML = '<span style="color:var(--muted);font-size:11px">unavailable</span>';
-  }
-}
-
-function selectModel(modelId, chipEl) {
-  selectedModel = modelId || null;
-  document.querySelectorAll('.model-chip').forEach(c => c.classList.remove('active'));
-  chipEl.classList.add('active');
-  if (modelId !== '') $('custom-model-input').value = '';
-}
-
-function onCustomModelInput(val) {
-  val = val.trim();
-  if (val) {
-    selectedModel = val;
-    document.querySelectorAll('.model-chip').forEach(c => c.classList.remove('active'));
-  } else {
-    // revert to auto
-    selectedModel = null;
-    const autoChip = document.querySelector('.model-chip[data-model=""]');
-    if (autoChip) autoChip.classList.add('active');
-  }
+    const d = await (await fetch('/api/keys')).json();
+    renderProvGrid(d);
+  } catch {}
 }
 
 async function startRun() {
@@ -1678,12 +1677,6 @@ async function startRun() {
   const noPdf = isResume ? true : $('run-no-pdf').checked;
   const resume = isResume;
 
-  const apiKeys = {
-    anthropic: $('key-anthropic').value.trim(),
-    openai: $('key-openai').value.trim(),
-    gemini: $('key-gemini').value.trim(),
-  };
-
   $('run-start-btn').disabled = true;
   $('run-start-btn').textContent = 'starting…';
 
@@ -1694,8 +1687,6 @@ async function startRun() {
       body: JSON.stringify({
         input, depth, auto_taxonomy: autoTax, no_pdf: noPdf,
         resume,
-        api_keys: apiKeys,
-        primary_model: selectedModel || '',
       }),
     });
 
@@ -1989,6 +1980,28 @@ def _pipeline_is_running(state_dir: Path) -> bool:
         return False
 
 
+def _find_active_state_dir(runs_dir: Path) -> "Path | None":
+    """Return the state_dir of the currently running run, or the most-recently-modified one."""
+    if not runs_dir.exists():
+        return None
+    candidates = sorted(
+        (d for d in runs_dir.iterdir() if d.is_dir()),
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    # Prefer a live run
+    for run_dir in candidates:
+        sd = run_dir / "state"
+        if sd.is_dir() and _pipeline_is_running(sd):
+            return sd
+    # Fall back to most recent with a state dir
+    for run_dir in candidates:
+        sd = run_dir / "state"
+        if sd.is_dir():
+            return sd
+    return None
+
+
 def _load_state(state_dir: Path) -> dict:
     result: dict = {"stages": {}, "domains": [], "run_id": "", "summary": "",
                     "pipeline_running": _pipeline_is_running(state_dir),
@@ -2026,33 +2039,26 @@ def _load_state(state_dir: Path) -> dict:
 
     sections_dir = state_dir / "sections"
     checklist_by_domain: dict[str, dict] = {}
-    logs_dir = state_dir.parent / "logs"
-    if logs_dir.exists():
-        run_dirs = sorted(logs_dir.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True)
-        for rd in run_dirs[:3]:
-            ef = rd / "events.jsonl"
-            if not ef.exists():
-                continue
-            try:
-                for line in ef.read_text(errors="replace").splitlines():
-                    try:
-                        evt = json.loads(line)
-                    except Exception:
-                        continue
-                    if evt.get("event") in ("s6_domain_aligned", "s4_5_domain_aligned"):
-                        did = evt.get("domain_id", "")
-                        cl = evt.get("checklist", {})
-                        checklist_by_domain[did] = {
-                            "what_is": cl.get("what_is_section"),
-                            "symbols": cl.get("symbol_tables"),
-                            "examples": cl.get("worked_examples"),
-                            "where_next": cl.get("where_to_go_next"),
-                            "citations": cl.get("citations_resolved"),
-                        }
-            except Exception:
-                pass
-            if checklist_by_domain:
-                break
+    ef = state_dir.parent / "logs" / "events.jsonl"
+    if ef.exists():
+        try:
+            for line in ef.read_text(errors="replace").splitlines():
+                try:
+                    evt = json.loads(line)
+                except Exception:
+                    continue
+                if evt.get("event") in ("s6_domain_aligned", "s4_5_domain_aligned"):
+                    did = evt.get("domain_id", "")
+                    cl = evt.get("checklist", {})
+                    checklist_by_domain[did] = {
+                        "what_is": cl.get("what_is_section"),
+                        "symbols": cl.get("symbol_tables"),
+                        "examples": cl.get("worked_examples"),
+                        "where_next": cl.get("where_to_go_next"),
+                        "citations": cl.get("citations_resolved"),
+                    }
+        except Exception:
+            pass
 
     domains = []
     done_stages = result.get("stages", {})
@@ -2189,34 +2195,27 @@ def _load_stage_artifacts(stage_id: str, state_dir: Path) -> dict:
         if tax_path.exists():
             try:
                 tax = json.loads(tax_path.read_text())
-                logs_dir = state_dir.parent / "logs"
                 checklist_by_domain: dict = {}
-                if logs_dir.exists():
-                    run_dirs = sorted(logs_dir.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True)
-                    for rd in run_dirs[:3]:
-                        ef = rd / "events.jsonl"
-                        if not ef.exists():
-                            continue
-                        try:
-                            for line in ef.read_text(errors="replace").splitlines():
-                                try:
-                                    evt = json.loads(line)
-                                except Exception:
-                                    continue
-                                if evt.get("event") in ("s6_domain_aligned", "s4_5_domain_aligned"):
-                                    did = evt.get("domain_id", "")
-                                    cl = evt.get("checklist", {})
-                                    checklist_by_domain[did] = {
-                                        "what_is": cl.get("what_is_section"),
-                                        "symbols": cl.get("symbol_tables"),
-                                        "examples": cl.get("worked_examples"),
-                                        "where_next": cl.get("where_to_go_next"),
-                                        "citations": cl.get("citations_resolved"),
-                                    }
-                        except Exception:
-                            pass
-                        if checklist_by_domain:
-                            break
+                ef = state_dir.parent / "logs" / "events.jsonl"
+                if ef.exists():
+                    try:
+                        for line in ef.read_text(errors="replace").splitlines():
+                            try:
+                                evt = json.loads(line)
+                            except Exception:
+                                continue
+                            if evt.get("event") in ("s6_domain_aligned", "s4_5_domain_aligned"):
+                                did = evt.get("domain_id", "")
+                                cl = evt.get("checklist", {})
+                                checklist_by_domain[did] = {
+                                    "what_is": cl.get("what_is_section"),
+                                    "symbols": cl.get("symbol_tables"),
+                                    "examples": cl.get("worked_examples"),
+                                    "where_next": cl.get("where_to_go_next"),
+                                    "citations": cl.get("citations_resolved"),
+                                }
+                    except Exception:
+                        pass
                 for d in tax.get("domains", []):
                     did = d["id"]
                     aligned = (sections_dir / f"section_{did}.aligned").exists()
@@ -2249,42 +2248,32 @@ def _load_stage_artifacts(stage_id: str, state_dir: Path) -> dict:
             text = nc.read_text()
             out["needs_citation_count"] = text.count("[NEEDS_CITATION]")
         # Parse verify events for stats
-        logs_dir = state_dir.parent / "logs"
-        if logs_dir.exists():
-            run_dirs = sorted(logs_dir.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True)
-            for rd in run_dirs[:1]:
-                ef = rd / "events.jsonl"
-                if ef.exists():
-                    for line in ef.read_text(errors="replace").splitlines():
-                        try:
-                            evt = json.loads(line)
-                        except Exception:
-                            continue
-                        if evt.get("event") == "stage_complete" and str(evt.get("stage")) == "8":
-                            out["needs_citation_count"] = evt.get("total_needs_citation", out.get("needs_citation_count"))
-                            out["unknown_keys"] = evt.get("total_unknown_keys")
-                            out["verified"] = evt.get("total_verified")
-                    break
+        ef = state_dir.parent / "logs" / "events.jsonl"
+        if ef.exists():
+            for line in ef.read_text(errors="replace").splitlines():
+                try:
+                    evt = json.loads(line)
+                except Exception:
+                    continue
+                if evt.get("event") == "stage_complete" and str(evt.get("stage")) == "8":
+                    out["needs_citation_count"] = evt.get("total_needs_citation", out.get("needs_citation_count"))
+                    out["unknown_keys"] = evt.get("total_unknown_keys")
+                    out["verified"] = evt.get("total_verified")
 
     elif stage_id == "9":
-        logs_dir = state_dir.parent / "logs"
         primers = 0
         domains_seen: set = set()
-        if logs_dir.exists():
-            run_dirs = sorted(logs_dir.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True)
-            for rd in run_dirs[:1]:
-                ef = rd / "events.jsonl"
-                if ef.exists():
-                    for line in ef.read_text(errors="replace").splitlines():
-                        try:
-                            evt = json.loads(line)
-                        except Exception:
-                            continue
-                        if evt.get("event") in ("s9_primer_inserted", "s6_5_primer_inserted"):
-                            primers += 1
-                            if evt.get("section_id"):
-                                domains_seen.add(evt["section_id"])
-                    break
+        ef = state_dir.parent / "logs" / "events.jsonl"
+        if ef.exists():
+            for line in ef.read_text(errors="replace").splitlines():
+                try:
+                    evt = json.loads(line)
+                except Exception:
+                    continue
+                if evt.get("event") in ("s9_primer_inserted", "s6_5_primer_inserted"):
+                    primers += 1
+                    if evt.get("section_id"):
+                        domains_seen.add(evt["section_id"])
         out["primers_inserted"] = primers
         out["domains_processed"] = len(domains_seen) or None
 
@@ -2309,21 +2298,16 @@ def _load_stage_artifacts(stage_id: str, state_dir: Path) -> dict:
 
 
 def _load_events(state_dir: Path) -> list[dict]:
-    logs_dir = state_dir.parent / "logs"
-    if not logs_dir.exists():
+    ef = state_dir.parent / "logs" / "events.jsonl"
+    if not ef.exists():
         return []
-    run_dirs = sorted(logs_dir.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True)
-    for rd in run_dirs[:1]:
-        ef = rd / "events.jsonl"
-        if ef.exists():
-            events = []
-            for line in ef.read_text(errors="replace").splitlines():
-                try:
-                    events.append(json.loads(line))
-                except Exception:
-                    pass
-            return events
-    return []
+    events = []
+    for line in ef.read_text(errors="replace").splitlines():
+        try:
+            events.append(json.loads(line))
+        except Exception:
+            pass
+    return events
 
 
 def _render_section(section_path: Path) -> str:
@@ -2338,109 +2322,6 @@ def _render_section(section_path: Path) -> str:
         return "<pre>" + _h.escape(text) + "</pre>"
 
 
-_models_cache: list[dict] | None = None
-_models_cache_ts: float = 0.0
-_MODELS_CACHE_TTL = 3600.0  # 1 hour
-_LITELLM_PRICES_URL = (
-    "https://raw.githubusercontent.com/BerriAI/litellm/main"
-    "/model_prices_and_context_window.json"
-)
-
-# Prefixes that map a model id → provider key.
-# Ordered so longer/more-specific prefixes match first.
-_PROVIDER_PREFIXES: list[tuple[str, str]] = [
-    ("claude-",          "anthropic"),
-    ("anthropic/",       "anthropic"),
-    ("gpt-",             "openai"),
-    ("o1",               "openai"),
-    ("o3",               "openai"),
-    ("o4",               "openai"),
-    ("openai/",          "openai"),
-    ("gemini/",          "gemini"),
-    ("google/",          "gemini"),
-]
-
-# Substrings that disqualify a model
-_BLOCKLIST = (
-    "vision", "embed", "audio", "tts", "whisper", "dall-e",
-    "instruct", "realtime", "search", "computer-use",
-    "image-generation", "container",
-    "gpt-3.5",                    # too old
-    "gpt-4-0",                    # dated GPT-4 snapshots (gpt-4-0314, gpt-4-0613)
-    "gpt-4-3",                    # gpt-4-32k variants
-    "gpt-4-vision",
-    "1106-preview", "0125-preview", "turbo-preview", "gpt-4-preview",
-    "robotics", "learnlm", "lyria", "gemma",  # non-chat Gemini models
-    "/gemini-exp-",                            # experimental snapshot variants
-)
-
-import re as _re
-_DATE_SUFFIX = _re.compile(r'(-\d{8}|-\d{4}-\d{2}-\d{2})$')   # YYYYMMDD or YYYY-MM-DD snapshot suffix
-
-
-def _provider_of(model_id: str) -> str | None:
-    for prefix, provider in _PROVIDER_PREFIXES:
-        if model_id.startswith(prefix):
-            return provider
-    return None
-
-
-def _fetch_litellm_models() -> list[dict]:
-    """Fetch LiteLLM's authoritative model list and return [{id, label, provider}]."""
-    import urllib.request
-    try:
-        with urllib.request.urlopen(_LITELLM_PRICES_URL, timeout=8) as r:
-            data: dict = json.loads(r.read().decode())
-    except Exception:
-        return []
-
-    out: list[dict] = []
-    for model_id, meta in data.items():
-        if not isinstance(meta, dict):
-            continue
-        provider = _provider_of(model_id)
-        if provider is None:
-            continue
-        low = model_id.lower()
-        if any(b in low for b in _BLOCKLIST):
-            continue
-        if _DATE_SUFFIX.search(model_id):
-            continue
-        if ":" in model_id:          # Bedrock ARN variants
-            continue
-        # Strip provider prefix for the label
-        label = model_id
-        for prefix, _ in _PROVIDER_PREFIXES:
-            if label.startswith(prefix):
-                label = label[len(prefix):]
-                break
-        # Only keep chat models (excludes embedding, image_generation, audio, etc.)
-        mode = meta.get("mode", "")
-        if mode and mode != "chat":
-            continue
-
-        out.append({"id": model_id, "label": label, "provider": provider})
-
-    # Sort: provider order (anthropic → openai → gemini), then by id
-    order = {"anthropic": 0, "openai": 1, "gemini": 2}
-    out.sort(key=lambda m: (order.get(m["provider"], 9), m["id"]))
-    return out
-
-
-def _get_models() -> list[dict]:
-    global _models_cache, _models_cache_ts
-    now = time.time()
-    if _models_cache is not None and now - _models_cache_ts < _MODELS_CACHE_TTL:
-        return _models_cache
-    fetched = _fetch_litellm_models()
-    if fetched:
-        _models_cache = fetched
-        _models_cache_ts = now
-    elif _models_cache is not None:
-        pass  # keep stale cache on network failure
-    else:
-        _models_cache = []
-    return _models_cache
 
 
 def _list_files(dir_param: str) -> dict:
@@ -2474,8 +2355,39 @@ def _list_files(dir_param: str) -> dict:
     return {"cwd": str(target), "parent": parent, "entries": entries}
 
 
-def _spawn_pipeline(state_dir: Path, params: dict) -> int:
-    """Clear Q&A state (and stage markers unless resuming), spawn pipeline subprocess, return PID."""
+def _spawn_pipeline(runs_dir: Path, params: dict) -> int:
+    """Determine run_id, create run dir tree, clear Q&A state, spawn pipeline subprocess, return PID."""
+    from doc_expand.state import new_run_id as _new_run_id
+
+    is_resume = params.get("resume", False)
+
+    if is_resume:
+        # Reuse the run_id from the currently active run
+        active_state = _find_active_state_dir(runs_dir)
+        if active_state is not None:
+            pipeline_path = active_state / "pipeline.json"
+            run_id = ""
+            if pipeline_path.exists():
+                try:
+                    run_id = json.loads(pipeline_path.read_text()).get("run_id", "")
+                except Exception:
+                    pass
+            if not run_id:
+                run_id = active_state.parent.name  # fall back to dir name
+            state_dir = active_state
+        else:
+            run_id = _new_run_id()
+            state_dir = runs_dir / run_id / "state"
+    else:
+        run_id = _new_run_id()
+        state_dir = runs_dir / run_id / "state"
+
+    run_dir = runs_dir / run_id
+    (run_dir / "state").mkdir(parents=True, exist_ok=True)
+    (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (run_dir / "output").mkdir(parents=True, exist_ok=True)
+
+    # Clear IPC files
     for fname in ("qa_queue.jsonl", "qa_answers.jsonl", "qa_complete",
                    "taxonomy_review.json", "taxonomy_choice.json"):
         p = state_dir / fname
@@ -2484,7 +2396,7 @@ def _spawn_pipeline(state_dir: Path, params: dict) -> int:
 
     # Fresh run: wipe stage completion markers so every stage re-runs.
     # Resume run: preserve markers so only incomplete stages run.
-    if not params.get("resume", False):
+    if not is_resume:
         pipeline_path = state_dir / "pipeline.json"
         if pipeline_path.exists():
             try:
@@ -2501,36 +2413,30 @@ def _spawn_pipeline(state_dir: Path, params: dict) -> int:
         cmd = [sys.executable, "-m", "doc_expand.cli"]
 
     input_path = params.get("input", "")
+    # For resume, fall back to input_path stored in pipeline.json if not supplied
+    if is_resume and not input_path:
+        pipeline_path = state_dir / "pipeline.json"
+        if pipeline_path.exists():
+            try:
+                input_path = json.loads(pipeline_path.read_text()).get("input_path", "")
+            except Exception:
+                pass
+
     depth = params.get("depth", "standard")
     auto_taxonomy = params.get("auto_taxonomy", False)
     no_pdf = params.get("no_pdf", False)
-    primary_model = params.get("primary_model", "").strip()
-    api_keys: dict = params.get("api_keys", {})
-
-    args = [input_path, "--state-dir", str(state_dir), "--depth", str(depth)]
+    args = [input_path, "--runs-dir", str(runs_dir), "--run-id", run_id, "--depth", str(depth)]
     if auto_taxonomy:
         args.append("--auto-taxonomy")
     if no_pdf:
         args.append("--no-pdf")
-    if primary_model:
-        args += ["--primary-model", primary_model]
-
-    env = os.environ.copy()
-    _KEY_MAP = {
-        "anthropic": "ANTHROPIC_API_KEY",
-        "openai":    "OPENAI_API_KEY",
-        "gemini":    "GEMINI_API_KEY",
-    }
-    for provider, key_val in api_keys.items():
-        if key_val and provider in _KEY_MAP:
-            env[_KEY_MAP[provider]] = key_val
 
     proc = subprocess.Popen(
         cmd + args,
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        env=env,
+        env=os.environ.copy(),
     )
     (state_dir / "pipeline_pid").write_text(str(proc.pid))
     return proc.pid
@@ -2586,10 +2492,13 @@ def _post_answer(state_dir: Path, qid: str, answer: str) -> None:
         f.write(record + "\n")
 
 
-def cmd_serve(state_dir: Path, port: int = 7842) -> None:
-    # Auto-reap any child processes (pipeline subprocesses) so they don't
-    # accumulate as zombies when they exit.
+def cmd_serve(runs_dir: Path, port: int = 7842) -> None:
+    # Pipeline subprocesses are spawned with start_new_session=True so they live
+    # in their own process group and session — server exit / Ctrl-C never propagates
+    # to them.  SIG_IGN on SIGCHLD prevents zombie accumulation when they exit.
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    # Do NOT forward SIGTERM to children — the pipeline survives server restarts.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     import hashlib
 
@@ -2615,6 +2524,8 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
             pass
 
         def do_GET(self):
+            state_dir = _find_active_state_dir(runs_dir) or (runs_dir / "_default" / "state")
+
             if self.path == "/":
                 body = _PAGE.encode()
                 self.send_response(200)
@@ -2658,25 +2569,27 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
                 _json_response(self, _list_files(dir_param))
 
             elif self.path == "/api/keys":
+                import shutil as _shutil
+                _gcli_ok = bool(
+                    _shutil.which("npx") and
+                    os.path.exists(os.path.expanduser("~/.gemini/oauth_creds.json"))
+                )
                 _json_response(self, {
+                    "geminicli": _gcli_ok,
                     "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
                     "openai":    bool(os.environ.get("OPENAI_API_KEY")),
                     "gemini":    bool(os.environ.get("GEMINI_API_KEY")),
+                    "groq":      bool(os.environ.get("GROQ_API_KEY")),
+                    "mistral":   bool(os.environ.get("MISTRAL_API_KEY")),
                 })
-
-            elif self.path == "/api/models":
-                keys_set = {
-                    "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
-                    "openai":    bool(os.environ.get("OPENAI_API_KEY")),
-                    "gemini":    bool(os.environ.get("GEMINI_API_KEY")),
-                }
-                _json_response(self, {"models": _get_models(), "keys_set": keys_set})
 
             else:
                 self.send_response(404)
                 self.end_headers()
 
         def do_POST(self):
+            state_dir = _find_active_state_dir(runs_dir) or (runs_dir / "_default" / "state")
+
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
             try:
@@ -2685,7 +2598,7 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
                 data = {}
 
             if self.path == "/api/run":
-                pid = _spawn_pipeline(state_dir, data)
+                pid = _spawn_pipeline(runs_dir, data)
                 payload = json.dumps({"ok": True, "pid": pid}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -2696,7 +2609,8 @@ def cmd_serve(state_dir: Path, port: int = 7842) -> None:
             elif self.path == "/api/stop":
                 killed = False
                 pid = None
-                pid_file = state_dir / "pipeline_pid"
+                active_sd = _find_active_state_dir(runs_dir)
+                pid_file = (active_sd / "pipeline_pid") if active_sd else (state_dir / "pipeline_pid")
                 if pid_file.exists():
                     try:
                         pid = int(pid_file.read_text().strip())

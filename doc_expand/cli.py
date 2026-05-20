@@ -5,6 +5,9 @@ import signal
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from doc_expand.config import load_config
 from doc_expand.state import emit, load_pipeline_json, new_run_id, setup_logging
 
@@ -20,6 +23,22 @@ def _install_sigterm_handler() -> None:
 def _status(state_dir: Path) -> None:
     data = load_pipeline_json(state_dir)
     emit({"event": "pipeline_status", **data})
+
+
+def _find_latest_state_dir(runs_dir: Path) -> Path | None:
+    """Scan runs_dir for the most recently modified subdir that has state/pipeline.json."""
+    if not runs_dir.exists():
+        return None
+    candidates = sorted(
+        (d for d in runs_dir.iterdir() if d.is_dir()),
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    for run_dir in candidates:
+        sd = run_dir / "state"
+        if (sd / "pipeline.json").exists():
+            return sd
+    return None
 
 
 _SUBCOMMANDS = {"tail", "serve"}
@@ -46,12 +65,12 @@ def main() -> None:
     # --- tail subcommand ---
     tail_p = subparsers.add_parser("tail", help="Stream pipeline events to stdout")
     tail_p.add_argument("run_id", nargs="?", default=None, help="Run ID (default: latest)")
-    tail_p.add_argument("--log-dir", type=Path, default=Path("logs"))
+    tail_p.add_argument("--runs-dir", type=Path, default=Path("runs"))
 
     # --- serve subcommand ---
     serve_p = subparsers.add_parser("serve", help="Serve completed sections at localhost")
     serve_p.add_argument("--port", type=int, default=7842)
-    serve_p.add_argument("--state-dir", type=Path, default=Path("state"))
+    serve_p.add_argument("--runs-dir", type=Path, default=Path("runs"))
 
     # Output / mode
     parser.add_argument("--human", action="store_true", help="Rich terminal output")
@@ -73,11 +92,9 @@ def main() -> None:
     )
 
     # Paths
-    parser.add_argument("--output-dir", type=Path, default=Path("output"))
-    parser.add_argument("--state-dir", type=Path, default=Path("state"))
     parser.add_argument(
-        "--log-dir", type=Path, default=Path("logs"),
-        help="Base directory for run logs (default: logs/)",
+        "--runs-dir", type=Path, default=Path("runs"),
+        help="Base directory for all per-run artefacts (default: runs/)",
     )
 
     # Concurrency override (default comes from config.yaml)
@@ -97,21 +114,29 @@ def main() -> None:
     # Handle subcommands first
     if args.command == "tail":
         from doc_expand.observe import cmd_tail
-        cmd_tail(args.run_id, args.log_dir)
+        cmd_tail(args.run_id, args.runs_dir)
         return
 
     if args.command == "serve":
         from doc_expand.observe import cmd_serve
-        cmd_serve(args.state_dir, port=args.port)
+        cmd_serve(args.runs_dir, port=args.port)
         return
 
-    state_dir: Path = args.state_dir
+    runs_dir: Path = args.runs_dir
+    run_id = args.run_id or new_run_id()
+    run_dir = runs_dir / run_id
+    state_dir = run_dir / "state"
+    output_dir = run_dir / "output"
+    log_dir = run_dir / "logs"
     state_dir.mkdir(parents=True, exist_ok=True)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     if args.status:
-        run_id = args.run_id or new_run_id()
-        log_dir = setup_logging(run_id, log_base=args.log_dir)
+        # If no explicit run_id, find the most recently modified run with a pipeline.json
+        if not args.run_id:
+            state_dir = _find_latest_state_dir(runs_dir) or state_dir
+        setup_logging(run_id, log_dir=log_dir)
         print(f"logs → {log_dir}", flush=True)
         _status(state_dir)
         return
@@ -119,8 +144,7 @@ def main() -> None:
     if not args.input:
         parser.error("input is required unless --status is passed")
 
-    run_id = args.run_id or new_run_id()
-    log_dir = setup_logging(run_id, log_base=args.log_dir)
+    setup_logging(run_id, log_dir=log_dir)
     _install_sigterm_handler()
     print(f"run  {run_id}", flush=True)
     print(f"logs {log_dir}", flush=True)
@@ -143,7 +167,7 @@ def main() -> None:
     asyncio.run(run_pipeline(
         input_path=input_path,
         state_dir=state_dir,
-        output_dir=args.output_dir,
+        output_dir=output_dir,
         depth=args.depth,
         cfg=cfg,
         auto_taxonomy=args.auto_taxonomy,

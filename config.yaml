@@ -62,6 +62,10 @@ graph_defaults:
   node_tier: "journeyman"
   node_xp: 100
 
+llamacpp:
+  base_url: "http://127.0.0.1:8080"
+  # health_path: /health  (llama-server default)
+
 boilerplate_stop_list:
   - introduction
   - methodology
