@@ -903,19 +903,21 @@ function renderStageList(stages, pipelineRunning) {
   stageData = stages;
   const container = $('sl-stages');
   $('stop-btn').style.display = pipelineRunning ? 'inline-block' : 'none';
-  // Keep badge honest: if process is alive but pane still shows 'idle', fix it
-  if (pipelineRunning && $('run-state-badge').textContent === 'idle') {
-    $('run-state-badge').textContent = 'running';
-  } else if (!pipelineRunning && $('run-state-badge').textContent === 'running') {
-    $('run-state-badge').textContent = 'idle';
-  }
+
+  // Infer which stage is actively running: first non-terminal stage when pipeline is alive
+  // (pipeline.json only records completed stages — no "running" status is ever written)
+  const terminalStatuses = new Set(['complete', 'skipped', 'error']);
+  const activeStage = pipelineRunning
+    ? STAGE_ORDER.find(sid => !terminalStatuses.has(stages[sid]?.status))
+    : null;
 
   container.innerHTML = STAGE_ORDER.map(sid => {
     const s = stages[sid] || {};
     const status = s.status || 'pending';
-    const dotCls = {complete:'done', running:'running', error:'error', skipped:'skipped'}[status] || '';
+    const dotCls = {complete:'done', error:'error', skipped:'skipped'}[status]
+                   || (sid === activeStage ? 'running' : '');
     const active = selectedView === sid ? ' active' : '';
-    const isRunning = status === 'running' ? ' stage-running' : '';
+    const isRunning = sid === activeStage ? ' stage-running' : '';
     const canClear = status === 'complete' || status === 'error' || status === 'skipped';
     const clearBtn = canClear
       ? `<span class="sl-clear" onclick="event.stopPropagation();clearStage('${sid}')" title="Clear stage">&#215;</span>`
@@ -2074,10 +2076,13 @@ def _load_state(state_dir: Path) -> dict:
     stage10_done = done_stages.get("10", {}).get("status") == "complete"
     total_words = sum(d["word_count"] for d in domains)
     result["domains"] = domains
-    result["summary"] = (
-        f"{n_done}/11 stages · {total_words:,} words · "
-        f"{'complete' if stage10_done else 'running'}"
-    )
+    if stage10_done:
+        run_status = "complete"
+    elif result["pipeline_running"]:
+        run_status = "running"
+    else:
+        run_status = "paused"
+    result["summary"] = f"{n_done}/11 stages · {total_words:,} words · {run_status}"
     return result
 
 
