@@ -13,11 +13,25 @@ def _status(state_dir: Path) -> None:
     emit({"event": "pipeline_status", **data})
 
 
+_SUBCOMMANDS = {"tail", "serve"}
+
+
 def main() -> None:
+    # Pre-scan argv: if the first positional arg is not a known subcommand
+    # (and not a flag), it's the pipeline input file. Extract it before
+    # argparse consumes it as an invalid subcommand choice.
+    raw_argv = sys.argv[1:]
+    _input_file: str | None = None
+    if raw_argv and not raw_argv[0].startswith("-") and raw_argv[0] not in _SUBCOMMANDS:
+        _input_file = raw_argv[0]
+        raw_argv = raw_argv[1:]
+
     parser = argparse.ArgumentParser(
         prog="doc-expand",
         description="Expand a technical document into a research-grade knowledge document.",
     )
+    parser.add_argument("input", nargs="?", help="File path, URL, or - for stdin")
+
     subparsers = parser.add_subparsers(dest="command")
 
     # --- tail subcommand ---
@@ -29,8 +43,6 @@ def main() -> None:
     serve_p = subparsers.add_parser("serve", help="Serve completed sections at localhost")
     serve_p.add_argument("--port", type=int, default=7842)
     serve_p.add_argument("--state-dir", type=Path, default=Path("state"))
-
-    parser.add_argument("input", nargs="?", help="File path, URL, or - for stdin")
 
     # Output / mode
     parser.add_argument("--human", action="store_true", help="Rich terminal output")
@@ -69,7 +81,9 @@ def main() -> None:
         help="Reuse an existing run ID (for --resume); a new UUID is generated otherwise",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(raw_argv)
+    if _input_file and not args.input:
+        args.input = _input_file
 
     # Handle subcommands first
     if args.command == "tail":
