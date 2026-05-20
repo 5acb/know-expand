@@ -154,6 +154,10 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
             border-radius: 3px; padding: 3px 10px; font-size: 11px; font-weight: 600;
             cursor: pointer; font-family: var(--font-mono); }
 #stop-btn:hover { background: var(--red); color: #fff; }
+.inline-stop-btn { background: #3a1a1a; border: 1px solid var(--red); color: var(--red);
+                   border-radius: 3px; padding: 4px 12px; font-size: 11px; font-weight: 600;
+                   cursor: pointer; font-family: var(--font-mono); }
+.inline-stop-btn:hover { background: var(--red); color: #fff; }
 
 /* main split */
 #main { flex: 1; overflow: hidden; display: flex; }
@@ -564,10 +568,14 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
           <input id="chat-input" placeholder="type your answer…" />
           <button id="chat-send">→</button>
         </div>
+        <div style="padding:6px 0 2px; text-align:right">
+          <button class="inline-stop-btn" onclick="stopRun()">■ Stop run</button>
+        </div>
       </div>
       <!-- mode: running -->
       <div id="run-active" style="display:none; padding:14px">
-        <div style="color:var(--muted); font-size:12px; font-family:var(--font-mono)">pipeline running…</div>
+        <div style="color:var(--muted); font-size:12px; font-family:var(--font-mono); margin-bottom:8px">pipeline running…</div>
+        <button class="inline-stop-btn" onclick="stopRun()">■ Stop run</button>
       </div>
     </div>
   </div>
@@ -588,11 +596,10 @@ let selectedView = null;  // stageId string or 'all-events'
 let stageArtifacts = {};  // cache { [stageId]: artifact data }
 
 // ── Stage list ──────────────────────────────────────────────────────────────
-function renderStageList(stages) {
+function renderStageList(stages, pipelineRunning) {
   stageData = stages;
   const container = $('sl-stages');
-  const anyRunning = Object.values(stages).some(s => s.status === 'running');
-  $('stop-btn').style.display = anyRunning ? 'inline-block' : 'none';
+  $('stop-btn').style.display = pipelineRunning ? 'inline-block' : 'none';
 
   container.innerHTML = STAGE_ORDER.map(sid => {
     const s = stages[sid] || {};
@@ -984,7 +991,7 @@ async function poll() {
     if (sr.status !== 304) {
       lastStatusEtag = sr.headers.get('ETag') || '';
       const s = await sr.json();
-      renderStageList(s.stages || {});
+      renderStageList(s.stages || {}, s.pipeline_running);
       domainData = s.domains || [];
       $('run-label').textContent = s.run_id || '';
       $('top-status').textContent = s.summary || '';
@@ -1040,6 +1047,9 @@ async function stopRun() {
   await fetch('/api/stop', {method: 'POST'});
   lastStatusEtag = '';
   $('stop-btn').style.display = 'none';
+  currentQaId = null;
+  qaHistory = [];
+  setRunMode('setup');
 }
 
 async function clearStage(sid) {
@@ -1259,12 +1269,8 @@ async function startRun() {
     // Invalidate status cache so stage list refreshes
     lastStatusEtag = '';
 
-    if (!autoTax) {
-      setRunMode('qa');
-      $('run-qa').style.flexDirection = 'column';
-    } else {
-      setRunMode('running');
-    }
+    // Always start in running mode; pollQa/pollTaxonomy switch reactively
+    setRunMode('running');
   } catch(e) {
     $('run-start-btn').disabled = false;
     $('run-start-btn').textContent = '▶ Start Run';
@@ -1329,13 +1335,19 @@ function _fmtBytes(n) {
 
 // Q&A polling (called from main poll loop)
 async function pollQa() {
-  if (runPaneMode !== 'qa') return;
+  // Run in both 'running' (stage 1 may start) and 'qa' (actively interviewing) modes
+  if (runPaneMode !== 'qa' && runPaneMode !== 'running') return;
 
   try {
     const r = await fetch('/api/qa');
     const d = await r.json();
 
-    // Rebuild history messages if history changed
+    // If a question exists and we're not in qa mode yet, switch into it
+    if ((d.question || (d.history && d.history.length > 0)) && runPaneMode === 'running') {
+      setRunMode('qa');
+    }
+
+    // Rebuild history messages if history changed (covers resume case)
     const hist = d.history || [];
     if (hist.length !== qaHistory.length) {
       qaHistory = hist;
@@ -1345,10 +1357,14 @@ async function pollQa() {
     if (d.interview_complete) {
       // Remove thinking indicator, show completion
       removeThinking();
-      appendAgentBubble('Profile complete. Running pipeline…');
-      setRunMode('running');
+      if (runPaneMode === 'qa') {
+        appendAgentBubble('Profile complete. Running pipeline…');
+        setRunMode('running');
+      }
       return;
     }
+
+    if (runPaneMode !== 'qa') return;
 
     if (d.question && d.question.id !== currentQaId) {
       removeThinking();
@@ -1362,9 +1378,30 @@ async function pollQa() {
 }
 
 function rebuildChatHistory() {
-  // Only add bubbles for history items not already shown
-  // (Simple: clear and re-add all — but that loses in-progress state)
-  // Better: track which IDs we've shown
+  const area = $('chat-messages');
+  // Re-render all history pairs from scratch (called only when history grows)
+  area.innerHTML = '';
+  for (const item of qaHistory) {
+    // Agent question bubble
+    const qEl = document.createElement('div');
+    qEl.className = 'chat-msg agent';
+    const qBub = document.createElement('div');
+    qBub.className = 'chat-bubble agent';
+    qBub.textContent = item.question;
+    qEl.appendChild(qBub);
+    area.appendChild(qEl);
+    // User answer bubble
+    const uEl = document.createElement('div');
+    uEl.className = 'chat-msg user-msg';
+    const uBub = document.createElement('div');
+    uBub.className = 'chat-bubble user-bub';
+    uBub.textContent = item.answer;
+    uEl.appendChild(uBub);
+    area.appendChild(uEl);
+  }
+  area.scrollTop = area.scrollHeight;
+  // Reset currentQaId so the next live question renders fresh
+  currentQaId = null;
 }
 
 function renderQuestion(q) {
@@ -1503,8 +1540,22 @@ function removeThinking() {
 """
 
 
+def _pipeline_is_running(state_dir: Path) -> bool:
+    """True if the pipeline process (recorded in pipeline_pid) is still alive."""
+    pid_file = state_dir / "pipeline_pid"
+    if not pid_file.exists():
+        return False
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, 0)   # signal 0 = probe only
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _load_state(state_dir: Path) -> dict:
-    result: dict = {"stages": {}, "domains": [], "run_id": "", "summary": ""}
+    result: dict = {"stages": {}, "domains": [], "run_id": "", "summary": "",
+                    "pipeline_running": _pipeline_is_running(state_dir)}
 
     pipeline_path = state_dir / "pipeline.json"
     if pipeline_path.exists():
