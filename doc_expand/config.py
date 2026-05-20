@@ -66,6 +66,11 @@ class GraphDefaultsConfig:
 
 
 @dataclass
+class LlamaCppConfig:
+    base_url: str = "http://192.168.1.117:8080"
+
+
+@dataclass
 class Config:
     bibliography: BibliographyConfig
     centrality: CentralityConfig
@@ -79,6 +84,7 @@ class Config:
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     keyword_extraction: KeywordExtractionConfig = field(default_factory=KeywordExtractionConfig)
     graph_defaults: GraphDefaultsConfig = field(default_factory=GraphDefaultsConfig)
+    llamacpp: LlamaCppConfig = field(default_factory=LlamaCppConfig)
 
 
 def load_config(
@@ -108,4 +114,5 @@ def load_config(
         chunking=_section("chunking", ChunkingConfig),
         keyword_extraction=_section("keyword_extraction", KeywordExtractionConfig),
         graph_defaults=_section("graph_defaults", GraphDefaultsConfig),
+        llamacpp=_section("llamacpp", LlamaCppConfig),
     )

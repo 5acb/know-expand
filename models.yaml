@@ -1,43 +1,69 @@
 roles:
-  # Tool-calling agent role: frontier first, local Qwen fallback.
-  # For llamacpp fallback load a Qwen2.5-Instruct GGUF and start the server
-  # with --chat-template qwen to enable native function calling.
+  # Slot 0 everywhere: geminicli/gemini-3.5-flash — free OAuth CLI.
+  # No Chinese API providers. Local = llamacpp/glm4 on foiba (192.168.1.117:8080).
+  #
+  # Pricing reference ($/M in–out):
+  #   geminicli            free
+  #   groq/llama-3.1-8b    $0.05 / $0.08   ← bulk floor
+  #   groq/llama-3.3-70b   $0.59 / $0.79   (free tier; batch+cache → ~$0.15/$0.20)
+  #   mistral-small-latest $0.15 / $0.60   256K context, European
+  #   gpt-4o-mini          $0.15 / $0.60
+  #   gemini-2.5-flash     $0.30 / $2.50   solid mid-tier before Anthropic
+  #   claude-sonnet-4-6    $3.00 / $15.00
+  #   claude-opus-4-7      $5.00 / $25.00  ← researcher/synthesizer only
+
+  # Tool calling, multi-turn ReAct — correctness over cost, low volume.
   agent:
-    - "gemini/gemini-2.5-pro"
-    - "llamacpp/qwen2.5-7b-instruct"
+    - "geminicli/gemini-3.5-flash"
+    - "groq/llama-3.3-70b-versatile"
+    - "claude-sonnet-4-6"
+    - "llamacpp/glm4"
+
+  # Long output, quality IS the product — no cheap shortcuts.
   researcher:
+    - "geminicli/gemini-3.5-flash"
     - "claude-opus-4-7"
     - "claude-sonnet-4-6"
+    - "gemini/gemini-2.5-flash"
     - "gpt-4o"
-    - "gemini/gemini-2.5-pro"
-    - "ollama/qwen2.5:14b"
+    - "llamacpp/glm4"
+
   synthesizer:
+    - "geminicli/gemini-3.5-flash"
     - "claude-opus-4-7"
     - "claude-sonnet-4-6"
+    - "gemini/gemini-2.5-flash"
     - "gpt-4o"
-    - "gemini/gemini-2.5-pro"
-    - "ollama/qwen2.5:14b"
+    - "llamacpp/glm4"
+
+  # Reasoning matters, medium volume — Groq 70B handles most of this cheaply.
   critic:
-    - "claude-sonnet-4-6"
+    - "geminicli/gemini-3.5-flash"
+    - "groq/llama-3.3-70b-versatile"
+    - "mistral/mistral-small-latest"
     - "gpt-4o-mini"
-    - "gemini/gemini-2.5-pro"
-    - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
-    - "ollama/llama3.2:3b"
+    - "llamacpp/glm4"
+
+  # Bulk structured JSON, runs per-chunk — 8B is sufficient, cost matters.
   extractor:
-    - "claude-sonnet-4-6"
-    - "gpt-4o-mini"
-    - "gemini/gemini-2.5-pro"
-    - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
-    - "ollama/llama3.2:3b"
+    - "geminicli/gemini-3.5-flash"
+    - "groq/llama-3.1-8b-instant"
+    - "groq/llama-3.3-70b-versatile"
+    - "mistral/mistral-small-latest"
+    - "llamacpp/glm4"
+
+  # Highest volume, simplest task — 8B first.
   classifier:
-    - "claude-sonnet-4-6"
+    - "geminicli/gemini-3.5-flash"
+    - "groq/llama-3.1-8b-instant"
+    - "mistral/mistral-small-latest"
     - "gpt-4o-mini"
-    - "gemini/gemini-2.5-pro"
-    - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
-    - "ollama/llama3.2:3b"
+    - "llamacpp/glm4"
+
+  # Structured doc gen, benefits from large context (Mistral 256K).
   assembler:
+    - "geminicli/gemini-3.5-flash"
+    - "mistral/mistral-small-latest"
+    - "gemini/gemini-2.5-flash"
     - "claude-sonnet-4-6"
-    - "gpt-4o-mini"
-    - "gemini/gemini-2.5-pro"
-    - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
-    - "ollama/llama3.2:3b"
+    - "llamacpp/glm4"
