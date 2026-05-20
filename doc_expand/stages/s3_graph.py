@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -48,6 +49,61 @@ async def _explain_taxonomy(
     print(f"{_CYAN}{'─' * 60}{_RESET}\n")
 
 
+_TAXONOMY_REVIEW_FILE = "taxonomy_review.json"
+_TAXONOMY_CHOICE_FILE = "taxonomy_choice.json"
+_TAXONOMY_WEB_TIMEOUT = 600   # 10 minutes
+
+
+async def _prompt_taxonomy_web(
+    lumper: TaxonomyProposal,
+    splitter: TaxonomyProposal,
+    taxonomy_path: Path,
+    router,
+    issues: list[str],
+    cfg,
+) -> dict:
+    """Web IPC variant: write proposals to state dir, poll for user's choice."""
+    state_dir = taxonomy_path.parent
+
+    review = {
+        "lumper": lumper.model_dump(),
+        "splitter": splitter.model_dump(),
+        "issues": issues,
+    }
+    (state_dir / _TAXONOMY_REVIEW_FILE).write_text(json.dumps(review, indent=2))
+    emit({"event": "stage3_review_pending", "lumper_domains": len(lumper.domains),
+          "splitter_domains": len(splitter.domains)})
+
+    choice_path = state_dir / _TAXONOMY_CHOICE_FILE
+    deadline = time.monotonic() + _TAXONOMY_WEB_TIMEOUT
+    choice = None
+    while time.monotonic() < deadline:
+        await asyncio.sleep(1.0)
+        if choice_path.exists():
+            try:
+                choice = json.loads(choice_path.read_text()).get("choice", "l")
+            except Exception:
+                pass
+            break
+
+    # Clean up IPC files
+    for f in (state_dir / _TAXONOMY_REVIEW_FILE, choice_path):
+        try:
+            f.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if choice == "s":
+        mode, domains = "splitter", splitter.domains
+    elif choice == "m":
+        return await _auto_merge(lumper, splitter, issues, router, cfg)
+    else:  # "l" or timeout → lumper
+        mode, domains = "lumper", lumper.domains
+
+    emit({"event": "stage3_review_complete", "mode": mode, "domains": len(domains)})
+    return {"status": "approved", "mode": mode, "domains": [d.model_dump() for d in domains]}
+
+
 async def _prompt_taxonomy(
     lumper: TaxonomyProposal,
     splitter: TaxonomyProposal,
@@ -61,12 +117,7 @@ async def _prompt_taxonomy(
     Falls back to auto-merge if stdin is not a TTY.
     """
     if not sys.stdin.isatty():
-        emit({
-            "event": "stage3_fatal",
-            "reason": "no TTY and --auto-taxonomy not passed",
-            "fix": "re-run with --auto-taxonomy to skip interactive review",
-        })
-        sys.exit(1)
+        return await _prompt_taxonomy_web(lumper, splitter, taxonomy_path, router, issues, cfg)
 
     _print_proposal("Lumper  — broad domains", lumper)
     _print_proposal("Splitter — fine-grained", splitter)
