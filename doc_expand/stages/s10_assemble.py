@@ -202,52 +202,27 @@ def _word_count(text: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Near-duplicate deduplication
+# Exact primer deduplication (safe: only removes byte-identical blocks)
 # ---------------------------------------------------------------------------
 
-def _trigrams(text: str) -> set[str]:
-    t = text.lower().strip()
-    return {t[i:i+3] for i in range(len(t) - 2)} if len(t) >= 3 else set()
-
-
-def _jaccard(a: str, b: str) -> float:
-    ta, tb = _trigrams(a), _trigrams(b)
-    if not ta or not tb:
-        return 0.0
-    return len(ta & tb) / len(ta | tb)
-
-
-def _deduplicate_blocks(text: str) -> str:
-    """Remove near-duplicate paragraph blocks and exact-duplicate primer lines."""
+def _dedup_exact_primers(text: str) -> str:
+    """Remove exact-duplicate primer blockquotes only. Never touches other content."""
     blocks = text.split("\n\n")
     kept: list[str] = []
     seen_primers: set[str] = set()
     removed = 0
 
     for block in blocks:
-        # Exact dedup for primer lines
         if block.strip().startswith("> **Primer:**"):
             key = block.strip()
             if key in seen_primers:
                 removed += 1
                 continue
             seen_primers.add(key)
-
-        # Near-duplicate dedup for long blocks
-        if len(block) > 150:
-            is_dup = False
-            for kept_block in kept:
-                if len(kept_block) > 150 and _jaccard(block, kept_block) > 0.85:
-                    is_dup = True
-                    break
-            if is_dup:
-                removed += 1
-                continue
-
         kept.append(block)
 
     if removed:
-        _logger.info("s7 dedup: removed %d duplicate block(s)", removed)
+        _logger.info("s10: removed %d exact-duplicate primer block(s)", removed)
 
     return "\n\n".join(kept)
 
@@ -367,7 +342,7 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
     doc_parts.append(_bibliography_to_markdown(bibliography))
 
     full_text = "\n\n---\n\n".join(doc_parts)
-    full_text = _deduplicate_blocks(full_text)
+    full_text = _dedup_exact_primers(full_text)
     total_words = _word_count(full_text)
 
     output_md = output_dir / "expanded.md"

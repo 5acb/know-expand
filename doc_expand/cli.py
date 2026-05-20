@@ -47,7 +47,6 @@ def main() -> None:
     # Output / mode
     parser.add_argument("--human", action="store_true", help="Rich terminal output")
     parser.add_argument("--no-pdf", action="store_true", help="Skip PDF build")
-    parser.add_argument("--renderer", choices=["xelatex", "typst"], default="xelatex")
 
     # Pipeline control
     parser.add_argument(
@@ -69,11 +68,9 @@ def main() -> None:
         help="Base directory for run logs (default: logs/)",
     )
 
-    # Concurrency overrides (defaults come from config.yaml)
-    parser.add_argument("--cloud-concurrency", type=int, default=None,
-                        help="Override config concurrency.cloud_default")
-    parser.add_argument("--local-concurrency", type=int, default=None,
-                        help="Override config concurrency.local_default")
+    # Concurrency override (default comes from config.yaml)
+    parser.add_argument("--concurrency", type=int, default=None,
+                        help="Override config concurrency.default")
 
     # Run identity
     parser.add_argument(
@@ -125,10 +122,8 @@ def main() -> None:
 
     cfg = load_config()
 
-    if args.cloud_concurrency is not None:
-        cfg.concurrency.cloud_default = args.cloud_concurrency
-    if args.local_concurrency is not None:
-        cfg.concurrency.local_default = args.local_concurrency
+    if args.concurrency is not None:
+        cfg.concurrency.default = args.concurrency
 
     from doc_expand.pipeline import run_pipeline
 

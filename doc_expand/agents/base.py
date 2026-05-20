@@ -51,29 +51,14 @@ def _is_auth_error(exc: BaseException) -> BaseException | None:
 
 
 async def _probe_one(model: str, cfg: Config) -> bool:
-    """Return True if model appears usable. No LLM call — credential/health check only."""
-    if model.startswith("llamacpp/"):
-        try:
-            async with httpx.AsyncClient(timeout=3) as c:
-                r = await c.get(f"{cfg.llamacpp.base_url}/health")
-                return r.status_code == 200
-        except Exception:
-            return False
-    if model.startswith("ollama/"):
-        try:
-            async with httpx.AsyncClient(timeout=3) as c:
-                r = await c.get("http://localhost:11434/api/tags")
-                return r.status_code == 200
-        except Exception:
-            return False
-    # Cloud providers: check for the relevant env var
+    """Return True if model appears usable. Checks env vars only — no LLM call."""
     if "claude" in model or "anthropic" in model:
         return bool(os.environ.get("ANTHROPIC_API_KEY"))
     if "gpt" in model or "openai" in model:
         return bool(os.environ.get("OPENAI_API_KEY"))
     if "gemini" in model:
         return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-    # Unknown provider — optimistically assume available
+    # Unknown remote provider — optimistically assume available
     return True
 
 
@@ -102,20 +87,14 @@ async def probe_models(cfg: Config) -> None:
 
 T = TypeVar("T", bound=BaseModel)
 
-_CLOUD_SEMAPHORE: asyncio.Semaphore | None = None
-_LOCAL_SEMAPHORE: asyncio.Semaphore | None = None
+_SEMAPHORE: asyncio.Semaphore | None = None
 
 
 def _get_semaphore(model: str, cfg: Config) -> asyncio.Semaphore:
-    global _CLOUD_SEMAPHORE, _LOCAL_SEMAPHORE
-    if model.startswith("ollama/") or model.startswith("llamacpp/"):
-        if _LOCAL_SEMAPHORE is None:
-            _LOCAL_SEMAPHORE = asyncio.Semaphore(cfg.concurrency.local_default)
-        return _LOCAL_SEMAPHORE
-    else:
-        if _CLOUD_SEMAPHORE is None:
-            _CLOUD_SEMAPHORE = asyncio.Semaphore(cfg.concurrency.cloud_default)
-        return _CLOUD_SEMAPHORE
+    global _SEMAPHORE
+    if _SEMAPHORE is None:
+        _SEMAPHORE = asyncio.Semaphore(cfg.concurrency.default)
+    return _SEMAPHORE
 
 
 async def _do_call(
@@ -127,18 +106,11 @@ async def _do_call(
 ) -> T:
     import instructor
     client = instructor.from_litellm(litellm.acompletion)
-    extra: dict = {}
-    display_model = model
-    if model.startswith("llamacpp/"):
-        extra["api_base"] = cfg.llamacpp.base_url
-        extra["api_key"] = "not-needed"
-        extra["max_tokens"] = cfg.llamacpp.max_tokens
-        model = "openai/" + model[len("llamacpp/"):]
     t0 = time.monotonic()
     emit({
         "event": "llm_call_start",
         "role": role,
-        "model": display_model,
+        "model": model,
         "schema": schema.__name__,
         "msg_chars": sum(len(m.get("content", "")) for m in messages),
     })
@@ -147,7 +119,6 @@ async def _do_call(
             model=model,
             messages=messages,
             response_model=schema,
-            **extra,
         )
         elapsed = time.monotonic() - t0
         usage = getattr(completion, "usage", None)
@@ -157,7 +128,7 @@ async def _do_call(
         emit({
             "event": "llm_call_done",
             "role": role,
-            "model": display_model,
+            "model": model,
             "schema": schema.__name__,
             "elapsed_s": round(elapsed, 2),
             "tok_in": tok_in,
@@ -170,7 +141,7 @@ async def _do_call(
         emit({
             "event": "llm_call_error",
             "role": role,
-            "model": display_model,
+            "model": model,
             "schema": schema.__name__,
             "elapsed_s": round(elapsed, 2),
             "error": str(exc)[:200],
@@ -280,18 +251,11 @@ class QuotaAwareRouter:
             if model is None:
                 break
             sem = _get_semaphore(model, self.cfg)
-            display_model = model
-            extra: dict = {}
-            if model.startswith("llamacpp/"):
-                extra["api_base"] = self.cfg.llamacpp.base_url
-                extra["api_key"] = "not-needed"
-                extra["max_tokens"] = self.cfg.llamacpp.max_tokens
-                model = "openai/" + model[len("llamacpp/"):]
             t0 = time.monotonic()
             emit({
                 "event": "agent_tool_call_start",
                 "role": self.role,
-                "model": display_model,
+                "model": model,
             })
             try:
                 async with sem:
@@ -300,18 +264,17 @@ class QuotaAwareRouter:
                         messages=messages,
                         tools=tools,
                         tool_choice="auto",
-                        **extra,
                     )
                 msg = response.choices[0].message
                 elapsed = time.monotonic() - t0
                 emit({
                     "event": "agent_tool_call_done",
                     "role": self.role,
-                    "model": display_model,
+                    "model": model,
                     "elapsed_s": round(elapsed, 2),
                     "tool_calls": len(msg.tool_calls) if msg.tool_calls else 0,
                 })
-                self._fail_counts.pop(display_model, None)
+                self._fail_counts.pop(model, None)
                 # Normalise to plain dict for message history
                 return {
                     "role": "assistant",
@@ -335,39 +298,39 @@ class QuotaAwareRouter:
                 transient_err = rate_err or server_err
                 if auth_err:
                     async with self._lock:
-                        self._skip.add(display_model)
+                        self._skip.add(model)
                 elif transient_err:
                     retry_after = (
                         getattr(transient_err, "response", None)
                         and transient_err.response.headers.get("retry-after")
                     )
                     if retry_after:
-                        self._fail_counts.pop(display_model, None)
+                        self._fail_counts.pop(model, None)
                         await asyncio.sleep(int(retry_after))
                         continue
                     # Headerless failure: increment counter and backoff before skipping.
-                    count = self._fail_counts.get(display_model, 0) + 1
-                    self._fail_counts[display_model] = count
+                    count = self._fail_counts.get(model, 0) + 1
+                    self._fail_counts[model] = count
                     if count < 3:
                         sleep_s = _BURST_BACKOFF[min(count - 1, len(_BURST_BACKOFF) - 1)]
                         emit({
                             "event": "model_burst_retry",
                             "role": self.role,
-                            "model": display_model,
+                            "model": model,
                             "attempt": count,
                             "sleep_s": sleep_s,
                         })
                         await asyncio.sleep(sleep_s)
                         continue
                     # 3 consecutive failures — permanently skip this model.
-                    self._fail_counts.pop(display_model, None)
+                    self._fail_counts.pop(model, None)
                     async with self._lock:
-                        self._skip.add(display_model)
+                        self._skip.add(model)
                     next_model = self._next_model()
                     emit({
                         "event": "model_quota_switch",
                         "role": self.role,
-                        "exhausted_model": display_model,
+                        "exhausted_model": model,
                         "next_model": next_model,
                         "reason": str(transient_err),
                     })

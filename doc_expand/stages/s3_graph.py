@@ -62,11 +62,11 @@ async def _prompt_taxonomy(
     """
     if not sys.stdin.isatty():
         emit({
-            "event": "stage3_headless_fallback",
-            "reason": "no TTY — taxonomy review skipped, auto-merging",
-            "recommendation": "pass --auto-taxonomy to suppress, or attach a TTY for interactive review",
+            "event": "stage3_fatal",
+            "reason": "no TTY and --auto-taxonomy not passed",
+            "fix": "re-run with --auto-taxonomy to skip interactive review",
         })
-        return await _auto_merge(lumper, splitter, issues, router, cfg)
+        sys.exit(1)
 
     _print_proposal("Lumper  — broad domains", lumper)
     _print_proposal("Splitter — fine-grained", splitter)

@@ -33,15 +33,8 @@ class RateLimitConfig:
 
 
 @dataclass
-class LlamaCppConfig:
-    base_url: str = "http://localhost:8080"
-    max_tokens: int = 1024
-
-
-@dataclass
 class ConcurrencyConfig:
-    cloud_default: int = 8
-    local_default: int = 2
+    default: int = 8
 
 
 @dataclass
@@ -82,7 +75,6 @@ class Config:
     adversarial_rounds: dict[str, int]
     boilerplate_stop_list: list[str]
     models: dict[str, list[str]]    # role -> ordered model list
-    llamacpp: LlamaCppConfig = field(default_factory=LlamaCppConfig)
     nlp_models: NlpModelsConfig = field(default_factory=NlpModelsConfig)
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     keyword_extraction: KeywordExtractionConfig = field(default_factory=KeywordExtractionConfig)
@@ -112,7 +104,6 @@ def load_config(
         adversarial_rounds=raw["adversarial_rounds"],
         boilerplate_stop_list=raw["boilerplate_stop_list"],
         models=models_raw["roles"],
-        llamacpp=_section("llamacpp", LlamaCppConfig),
         nlp_models=_section("nlp_models", NlpModelsConfig),
         chunking=_section("chunking", ChunkingConfig),
         keyword_extraction=_section("keyword_extraction", KeywordExtractionConfig),
