@@ -386,6 +386,10 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
                    padding: 5px 14px; font-size: 11px; font-weight: 600; cursor: pointer;
                    color: #fff; width: 100%; text-align: center; }
 .chat-opt-submit:hover { filter: brightness(1.15); }
+.chat-other-input { margin-top: 4px; width: 100%; background: var(--bg); border: 1px solid var(--accent);
+                    border-radius: 4px; padding: 5px 9px; color: var(--text);
+                    font-family: var(--font-mono); font-size: 11px; outline: none; }
+.chat-other-input:disabled { opacity: 0.5; }
 #chat-input-area { padding: 10px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-shrink: 0; }
 #chat-input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
               padding: 6px 10px; color: var(--text); font-family: var(--font-mono); font-size: 12px; outline: none; }
@@ -1294,24 +1298,44 @@ function renderQuestion(q) {
   if (q.question_type === 'mc' && q.options?.length) {
     const opts = document.createElement('div');
     opts.className = 'chat-options';
+
+    // Shared text box revealed when an "Other" option is toggled on
+    const otherInput = document.createElement('input');
+    otherInput.className = 'chat-other-input';
+    otherInput.placeholder = 'Please specify…';
+    otherInput.style.display = 'none';
+
     q.options.forEach(opt => {
+      const isOther = /^other\b/i.test(opt.trim());
       const btn = document.createElement('button');
       btn.className = 'chat-opt';
       btn.textContent = opt;
+      btn.dataset.isOther = isOther ? '1' : '';
       btn.onclick = () => {
         btn.classList.toggle('chosen');
+        if (isOther) {
+          const show = btn.classList.contains('chosen');
+          otherInput.style.display = show ? 'block' : 'none';
+          if (show) setTimeout(() => otherInput.focus(), 0);
+        }
         submitBtn.style.display = opts.querySelector('.chat-opt.chosen') ? 'block' : 'none';
       };
       opts.appendChild(btn);
     });
+
+    opts.appendChild(otherInput);
+
     const submitBtn = document.createElement('button');
     submitBtn.className = 'chat-opt-submit';
     submitBtn.textContent = 'Submit →';
     submitBtn.style.display = 'none';
     submitBtn.onclick = () => {
-      const chosen = [...opts.querySelectorAll('.chat-opt.chosen')].map(b => b.textContent);
+      const chosen = [...opts.querySelectorAll('.chat-opt.chosen')].map(b =>
+        b.dataset.isOther && otherInput.value.trim() ? otherInput.value.trim() : b.textContent
+      );
       if (!chosen.length) return;
       opts.querySelectorAll('.chat-opt').forEach(b => b.disabled = true);
+      otherInput.disabled = true;
       submitBtn.style.display = 'none';
       submitAnswer(q.id, chosen.join(', '), msgEl);
     };
