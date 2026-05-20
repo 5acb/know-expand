@@ -12,7 +12,7 @@ from keybert import KeyBERT
 from sentence_transformers import SentenceTransformer
 
 from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import TermInventory, TermOccurrence, CanonicalTerm
+from doc_expand.agents.schemas import TermInventory, TermOccurrence, CanonicalTerm, TermKindBatch
 from doc_expand.bibliography import _ss_search, _get_ss_limiter
 from doc_expand.centrality import compute_centrality, BOILERPLATE
 from doc_expand.config import Config
@@ -215,68 +215,131 @@ def _clean_term(name: str) -> str | None:
     return name
 
 
-async def _ground_core_terms(
+_CLASSIFY_PROMPT = """\
+Classify each term by its primary knowledge type:
+
+"academic" — has a body of peer-reviewed research literature (papers, conferences, journals)
+Examples: "transformer architecture", "knowledge graph", "rate limiting algorithms", "multi-agent systems"
+
+"tool_library" — a specific software library, framework, CLI tool, file format, or named technology
+Examples: "asyncio", "xelatex", "docling", "langgraph", "json", "pdf", "docker", "spacy"
+
+"concept" — a design pattern, engineering concept, or domain idea explained from first principles
+Examples: "pipeline orchestration", "token bucket", "alias clustering", "structural zone"
+
+Terms: {terms_json}
+
+Return a TermKindBatch. Every term in the input must appear in classifications.
+"""
+
+
+async def _classify_and_ground_terms(
     terms: list[CanonicalTerm],
     cfg: Config,
+    router,
 ) -> list[CanonicalTerm]:
-    """Query Semantic Scholar for each core-tier term.
+    """Classify terms by knowledge type, then ground academic core terms via SS.
 
-    Terms with zero confident results are demoted to 'supporting' and flagged
-    grounded=False. Skipped entirely if SS is unavailable; pipeline never fails.
+    Steps:
+    1. LLM batch classification into academic / tool_library / concept
+    2. SS grounding for academic core terms only (tool_library/concept are not grounded)
+    3. Apply term_type and grounding results to all terms
     """
-    core_terms = [t for t in terms if t.centrality == "core"]
-    if not core_terms:
+    if not terms:
         return terms
 
-    emit({"event": "s1_concept_grounding_start", "core_term_count": len(core_terms)})
+    # Step 1: LLM classification in batches of 60
+    all_term_names = [t.name for t in terms]
+    batch_size = 60
+    term_type_lookup: dict[str, str] = {}
 
-    async def _check_one(term: CanonicalTerm, http: httpx.AsyncClient) -> tuple[str, bool]:
-        """Return (term_name, is_grounded). Catches all errors."""
+    for batch_start in range(0, len(all_term_names), batch_size):
+        batch = all_term_names[batch_start:batch_start + batch_size]
         try:
-            results = await _ss_search(term.name, http, cfg, limit=3)
-            return (term.name, bool(results))
+            msg = [{"role": "user", "content": _CLASSIFY_PROMPT.format(
+                terms_json=json.dumps(batch, ensure_ascii=False)
+            )}]
+            result: TermKindBatch = await router.call(msg, TermKindBatch)
+            for item in result.classifications:
+                term_type_lookup[item.term.lower()] = item.term_type
         except Exception as exc:
-            _logger.warning("s1 grounding: SS search failed for %r: %s", term.name, exc)
-            return (term.name, True)  # assume grounded on error — don't demote without evidence
+            _logger.warning("s2 term classification batch failed: %s", exc)
+            # Default to "academic" for unclassified terms in this batch
 
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as http:
-            # Respect the same rate limiter as bibliography.py — 1 req per interval
-            # _get_ss_limiter ensures the singleton is initialised before concurrent use
-            _get_ss_limiter(cfg)
-            grounding_tasks = [_check_one(t, http) for t in core_terms]
-            results_list = await asyncio.gather(*grounding_tasks, return_exceptions=True)
-    except Exception as exc:
-        _logger.warning("s1 concept grounding: SS unavailable, skipping (%s)", exc)
-        emit({"event": "s1_concept_grounding_skipped", "reason": str(exc)[:120]})
-        return terms
-
-    grounding: dict[str, bool] = {}
-    for item in results_list:
-        if isinstance(item, Exception):
-            continue
-        name, is_grounded = item
-        grounding[name] = is_grounded
-
-    # Apply grounding results to term list
-    updated: list[CanonicalTerm] = []
-    ungrounded_names: list[str] = []
+    type_counts = {"academic": 0, "tool_library": 0, "concept": 0}
     for t in terms:
-        is_grounded = grounding.get(t.name, True)
-        if not is_grounded and t.centrality == "core":
-            ungrounded_names.append(t.name)
-            _logger.warning(
-                "s1 concept grounding: demoting %r core→supporting (no SS hits)", t.name
-            )
-            updated.append(t.model_copy(update={"centrality": "supporting", "grounded": False}))
-        else:
-            updated.append(t.model_copy(update={"grounded": is_grounded}))
+        tt = term_type_lookup.get(t.name.lower(), "academic")
+        type_counts[tt] = type_counts.get(tt, 0) + 1
 
     emit({
-        "event": "s1_concept_grounding_done",
-        "core_terms_checked": len(core_terms),
-        "ungrounded": ungrounded_names,
+        "event": "s2_term_classification_done",
+        "total": len(terms),
+        "academic": type_counts["academic"],
+        "tool_library": type_counts["tool_library"],
+        "concept": type_counts["concept"],
     })
+
+    # Step 2: SS grounding — only for academic core terms
+    academic_core = [t for t in terms if t.centrality == "core"
+                     and term_type_lookup.get(t.name.lower(), "academic") == "academic"]
+
+    grounding: dict[str, bool] = {}
+
+    if academic_core:
+        emit({"event": "s1_concept_grounding_start", "core_term_count": len(academic_core)})
+
+        async def _check_one(term: CanonicalTerm, http: httpx.AsyncClient) -> tuple[str, bool]:
+            try:
+                results = await _ss_search(term.name, http, cfg, limit=3)
+                return (term.name, bool(results))
+            except Exception as exc:
+                _logger.warning("s1 grounding: SS search failed for %r: %s", term.name, exc)
+                return (term.name, True)
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as http:
+                _get_ss_limiter(cfg)
+                grounding_tasks = [_check_one(t, http) for t in academic_core]
+                results_list = await asyncio.gather(*grounding_tasks, return_exceptions=True)
+        except Exception as exc:
+            _logger.warning("s1 concept grounding: SS unavailable, skipping (%s)", exc)
+            emit({"event": "s1_concept_grounding_skipped", "reason": str(exc)[:120]})
+            results_list = []
+
+        for item in results_list:
+            if isinstance(item, Exception):
+                continue
+            name, is_grounded = item
+            grounding[name] = is_grounded
+
+        ungrounded_names = [n for n, g in grounding.items() if not g]
+        emit({
+            "event": "s1_concept_grounding_done",
+            "core_terms_checked": len(academic_core),
+            "ungrounded": ungrounded_names,
+        })
+
+    # Step 3: Apply term_type and grounding to all terms
+    updated: list[CanonicalTerm] = []
+    for t in terms:
+        tt = term_type_lookup.get(t.name.lower(), "academic")
+        is_grounded = grounding.get(t.name, True)
+        # Only demote academic core terms that failed SS grounding
+        if tt == "academic" and not is_grounded and t.centrality == "core":
+            _logger.warning(
+                "s2 concept grounding: demoting %r core→supporting (no SS hits)", t.name
+            )
+            updated.append(t.model_copy(update={
+                "centrality": "supporting",
+                "grounded": False,
+                "term_type": tt,
+            }))
+        else:
+            updated.append(t.model_copy(update={
+                "grounded": is_grounded if tt == "academic" else True,
+                "term_type": tt,
+            }))
+
     return updated
 
 
@@ -397,8 +460,9 @@ async def run(state: PipelineState, cfg: Config) -> None:
 
     canonical_terms.sort(key=lambda t: t.occurrence_count, reverse=True)
 
-    # Speculative concept filter: verify core-tier terms exist in SS before committing.
-    canonical_terms = await _ground_core_terms(canonical_terms, cfg)
+    # Classify terms by knowledge type and ground academic core terms via SS.
+    classifier_router = make_router("classifier", cfg)
+    canonical_terms = await _classify_and_ground_terms(canonical_terms, cfg, classifier_router)
 
     terms_path = state_dir / "terms.json"
     terms_path.write_text(

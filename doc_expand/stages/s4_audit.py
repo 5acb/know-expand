@@ -206,10 +206,58 @@ async def _process_domain(
     cfg: Config,
     router,
     http: httpx.AsyncClient,
+    domain_nodes: list[dict] | None = None,
 ) -> GapAnalysisResult:
     domain_id = domain["id"]
     domain_label = domain["label"]
     t0 = time.monotonic()
+
+    # Load term_type lookup from terms.json (best-effort)
+    terms_path = audit_dir.parent / "terms.json"
+    term_type_map: dict[str, str] = {}
+    if terms_path.exists():
+        try:
+            for t in json.loads(terms_path.read_text()):
+                term_type_map[t["name"]] = t.get("term_type", "academic")
+        except Exception as exc:
+            _logger.warning("s4 term_type_map load failed: %s", exc)
+
+    # Fetch knowledge sources for non-trivial terms in this domain (best-effort)
+    sources_dir = audit_dir / "sources"
+    sources_dir.mkdir(exist_ok=True)
+    sources_cache = sources_dir / f"sources_{domain_id}.json"
+
+    if not sources_cache.exists():
+        try:
+            from doc_expand.sources import fetch_sources_for_terms  # noqa: PLC0415
+            # Only fetch core + supporting terms, not incidental
+            nodes_for_fetch = domain_nodes or []
+            terms_to_fetch = [
+                (n["name"], term_type_map.get(n["name"], "academic"))
+                for n in nodes_for_fetch
+                if n.get("centrality") in ("core", "supporting")
+            ]
+            # Fallback: if no node dicts available, use all graph_terms as academic
+            if not terms_to_fetch and graph_terms:
+                terms_to_fetch = [
+                    (name, term_type_map.get(name, "academic")) for name in graph_terms
+                ]
+            if terms_to_fetch:
+                emit({
+                    "event": "s4_sources_fetch_start",
+                    "domain_id": domain_id,
+                    "term_count": len(terms_to_fetch),
+                })
+                fetched = await fetch_sources_for_terms(terms_to_fetch, http, concurrency=4)
+                raw_dump = {k: [s.model_dump() for s in v] for k, v in fetched.items()}
+                sources_cache.write_text(json.dumps(raw_dump, indent=2))
+                emit({
+                    "event": "s4_sources_fetch_done",
+                    "domain_id": domain_id,
+                    "terms_with_sources": len(fetched),
+                })
+        except Exception as exc:
+            _logger.warning("s4 sources fetch failed for domain %r: %s", domain_id, exc)
 
     bib_path = audit_dir / f"bibliography_{domain_id}.json"
     if bib_path.exists() and bib_path.stat().st_size > 0:
@@ -360,10 +408,8 @@ async def run(state: PipelineState, cfg: Config) -> None:
         # request queue shallow and avoids the retry thundering-herd.
         for domain in domains:
             domain_id = domain["id"]
-            graph_terms = [
-                n["name"] for n in nodes
-                if n.get("domain") == domain_id
-            ]
+            domain_node_list = [n for n in nodes if n.get("domain") == domain_id]
+            graph_terms = [n["name"] for n in domain_node_list]
             gap_candidates = [
                 t for t in conflict_term_names
                 if any(n["name"] == t and n.get("domain") == domain_id for n in nodes)
@@ -371,7 +417,8 @@ async def run(state: PipelineState, cfg: Config) -> None:
             all_terms = list(dict.fromkeys(graph_terms + gap_candidates))
             try:
                 result = await _process_domain(
-                    domain, all_terms, audit_dir, depth, cfg, router, http
+                    domain, all_terms, audit_dir, depth, cfg, router, http,
+                    domain_nodes=domain_node_list,
                 )
                 gap_results.append(result)
             except Exception as exc:
