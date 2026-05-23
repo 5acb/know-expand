@@ -1177,11 +1177,33 @@ function renderResearch(area, a) {
   if (!domains.length) { area.innerHTML = '<div class="empty">no sections yet</div>'; return; }
   area.innerHTML = `<div class="card-grid">${domains.map(d => {
     const hasSec = d.word_count > 0;
-    const cls = hasSec ? 'card done clickable' : 'card';
+    let statusLabel, dotStyle, clickable;
+    if (hasSec) {
+      statusLabel = d.word_count.toLocaleString() + ' words';
+      dotStyle = 'background:var(--green)';
+      clickable = true;
+    } else if (d.reconciled) {
+      statusLabel = 'critic pass…';
+      dotStyle = 'background:var(--accent);opacity:.8';
+      clickable = false;
+    } else if (d.personas_done) {
+      statusLabel = 'reconciling…';
+      dotStyle = 'background:var(--accent);opacity:.6';
+      clickable = false;
+    } else {
+      statusLabel = 'waiting';
+      dotStyle = 'background:var(--muted);opacity:.4';
+      clickable = false;
+    }
+    const cls = clickable ? 'card done clickable' : (d.personas_done ? 'card active' : 'card');
     const sel = d.id === selectedSectionId ? ' selected' : '';
-    return `<div class="${cls}${sel}" onclick="${hasSec ? `loadSection('${d.id}')` : ''}" data-domain="${d.id}">
-      <div class="card-label">${d.label}</div>
-      <div class="card-meta">${hasSec ? d.word_count.toLocaleString() + ' words' : 'pending'}</div>
+    const pulse = !hasSec && d.personas_done ? ' style="animation:pulse 1.8s ease-in-out infinite"' : '';
+    return `<div class="${cls}${sel}" onclick="${clickable ? `loadSection('${d.id}')` : ''}" data-domain="${d.id}">
+      <div class="card-label" style="display:flex;align-items:center;gap:6px">
+        <span style="flex-shrink:0;width:7px;height:7px;border-radius:50%;${dotStyle}"${pulse}></span>
+        ${d.label}
+      </div>
+      <div class="card-meta">${statusLabel}</div>
     </div>`;
   }).join('')}</div>`;
 }
@@ -1343,6 +1365,7 @@ $('evt-filter-input').addEventListener('input', renderAllEvents);
 // ── Polling ───────────────────────────────────────────────────────────────────
 let lastStatusEtag = '', lastEventsEtag = '';
 let _serverDown = false;  // true while server is unreachable
+let _artifactPollCount = 0;
 
 async function poll() {
   try {
@@ -1411,6 +1434,19 @@ async function poll() {
       } else if (selectedView === 'all-events') {
         renderAllEvents();
       }
+    }
+    // Refresh selected stage artifacts every 5th poll while pipeline is running
+    _artifactPollCount++;
+    if (_pipelineRunning && selectedView && selectedView !== 'all-events' && _artifactPollCount % 5 === 0) {
+      try {
+        const ar = await fetch('/api/stage/' + selectedView);
+        if (ar.ok) {
+          const artifacts = await ar.json();
+          stageArtifacts[selectedView] = artifacts;
+          const detailArea = $('detail-area');
+          if (detailArea) renderResults(selectedView, artifacts);
+        }
+      } catch { /* ignore */ }
     }
   } catch {
     if (!_serverDown) {
@@ -2177,15 +2213,64 @@ def _load_stage_artifacts(stage_id: str, state_dir: Path) -> dict:
     elif stage_id == "5":
         tax_path = state_dir / "taxonomy.json"
         sections_dir = state_dir / "sections"
+        summaries_dir = state_dir / "summaries"
         domains = []
         if tax_path.exists():
             try:
                 tax = json.loads(tax_path.read_text())
+                # Parse events for per-domain status
+                personas_done: set = set()
+                reconciled: set = set()
+                critic_done: set = set()
+                section_written: set = set()
+                ef = state_dir.parent / "logs" / "events.jsonl"
+                if ef.exists():
+                    try:
+                        for line in ef.read_text(errors="replace").splitlines():
+                            try:
+                                evt = json.loads(line)
+                            except Exception:
+                                continue
+                            ev = evt.get("event", "")
+                            did = evt.get("domain_id", "")
+                            if not did:
+                                continue
+                            if ev == "s4_personas_done":
+                                personas_done.add(did)
+                            elif ev == "s4_reconciler_done":
+                                reconciled.add(did)
+                            elif ev == "s4_critic_done":
+                                critic_done.add(did)
+                            elif ev == "s4_section_written":
+                                section_written.add(did)
+                    except Exception:
+                        pass
                 for d in tax.get("domains", []):
                     did = d["id"]
                     sf = sections_dir / f"section_{did}.md"
                     wc = len(sf.read_text().split()) if sf.exists() else 0
-                    domains.append({"id": did, "label": d.get("label", did), "word_count": wc})
+                    if sf.exists():
+                        section_written.add(did)
+                    entry: dict = {
+                        "id": did,
+                        "label": d.get("label", did),
+                        "word_count": wc,
+                        "personas_done": did in personas_done,
+                        "reconciled": did in reconciled,
+                        "critic_done": did in critic_done,
+                        "section_written": did in section_written,
+                    }
+                    # Summary preview
+                    if summaries_dir.exists():
+                        sp = summaries_dir / f"summary_{did}.json"
+                        if sp.exists():
+                            try:
+                                s = json.loads(sp.read_text())
+                                preview = s.get("key_contributions") or s.get("reading_roadmap") or []
+                                entry["summary_preview"] = preview[:3]
+                            except Exception:
+                                pass
+                    domains.append(entry)
             except Exception:
                 pass
         out["domains"] = domains
@@ -2364,18 +2449,13 @@ def _spawn_pipeline(runs_dir: Path, params: dict) -> int:
     is_resume = params.get("resume", False)
 
     if is_resume:
-        # Reuse the run_id from the currently active run
+        # Reuse the run directory from the currently active run.
+        # Always use the directory name (UUID) as run_id — the run_id stored
+        # inside pipeline.json can differ (e.g. "run_4ed94c55" vs the UUID dir
+        # "85af6a8b-…"), and the CLI uses --run-id to construct the state path.
         active_state = _find_active_state_dir(runs_dir)
         if active_state is not None:
-            pipeline_path = active_state / "pipeline.json"
-            run_id = ""
-            if pipeline_path.exists():
-                try:
-                    run_id = json.loads(pipeline_path.read_text()).get("run_id", "")
-                except Exception:
-                    pass
-            if not run_id:
-                run_id = active_state.parent.name  # fall back to dir name
+            run_id = active_state.parent.name  # directory name is the canonical id
             state_dir = active_state
         else:
             run_id = _new_run_id()
