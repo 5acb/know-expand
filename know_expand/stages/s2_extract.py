@@ -11,18 +11,18 @@ import spacy
 from keybert import KeyBERT
 from sentence_transformers import SentenceTransformer
 
-from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import TermInventory, TermOccurrence, CanonicalTerm, TermKindBatch
-from doc_expand.bibliography import _ss_search, _get_ss_limiter
-from doc_expand.centrality import compute_centrality, BOILERPLATE
-from doc_expand.config import Config
-from doc_expand.state import (
+from know_expand.agents.base import make_router
+from know_expand.agents.schemas import TermInventory, TermOccurrence, CanonicalTerm, TermKindBatch
+from know_expand.bibliography import _ss_search, _get_ss_limiter
+from know_expand.centrality import compute_centrality, BOILERPLATE
+from know_expand.config import Config
+from know_expand.state import (
     PipelineState, emit, mark_stage_complete, stage_is_complete,
     sentinel_exists, write_sentinel,
 )
-from doc_expand.union_find import UnionFind
+from know_expand.union_find import UnionFind
 
-_logger = logging.getLogger("doc_expand.s1")
+_logger = logging.getLogger("know_expand.s2")
 
 _MAP_PROMPT = """\
 You are a domain expert reading a chunk of a technical document.

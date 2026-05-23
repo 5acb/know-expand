@@ -18,8 +18,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from doc_expand.agents.schemas import CitationRecord, GapAnalysisResult, GapFinding
-from doc_expand.config import (
+from know_expand.agents.schemas import CitationRecord, GapAnalysisResult, GapFinding
+from know_expand.config import (
     BibliographyConfig,
     CentralityConfig,
     ConcurrencyConfig,
@@ -27,7 +27,7 @@ from doc_expand.config import (
     LlamaCppConfig,
     RateLimitConfig,
 )
-from doc_expand.state import new_run_id, setup_logging
+from know_expand.state import new_run_id, setup_logging
 
 
 # ---------------------------------------------------------------------------
@@ -182,11 +182,11 @@ async def test_s3_run_writes_outputs_and_marks_complete(tmp_path):
     mock_router.call.side_effect = call_returns
 
     with (
-        patch("doc_expand.stages.s3_audit.fetch_anchors", return_value=anchor_records) as mock_fa,
-        patch("doc_expand.stages.s3_audit.fetch_bibliography", return_value=bib_records) as mock_fb,
-        patch("doc_expand.stages.s3_audit.make_router", return_value=mock_router),
+        patch("know_expand.stages.s3_audit.fetch_anchors", return_value=anchor_records) as mock_fa,
+        patch("know_expand.stages.s3_audit.fetch_bibliography", return_value=bib_records) as mock_fb,
+        patch("know_expand.stages.s3_audit.make_router", return_value=mock_router),
     ):
-        from doc_expand.stages import s3_audit
+        from know_expand.stages import s3_audit
         await s3_audit.run(state, cfg)
 
     audit_dir = state_dir / "audit"
@@ -253,11 +253,11 @@ async def test_s3_skips_completed_stage(tmp_path):
 
     mock_router = AsyncMock()
     with (
-        patch("doc_expand.stages.s3_audit.fetch_anchors") as mock_fa,
-        patch("doc_expand.stages.s3_audit.fetch_bibliography") as mock_fb,
-        patch("doc_expand.stages.s3_audit.make_router", return_value=mock_router),
+        patch("know_expand.stages.s3_audit.fetch_anchors") as mock_fa,
+        patch("know_expand.stages.s3_audit.fetch_bibliography") as mock_fb,
+        patch("know_expand.stages.s3_audit.make_router", return_value=mock_router),
     ):
-        from doc_expand.stages import s3_audit
+        from know_expand.stages import s3_audit
         await s3_audit.run(state, cfg)
 
     assert mock_fa.call_count == 0, "fetch_anchors should not be called when stage is complete"
@@ -304,11 +304,11 @@ async def test_s3_domain_failure_does_not_abort_other_domains(tmp_path):
     ]
 
     with (
-        patch("doc_expand.stages.s3_audit.fetch_anchors", side_effect=maybe_fail_anchor),
-        patch("doc_expand.stages.s3_audit.fetch_bibliography", return_value=bib_records),
-        patch("doc_expand.stages.s3_audit.make_router", return_value=mock_router),
+        patch("know_expand.stages.s3_audit.fetch_anchors", side_effect=maybe_fail_anchor),
+        patch("know_expand.stages.s3_audit.fetch_bibliography", return_value=bib_records),
+        patch("know_expand.stages.s3_audit.make_router", return_value=mock_router),
     ):
-        from doc_expand.stages import s3_audit
+        from know_expand.stages import s3_audit
         await s3_audit.run(state, cfg)
 
     audit_dir = state_dir / "audit"

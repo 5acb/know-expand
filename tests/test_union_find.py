@@ -1,4 +1,4 @@
-from doc_expand.union_find import UnionFind
+from know_expand.union_find import UnionFind
 
 
 def test_single_element():

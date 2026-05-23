@@ -12,13 +12,13 @@ import re
 import time
 from pathlib import Path
 
-from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import PrimerPlan
-from doc_expand.config import Config
-from doc_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
-from doc_expand.stages.s6_align import _apply_patch
+from know_expand.agents.base import make_router
+from know_expand.agents.schemas import PrimerPlan
+from know_expand.config import Config
+from know_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
+from know_expand.stages.s6_align import _apply_patch
 
-_logger = logging.getLogger("doc_expand.s9_prereq")
+_logger = logging.getLogger("know_expand.s9_prereq")
 
 _SYSTEM_PROMPT = """\
 You are a prerequisite threading agent reviewing one section of a multi-domain document.

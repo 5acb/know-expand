@@ -2,9 +2,9 @@ from pathlib import Path
 
 from langgraph.graph import StateGraph, END
 
-from doc_expand.config import Config, load_config
-from doc_expand.state import PipelineState, emit, load_pipeline_json
-from doc_expand.stages import (
+from know_expand.config import Config, load_config
+from know_expand.state import PipelineState, emit, load_pipeline_json
+from know_expand.stages import (
     s0_ingest,
     s1_assess,
     s2_extract,
@@ -127,7 +127,7 @@ async def run_pipeline(
     # for the first stage to complete.
     pipeline_json["run_id"] = run_id
     pipeline_json.setdefault("input_path", input_path)
-    from doc_expand.state import save_pipeline_json
+    from know_expand.state import save_pipeline_json
     save_pipeline_json(state_dir, pipeline_json)
 
     state: PipelineState = {
@@ -147,7 +147,7 @@ async def run_pipeline(
         "state_dir": str(state_dir),
     })
 
-    from doc_expand.agents.base import probe_models
+    from know_expand.agents.base import probe_models
     await probe_models(cfg)
 
     graph = build_graph(cfg, auto_taxonomy=auto_taxonomy, no_pdf=no_pdf)

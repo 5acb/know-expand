@@ -7,8 +7,8 @@ from docling.datamodel.document import DocItemLabel
 from docling.document_converter import DocumentConverter
 from docling.chunking import HybridChunker
 
-from doc_expand.config import Config
-from doc_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
+from know_expand.config import Config
+from know_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
 
 _STRUCTURAL_LABELS = {DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE}
 

@@ -26,13 +26,13 @@ from pathlib import Path
 
 import httpx
 
-from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import AlignmentPlan
-from doc_expand.bibliography import _ss_search, reset_ss_limiter
-from doc_expand.config import Config
-from doc_expand.state import PipelineState, atomic_write, emit, mark_stage_complete, stage_is_complete
+from know_expand.agents.base import make_router
+from know_expand.agents.schemas import AlignmentPlan
+from know_expand.bibliography import _ss_search, reset_ss_limiter
+from know_expand.config import Config
+from know_expand.state import PipelineState, atomic_write, emit, mark_stage_complete, stage_is_complete
 
-_logger = logging.getLogger("doc_expand.s6_align")
+_logger = logging.getLogger("know_expand.s6_align")
 
 _MAX_SEARCH_QUERIES = 3
 

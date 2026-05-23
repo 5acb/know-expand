@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from doc_expand.config import load_config, LlamaCppConfig, Config
+from know_expand.config import load_config, LlamaCppConfig, Config
 
 
 def _cfg_with_llamacpp(base_url: str = "http://localhost:8080") -> Config:
@@ -14,7 +14,7 @@ def _cfg_with_llamacpp(base_url: str = "http://localhost:8080") -> Config:
 
 
 def test_llamacpp_uses_local_semaphore():
-    from doc_expand.agents.base import _get_semaphore
+    from know_expand.agents.base import _get_semaphore
     cfg = _cfg_with_llamacpp()
     sem_local = _get_semaphore("llamacpp/llama-3.2-3b", cfg)
     sem_ollama = _get_semaphore("ollama/llama3.2:3b", cfg)
@@ -37,8 +37,8 @@ async def test_llamacpp_transforms_model_and_passes_api_base():
         mock_client.chat.completions.create.side_effect = fake_create
         mock_instructor.return_value = mock_client
 
-        from doc_expand.agents.base import _do_call
-        from doc_expand.agents.schemas import TermInventory
+        from know_expand.agents.base import _do_call
+        from know_expand.agents.schemas import TermInventory
         try:
             await _do_call("llamacpp/llama-3.2-3b", [], TermInventory, cfg)
         except RuntimeError:
@@ -65,8 +65,8 @@ async def test_non_llamacpp_no_api_base():
         mock_client.chat.completions.create.side_effect = fake_create
         mock_instructor.return_value = mock_client
 
-        from doc_expand.agents.base import _do_call
-        from doc_expand.agents.schemas import TermInventory
+        from know_expand.agents.base import _do_call
+        from know_expand.agents.schemas import TermInventory
         try:
             await _do_call("claude-sonnet-4-6", [], TermInventory, cfg)
         except RuntimeError:

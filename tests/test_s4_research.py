@@ -1,4 +1,4 @@
-"""Tests for doc_expand.stages.s4_research."""
+"""Tests for know_expand.stages.s4_research."""
 
 import asyncio
 import json
@@ -7,15 +7,15 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from doc_expand.agents.schemas import CritiqueResult, DomainSummary, ResearchSection
-from doc_expand.config import (
+from know_expand.agents.schemas import CritiqueResult, DomainSummary, ResearchSection
+from know_expand.config import (
     BibliographyConfig,
     CentralityConfig,
     ConcurrencyConfig,
     Config,
     RateLimitConfig,
 )
-from doc_expand.stages import s4_research
+from know_expand.stages import s4_research
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +114,7 @@ async def test_s4_writes_section_and_summary(tmp_path):
     mock_router = AsyncMock()
     mock_router.call = AsyncMock(side_effect=[summary, summary, critique])
 
-    with patch("doc_expand.stages.s4_research.make_router", return_value=mock_router):
+    with patch("know_expand.stages.s4_research.make_router", return_value=mock_router):
         await s4_research.run(state, cfg)
 
     sections_dir = state_dir / "sections"
@@ -153,7 +153,7 @@ async def test_s4_skips_domain_with_sentinel(tmp_path):
     mock_router = AsyncMock()
     mock_router.call = AsyncMock()
 
-    with patch("doc_expand.stages.s4_research.make_router", return_value=mock_router):
+    with patch("know_expand.stages.s4_research.make_router", return_value=mock_router):
         await s4_research.run(state, cfg)
 
     # Router should not have been called for the skipped domain
@@ -198,8 +198,8 @@ async def test_s4_domain_failure_doesnt_kill_others(tmp_path):
     mock_router = AsyncMock()
     mock_router.call = AsyncMock(side_effect=[summary_b, summary_b, critique_b])
 
-    with patch("doc_expand.stages.s4_research._research_domain", side_effect=fake_research_domain):
-        with patch("doc_expand.stages.s4_research.make_router", return_value=mock_router):
+    with patch("know_expand.stages.s4_research._research_domain", side_effect=fake_research_domain):
+        with patch("know_expand.stages.s4_research.make_router", return_value=mock_router):
             # Should not raise even though domain_a fails
             await s4_research.run(state, cfg)
 
@@ -211,7 +211,7 @@ async def test_s4_domain_failure_doesnt_kill_others(tmp_path):
 @pytest.mark.asyncio
 async def test_s4_idempotent_when_complete(tmp_path):
     """Stage 4 is skipped entirely if already marked complete."""
-    from doc_expand.state import mark_stage_complete
+    from know_expand.state import mark_stage_complete
 
     cfg = _make_cfg()
     state_dir = tmp_path / "state"
@@ -224,7 +224,7 @@ async def test_s4_idempotent_when_complete(tmp_path):
     mock_router = AsyncMock()
     mock_router.call = AsyncMock()
 
-    with patch("doc_expand.stages.s4_research.make_router", return_value=mock_router):
+    with patch("know_expand.stages.s4_research.make_router", return_value=mock_router):
         await s4_research.run(state, cfg)
 
     mock_router.call.assert_not_called()
@@ -259,7 +259,7 @@ async def test_s4_adversarial_rounds_revise(tmp_path):
     mock_router = AsyncMock()
     mock_router.call = AsyncMock(side_effect=call_results)
 
-    with patch("doc_expand.stages.s4_research.make_router", return_value=mock_router):
+    with patch("know_expand.stages.s4_research.make_router", return_value=mock_router):
         await s4_research.run(state, cfg)
 
     # Should have made 5 calls (top-down, bottom-up, critique×2, revise×1)

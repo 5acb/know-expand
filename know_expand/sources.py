@@ -1,4 +1,4 @@
-"""Multi-source knowledge fetcher for doc-expand.
+"""Multi-source knowledge fetcher for know-expand.
 
 Fetches Wikipedia, PyPI, and arXiv content for terms extracted from the pipeline.
 All fetches are best-effort — exceptions are caught and logged, never propagated.
@@ -17,12 +17,12 @@ import httpx
 from aiolimiter import AsyncLimiter
 from pydantic import BaseModel
 
-_logger = logging.getLogger("doc_expand.sources")
+_logger = logging.getLogger("know_expand.sources")
 
 _ARXIV_NS = "http://www.w3.org/2005/Atom"
 
 # Wikipedia requires a descriptive User-Agent; without it they return 403.
-_USER_AGENT = "doc-expand/0.1 (research document expander; open-source) python-httpx"
+_USER_AGENT = "know-expand/0.1 (research document expander; open-source) python-httpx"
 _WIKI_HEADERS = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
 
 
@@ -48,7 +48,7 @@ def _get_openalex_limiter() -> AsyncLimiter:
 
 
 _OPENALEX_HEADERS = {
-    "User-Agent": "doc-expand/1.0 (mailto:research@example.com)",
+    "User-Agent": "know-expand/1.0 (mailto:research@example.com)",
     "Accept": "application/json",
 }
 
