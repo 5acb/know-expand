@@ -1,4 +1,4 @@
-"""Tests for know_expand.stages.s5_synthesize."""
+"""Tests for know_expand.stages.s7_synthesize."""
 
 import json
 from pathlib import Path
@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from know_expand.agents.schemas import (
+    ConnectorOutput,
     SynthesisCritique,
     SynthesisDraft,
     SynthesisInsight,
@@ -18,7 +19,7 @@ from know_expand.config import (
     Config,
     RateLimitConfig,
 )
-from know_expand.stages import s5_synthesize
+from know_expand.stages import s7_synthesize
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +88,10 @@ def _make_critique_accept() -> SynthesisCritique:
     )
 
 
+def _make_connector_output() -> ConnectorOutput:
+    return ConnectorOutput(bridges=[], epistemic_stack_note="No cross-domain bridges identified.")
+
+
 def _write_graph(state_dir: Path) -> None:
     graph = {
         "nodes": [
@@ -134,13 +139,15 @@ async def test_s5_writes_synthesis_section(tmp_path):
 
     state = _make_state(state_dir)
     draft = _make_draft()
+    connector = _make_connector_output()
     critique = _make_critique_accept()
 
+    # s7_synthesize: structural + semantic + connector (parallel), then 1 critic round (accept)
     mock_router = AsyncMock()
-    mock_router.call = AsyncMock(side_effect=[draft, draft, critique])
+    mock_router.call = AsyncMock(side_effect=[draft, draft, connector, critique])
 
-    with patch("know_expand.stages.s5_synthesize.make_router", return_value=mock_router):
-        await s5_synthesize.run(state, cfg)
+    with patch("know_expand.stages.s7_synthesize.make_router", return_value=mock_router):
+        await s7_synthesize.run(state, cfg)
 
     synthesis_path = sections_dir / "section_synthesis.md"
     assert synthesis_path.exists()
@@ -163,8 +170,8 @@ async def test_s5_empty_summaries_dir(tmp_path):
     mock_router = AsyncMock()
     mock_router.call = AsyncMock()
 
-    with patch("know_expand.stages.s5_synthesize.make_router", return_value=mock_router):
-        await s5_synthesize.run(state, cfg)
+    with patch("know_expand.stages.s7_synthesize.make_router", return_value=mock_router):
+        await s7_synthesize.run(state, cfg)
 
     synthesis_path = sections_dir / "section_synthesis.md"
     assert synthesis_path.exists()
@@ -176,7 +183,7 @@ async def test_s5_empty_summaries_dir(tmp_path):
 
 @pytest.mark.asyncio
 async def test_s5_idempotent_when_complete(tmp_path):
-    """Stage 5 is skipped if already marked complete."""
+    """Stage 7 (s7_synthesize) is skipped if already marked complete."""
     from know_expand.state import mark_stage_complete
 
     cfg = _make_cfg()
@@ -184,14 +191,14 @@ async def test_s5_idempotent_when_complete(tmp_path):
     state_dir.mkdir()
     _write_graph(state_dir)
     (state_dir / "pipeline.json").write_text("{}")
-    mark_stage_complete(state_dir, 5)
+    mark_stage_complete(state_dir, 7)  # s7_synthesize uses stage number 7
     state = _make_state(state_dir)
 
     mock_router = AsyncMock()
     mock_router.call = AsyncMock()
 
-    with patch("know_expand.stages.s5_synthesize.make_router", return_value=mock_router):
-        await s5_synthesize.run(state, cfg)
+    with patch("know_expand.stages.s7_synthesize.make_router", return_value=mock_router):
+        await s7_synthesize.run(state, cfg)
 
     mock_router.call.assert_not_called()
 
@@ -223,9 +230,11 @@ async def test_s5_critique_revise_loop(tmp_path):
     )
     critique_accept = _make_critique_accept()
 
+    connector = _make_connector_output()
     call_results = [
         draft,            # structural
         draft,            # semantic
+        connector,        # connector bridges (parallel with structural+semantic)
         critique_revise,  # round 1 → revise
         draft,            # revised draft
         critique_accept,  # round 2 → accept
@@ -234,9 +243,10 @@ async def test_s5_critique_revise_loop(tmp_path):
     mock_router = AsyncMock()
     mock_router.call = AsyncMock(side_effect=call_results)
 
-    with patch("know_expand.stages.s5_synthesize.make_router", return_value=mock_router):
-        await s5_synthesize.run(state, cfg)
+    with patch("know_expand.stages.s7_synthesize.make_router", return_value=mock_router):
+        await s7_synthesize.run(state, cfg)
 
-    assert mock_router.call.call_count == 5
+    # 3 parallel (structural+semantic+connector) + 1 critic round 1 + 1 revise + 1 critic round 2
+    assert mock_router.call.call_count == 6
     synthesis_path = sections_dir / "section_synthesis.md"
     assert synthesis_path.exists()

@@ -91,7 +91,6 @@ def _make_citation_id(title: str, year: int, first_author: str) -> str:
 
 def _normalize(text: str) -> str:
     """Strip markdown punctuation and collapse whitespace for fuzzy comparison."""
-    import string
     stripped = re.sub(r"[*_`\[\]()#>]", "", text)
     stripped = re.sub(r"\s+", " ", stripped).strip().lower()
     return stripped

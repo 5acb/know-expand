@@ -156,7 +156,7 @@ async def test_s3_run_writes_outputs_and_marks_complete(tmp_path):
     """
     state_dir = _make_state_dir()
     run_id = new_run_id()
-    log_dir = setup_logging(run_id, log_base=tmp_path / "logs")
+    setup_logging(run_id, log_dir=tmp_path / "logs")
 
     cfg = _make_cfg()
     state = {
@@ -181,13 +181,15 @@ async def test_s3_run_writes_outputs_and_marks_complete(tmp_path):
     mock_router = AsyncMock()
     mock_router.call.side_effect = call_returns
 
+    # fetch_anchors now returns (records, ss_ids) tuple
     with (
-        patch("know_expand.stages.s3_audit.fetch_anchors", return_value=anchor_records) as mock_fa,
-        patch("know_expand.stages.s3_audit.fetch_bibliography", return_value=bib_records) as mock_fb,
-        patch("know_expand.stages.s3_audit.make_router", return_value=mock_router),
+        patch("know_expand.stages.s4_audit.fetch_anchors", return_value=(anchor_records, [])) as mock_fa,
+        patch("know_expand.stages.s4_audit.fetch_bibliography", return_value=bib_records) as mock_fb,
+        patch("know_expand.stages.s4_audit.fetch_anchor_neighbors", return_value=[]) as _mock_fn,
+        patch("know_expand.stages.s4_audit.make_router", return_value=mock_router),
     ):
-        from know_expand.stages import s3_audit
-        await s3_audit.run(state, cfg)
+        from know_expand.stages import s4_audit
+        await s4_audit.run(state, cfg)
 
     audit_dir = state_dir / "audit"
 
@@ -212,10 +214,10 @@ async def test_s3_run_writes_outputs_and_marks_complete(tmp_path):
     corrections_text = corrections_md.read_text()
     assert len(corrections_text) > 0, "corrections.md is empty"
 
-    # --- stage 3 marked complete in pipeline.json ---
+    # --- stage 4 marked complete in pipeline.json (s4_audit uses stage 4) ---
     pipeline = json.loads((state_dir / "pipeline.json").read_text())
-    assert pipeline["stages"]["3"]["status"] == "complete", \
-        "pipeline.json does not show stage 3 as complete"
+    assert pipeline["stages"]["4"]["status"] == "complete", \
+        "pipeline.json does not show stage 4 as complete"
 
     # --- fetch_anchors called once per domain ---
     assert mock_fa.call_count == 2, f"Expected 2 anchor fetches, got {mock_fa.call_count}"
@@ -234,12 +236,12 @@ async def test_s3_skips_completed_stage(tmp_path):
     """Stage 3 returns early if pipeline.json already marks stage 3 complete."""
     state_dir = _make_state_dir()
     run_id = new_run_id()
-    setup_logging(run_id, log_base=tmp_path / "logs")
+    setup_logging(run_id, log_dir=tmp_path / "logs")
     cfg = _make_cfg()
 
-    # Pre-mark stage 3 as complete
+    # Pre-mark stage 4 as complete (s4_audit uses stage number 4)
     pipeline = json.loads((state_dir / "pipeline.json").read_text())
-    pipeline["stages"]["3"] = {"status": "complete", "completed_at": "2026-01-01T00:00:00+00:00"}
+    pipeline["stages"]["4"] = {"status": "complete", "completed_at": "2026-01-01T00:00:00+00:00"}
     (state_dir / "pipeline.json").write_text(json.dumps(pipeline))
 
     state = {
@@ -253,12 +255,12 @@ async def test_s3_skips_completed_stage(tmp_path):
 
     mock_router = AsyncMock()
     with (
-        patch("know_expand.stages.s3_audit.fetch_anchors") as mock_fa,
-        patch("know_expand.stages.s3_audit.fetch_bibliography") as mock_fb,
-        patch("know_expand.stages.s3_audit.make_router", return_value=mock_router),
+        patch("know_expand.stages.s4_audit.fetch_anchors") as mock_fa,
+        patch("know_expand.stages.s4_audit.fetch_bibliography") as mock_fb,
+        patch("know_expand.stages.s4_audit.make_router", return_value=mock_router),
     ):
-        from know_expand.stages import s3_audit
-        await s3_audit.run(state, cfg)
+        from know_expand.stages import s4_audit
+        await s4_audit.run(state, cfg)
 
     assert mock_fa.call_count == 0, "fetch_anchors should not be called when stage is complete"
     assert mock_fb.call_count == 0, "fetch_bibliography should not be called when stage is complete"
@@ -272,7 +274,7 @@ async def test_s3_domain_failure_does_not_abort_other_domains(tmp_path):
     """If one domain fails, the others still complete and outputs are written."""
     state_dir = _make_state_dir()
     run_id = new_run_id()
-    setup_logging(run_id, log_base=tmp_path / "logs")
+    setup_logging(run_id, log_dir=tmp_path / "logs")
     cfg = _make_cfg()
 
     state = {
@@ -294,7 +296,8 @@ async def test_s3_domain_failure_does_not_abort_other_domains(tmp_path):
         fetch_call_count["n"] += 1
         if domain_label == "Domain A":
             raise RuntimeError("SS network error")
-        return anchor_records
+        # fetch_anchors returns (records, ss_ids) tuple
+        return anchor_records, []
 
     mock_router = AsyncMock()
     mock_router.call.side_effect = [
@@ -304,12 +307,13 @@ async def test_s3_domain_failure_does_not_abort_other_domains(tmp_path):
     ]
 
     with (
-        patch("know_expand.stages.s3_audit.fetch_anchors", side_effect=maybe_fail_anchor),
-        patch("know_expand.stages.s3_audit.fetch_bibliography", return_value=bib_records),
-        patch("know_expand.stages.s3_audit.make_router", return_value=mock_router),
+        patch("know_expand.stages.s4_audit.fetch_anchors", side_effect=maybe_fail_anchor),
+        patch("know_expand.stages.s4_audit.fetch_bibliography", return_value=bib_records),
+        patch("know_expand.stages.s4_audit.fetch_anchor_neighbors", return_value=[]),
+        patch("know_expand.stages.s4_audit.make_router", return_value=mock_router),
     ):
-        from know_expand.stages import s3_audit
-        await s3_audit.run(state, cfg)
+        from know_expand.stages import s4_audit
+        await s4_audit.run(state, cfg)
 
     audit_dir = state_dir / "audit"
 
@@ -321,9 +325,9 @@ async def test_s3_domain_failure_does_not_abort_other_domains(tmp_path):
     assert (audit_dir / "bibliography_domain-b.json").exists(), \
         "domain-b bibliography should be written"
 
-    # Stage still marked complete (partial results accepted)
+    # Stage 4 still marked complete (partial results accepted)
     pipeline = json.loads((state_dir / "pipeline.json").read_text())
-    assert pipeline["stages"]["3"]["status"] == "complete"
+    assert pipeline["stages"]["4"]["status"] == "complete"
 
     # gap_analysis.md and corrections.md exist (even with partial results)
     assert (audit_dir / "gap_analysis.md").exists()

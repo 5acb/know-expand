@@ -14,7 +14,6 @@ stderr — nothing; all output is routed to files or stdout
 import json
 import logging
 import os
-import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -360,7 +359,7 @@ def _progress_line(ts: str, name: str, ev: dict) -> str | None:
             return None
 
 
-def _kv(ev: dict, skip: set[str] = frozenset({"event"})) -> str:
+def _kv(ev: dict, skip: frozenset[str] = frozenset({"event"})) -> str:
     parts = [f"{k}={v!r}" for k, v in ev.items() if k not in skip and v is not None]
     return " ".join(parts[:8])
 

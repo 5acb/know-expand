@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 
 from know_expand.agents.base import make_router
-from know_expand.agents.schemas import GapAnalysisResult, GapFinding
+from know_expand.agents.schemas import GapAnalysisResult
 from know_expand.bibliography import fetch_anchor_neighbors, fetch_anchors, fetch_bibliography, reset_ss_limiter
 from know_expand.config import Config
 from know_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
@@ -269,7 +269,8 @@ async def _process_domain(
         anchors_path = audit_dir / f"anchors_{domain_id}.json"
         anchors = json.loads(anchors_path.read_text()) if anchors_path.exists() else []
         gap_result = await _run_gap_loop(
-            domain_id, domain_label, graph_terms, anchors, router
+            domain_id, domain_label, graph_terms, anchors, router,
+            rounds=cfg.adversarial_rounds.get(depth, 3),
         )
         return gap_result
 
@@ -314,7 +315,8 @@ async def _process_domain(
     })
 
     gap_result = await _run_gap_loop(
-        domain_id, domain_label, graph_terms, anchors_dicts, router
+        domain_id, domain_label, graph_terms, anchors_dicts, router,
+        rounds=cfg.adversarial_rounds.get(depth, 3),
     )
     emit({
         "event": "domain_complete",

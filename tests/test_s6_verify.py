@@ -1,4 +1,4 @@
-"""Tests for know_expand.stages.s6_verify."""
+"""Tests for know_expand.stages.s8_verify."""
 
 import json
 from pathlib import Path
@@ -13,7 +13,7 @@ from know_expand.config import (
     Config,
     RateLimitConfig,
 )
-from know_expand.stages import s6_verify
+from know_expand.stages import s8_verify
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ def _make_cfg() -> Config:
         timeouts={"default": 30},
         adversarial_rounds={"survey": 1},
         boilerplate_stop_list=[],
-        models={"critic": ["claude-3-haiku"]},
+        models={"critic": ["claude-3-haiku"], "classifier": ["claude-3-haiku"]},
     )
 
 
@@ -76,7 +76,7 @@ async def test_s6_detects_needs_citation(tmp_path):
     (sections_dir / "section_domain_a.md").write_text(section_text)
 
     state = _make_state(state_dir)
-    await s6_verify.run(state, cfg)
+    await s8_verify.run(state, cfg)
 
     needs_md = (audit_dir / "needs_citation.md").read_text()
     assert "[NEEDS_CITATION]" in needs_md
@@ -104,7 +104,7 @@ async def test_s6_verifies_known_citation(tmp_path):
     )
 
     state = _make_state(state_dir)
-    await s6_verify.run(state, cfg)
+    await s8_verify.run(state, cfg)
 
     citation_index = json.loads((audit_dir / "citation_index.json").read_text())
     assert "smith_2023_title" in citation_index
@@ -131,7 +131,7 @@ async def test_s6_flags_unknown_key(tmp_path):
     )
 
     state = _make_state(state_dir)
-    await s6_verify.run(state, cfg)
+    await s8_verify.run(state, cfg)
 
     needs_md = (audit_dir / "needs_citation.md").read_text()
     assert "ghost_2020_paper" in needs_md
@@ -156,7 +156,7 @@ async def test_s6_citation_index_contains_all_valid_ids(tmp_path):
     (sections_dir / "section_domain_a.md").write_text("# Domain A\n\nContent.\n")
 
     state = _make_state(state_dir)
-    await s6_verify.run(state, cfg)
+    await s8_verify.run(state, cfg)
 
     index = json.loads((audit_dir / "citation_index.json").read_text())
     assert "alpha_2021" in index
@@ -176,4 +176,4 @@ async def test_s6_idempotent_when_complete(tmp_path):
     state = _make_state(state_dir)
 
     # Should not raise even though audit_dir and sections_dir don't exist
-    await s6_verify.run(state, cfg)
+    await s8_verify.run(state, cfg)

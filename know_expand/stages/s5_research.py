@@ -11,7 +11,6 @@ import httpx
 
 from know_expand.agents.base import make_router
 from know_expand.agents.schemas import (
-    CitationRecord,
     CritiqueResult,
     DomainSummary,
     PersonaOutput,

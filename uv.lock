@@ -588,58 +588,6 @@ wheels = [
 ]
 
 [[package]]
-name = "doc-expand"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "aiolimiter" },
-    { name = "anthropic" },
-    { name = "docling" },
-    { name = "httpx" },
-    { name = "instructor" },
-    { name = "keybert" },
-    { name = "langgraph" },
-    { name = "litellm" },
-    { name = "markdown" },
-    { name = "numpy" },
-    { name = "pydantic" },
-    { name = "pypdf" },
-    { name = "python-dotenv" },
-    { name = "sentence-transformers" },
-    { name = "spacy" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-httpx" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiolimiter", specifier = ">=1.1.0" },
-    { name = "anthropic", specifier = ">=0.30.0" },
-    { name = "docling", specifier = ">=2.0.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "instructor", specifier = ">=1.3.0" },
-    { name = "keybert" },
-    { name = "langgraph", specifier = ">=0.2.0" },
-    { name = "litellm", specifier = ">=1.40.0" },
-    { name = "markdown", specifier = ">=3.6" },
-    { name = "numpy", specifier = ">=1.26.0" },
-    { name = "pydantic", specifier = ">=2.7.0" },
-    { name = "pypdf", specifier = ">=4.2.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-httpx", marker = "extra == 'dev'", specifier = ">=0.30.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "sentence-transformers", specifier = ">=3.0.0" },
-    { name = "spacy", specifier = ">=3.7.0" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "docling"
 version = "2.94.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1333,6 +1281,58 @@ sdist = { url = "https://files.pythonhosted.org/packages/b7/a8/a73003cc0f6a606eb
 wheels = [
     { url = "https://files.pythonhosted.org/packages/82/07/e2f42a8ec3ff1935debbf2a5255570d22033fca3fe3180d5af99a6c9ee8c/keybert-0.9.0-py3-none-any.whl", hash = "sha256:afa2f300a72f69d279e4482bc85d8b34493b119876dc0818cb4f260466285b36", size = 41364, upload-time = "2025-02-07T08:45:08.093Z" },
 ]
+
+[[package]]
+name = "know-expand"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "aiolimiter" },
+    { name = "anthropic" },
+    { name = "docling" },
+    { name = "httpx" },
+    { name = "instructor" },
+    { name = "keybert" },
+    { name = "langgraph" },
+    { name = "litellm" },
+    { name = "markdown" },
+    { name = "numpy" },
+    { name = "pydantic" },
+    { name = "pypdf" },
+    { name = "python-dotenv" },
+    { name = "sentence-transformers" },
+    { name = "spacy" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiolimiter", specifier = ">=1.1.0" },
+    { name = "anthropic", specifier = ">=0.30.0" },
+    { name = "docling", specifier = ">=2.0.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "instructor", specifier = ">=1.3.0" },
+    { name = "keybert" },
+    { name = "langgraph", specifier = ">=0.2.0" },
+    { name = "litellm", specifier = ">=1.40.0" },
+    { name = "markdown", specifier = ">=3.6" },
+    { name = "numpy", specifier = ">=1.26.0" },
+    { name = "pydantic", specifier = ">=2.7.0" },
+    { name = "pypdf", specifier = ">=4.2.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
+    { name = "pytest-httpx", marker = "extra == 'dev'", specifier = ">=0.30.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "sentence-transformers", specifier = ">=3.0.0" },
+    { name = "spacy", specifier = ">=3.7.0" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "langchain-core"

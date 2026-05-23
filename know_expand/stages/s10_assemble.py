@@ -471,7 +471,7 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
                             unique_steps.append(clean)
 
                     roadmap_lines = [
-                        f"## Reading Roadmap\n",
+                        "## Reading Roadmap\n",
                         f"This document covers {domain_count} domain"
                         + ("s" if domain_count != 1 else "")
                         + ". For a reader working through this material for the"

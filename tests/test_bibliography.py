@@ -126,7 +126,7 @@ async def test_deduplicate_by_doi(httpx_mock, cfg):
     import httpx as _httpx
     with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
         async with _httpx.AsyncClient() as client:
-            results = await fetch_anchors("test domain", client, cfg, n=3)
+            results, _ss_ids = await fetch_anchors("test domain", client, cfg, n=3)
 
     dois = [r.DOI for r in results if r.DOI]
     assert dois.count("10.1/dup") == 1
@@ -148,7 +148,7 @@ async def test_deduplicate_doi_none_kept(httpx_mock, cfg):
     import httpx as _httpx
     with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
         async with _httpx.AsyncClient() as client:
-            results = await fetch_anchors("no doi domain", client, cfg, n=2)
+            results, _ss_ids = await fetch_anchors("no doi domain", client, cfg, n=2)
 
     assert len(results) == 2
 
@@ -175,7 +175,7 @@ async def test_fetch_anchors_returns_top_cited(httpx_mock, cfg):
     import httpx as _httpx
     with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
         async with _httpx.AsyncClient() as client:
-            results = await fetch_anchors("attention mechanism", client, cfg, n=3)
+            results, _ss_ids = await fetch_anchors("attention mechanism", client, cfg, n=3)
 
     assert len(results) == 3
     counts = [r.citation_count for r in results]
