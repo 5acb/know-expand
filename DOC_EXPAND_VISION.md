@@ -47,6 +47,13 @@ A full-stack knowledge construction pipeline.
 - Not a chatbot or conversational interface
 - Not a Claude Code skill (it started as that idea; the scope demands a standalone app)
 - Not dependent on a pre-built knowledge graph (the LLM project required one; this builds its own)
+- Not a multi-document system (v1 is single-document; the natural extension — N documents → merged term inventory → single taxonomy → unified expansion — is a v2 scope item; Stages 0–2 trivially fan out, Stage 3 onward is unchanged)
+
+### Cost and latency
+
+**Cost (order-of-magnitude estimate):** a deep run involves roughly 8 domains × (3 personas + 1 reconciler) × up to 3 critic rounds + adversarial loops in S4, S7 + alignment passes in S6, S9. This is on the order of 150–300 LLM calls for the researcher/synthesizer role at deep depth. At current Opus 4.7 pricing, expect **$50–150 per deep run** with Opus as the primary researcher. Standard depth with Sonnet 4.6 as primary is roughly $5–20. The pipeline has no built-in cost cap; if an orchestrating agent calls it in a loop, it can rack costs quickly. Monitor `state/audit/model_usage.jsonl` — every call is logged with `cost_usd`.
+
+**Latency:** 1–3 hours end-to-end at deep depth on a standard 8-domain paper. Bottlenecks are Semantic Scholar rate limits (serialized across domains) and LLM call volume. Survey depth on a short paper completes in 10–20 minutes.
 
 ---
 
@@ -202,17 +209,10 @@ Input Document (text / file / URL / PDF)
 ┌───────────────────────────────────────────────────────┐
 │ Stage 0: INGEST                                       │
 │ Normalize → chunk with overlap → structural zones     │
+│ Degenerate-parse guard (scan-only PDF detection)      │
 └───────────────────────────┬───────────────────────────┘
                             │  state/chunks/*.json
                             │  state/structural_zones.json
-                            ▼
-┌───────────────────────────────────────────────────────┐
-│ Stage 1: ASSESS (User Calibration)                    │
-│ 7 questions tailored to document vocabulary           │
-│ → UserProfile (depth, math mode, known concepts)      │
-│ ← Human interaction #1 (earliest; bypassable)         │
-└───────────────────────────┬───────────────────────────┘
-                            │  state/user_profile.json
                             ▼
 ┌───────────────────────────────────────────────────────┐
 │ Stage 2: EXTRACT (Map-Reduce)                         │
@@ -220,6 +220,15 @@ Input Document (text / file / URL / PDF)
 │ Reduce: merge, deduplicate, compute centrality        │
 └───────────────────────────┬───────────────────────────┘
                             │  state/terms.json
+                            ▼
+┌───────────────────────────────────────────────────────┐
+│ Stage 1: ASSESS (User Calibration)                    │
+│ 10–15 turn interview using real extracted terms       │
+│ → UserProfile (depth, math mode, known concepts)      │
+│ ← Human interaction #1 (bypassable; after Extract     │
+│   so questions reference real document vocabulary)    │
+└───────────────────────────┬───────────────────────────┘
+                            │  state/user_profile.json
                             ▼
 ┌───────────────────────────────────────────────────────┐
 │ Stage 3: GRAPH (Two-Phase Lock)                       │
@@ -233,7 +242,8 @@ Input Document (text / file / URL / PDF)
                             ▼
 ┌───────────────────────────────────────────────────────┐
 │ Stage 4: AUDIT (Anchored)                             │
-│ Fetch anchors (3 papers) + bibliography (10/30/50)    │
+│ Fetch anchors + bibliography (65% found / 35% front.) │
+│ Anchor-neighbor expansion (citations of top anchors)  │
 │ Gap finder vs. Defender adversarial loop              │
 └───────────────────────────┬───────────────────────────┘
                             │  state/audit/gap_analysis.md
@@ -419,17 +429,19 @@ chunks = list(chunker.chunk(doc))
 
 Overlap at the semantic level: if a paragraph doesn't fit in the remaining token budget, the chunk boundary falls at the end of the last complete paragraph. The next chunk opens at the beginning of that paragraph — natural overlap, zero structural noise.
 
+**Degenerate-parse guard:** After Docling converts a PDF, Stage 0 checks whether Docling extracted meaningful structure. If `structural_zones < 5` AND `chunks < 3`, it raises `ValueError` immediately with a clear message — this combination indicates a scan-only or image-only PDF where Docling has nothing structural to work with. The entire downstream pipeline degrades silently on undetected scan PDFs: Stage 1 produces generic questions, Stage 2 produces noise terms. The guard catches this loudly at the earliest point. The threshold is `and` (not `or`) — a short but valid paper might have few section headers while still producing many text chunks.
+
 **Output:** `state/source.txt`, `state/source_meta.json`, `state/chunks/chunk_{N:04d}.json`, `state/structural_zones.json`
 
 ---
 
 #### Stage 1 — Assess (User Calibration)
 
-**Position:** Immediately after Stage 0, before Stage 2. Skipped by default. Activated with `--interactive` for direct human use; takes ~2 minutes.
+**Position:** After Stage 2 (Extract), before Stage 3 (Graph). Skipped by default. Activated with `--interactive` for direct human use; takes ~2 minutes.
 
 **Purpose:** Understand the user's background, existing knowledge, and learning goal before any research runs. The answers become a `UserProfile` JSON that calibrates every downstream stage — which concepts to explain from first principles, how much LaTeX to show, what the synthesis roadmap should optimize for.
 
-**Why after Stage 0 and not before:** questions must reference real terms from the document. Without `state/structural_zones.json`, Q3, Q6, and Q7 are generic and poorly targeted. With it, "Which of these best describes *PagedAttention*?" can offer four grounded, meaningful options. The ingest step is fast (seconds); running it first costs nothing and makes the assessment order-of-magnitude more useful.
+**Why after Stage 2 (Extract) and not before:** questions must reference real terms the model actually extracted from the document. Without `state/terms.json`, Q3, Q6, and Q7 are generic LLM guesses. With it, "Which of these best describes *PagedAttention*?" can offer four grounded, meaningful options drawn from the real extracted term inventory. Extract is fast (seconds to minutes); running it first costs nothing and makes the assessment order-of-magnitude more useful. Stage 2 runs before Stage 1 — never swap this back.
 
 **Why 7 questions:** fewer than 5 gives insufficient signal across the required dimensions. More than 9 creates fatigue and signals "this is a form." Seven covers all required question types exactly once.
 
@@ -613,6 +625,8 @@ The pipeline defaults to autonomous mode. `--interactive` is an opt-in for direc
 
 #### Stage 2 — Extract (Map-Reduce)
 
+**Position:** Immediately after Stage 0 (Ingest), before Stage 1 (Assess). Extract runs first so that the Stage 1 interview can reference real extracted terms rather than LLM guesses about what the document contains.
+
 **Map phase — per chunk, parallel:**
 
 | | Signal A | Signal B | Signal C |
@@ -789,6 +803,8 @@ Divergences between A and B written to `state/audit/classification_conflicts.jso
 
 **`from_source_doc: true`** distinguishes concepts present in the input document from concepts added during augmentation. Enables the final document to clearly mark "this is what the paper covers" vs. "this is the surrounding field."
 
+**`from_source_doc` invariant:** the count of `from_source_doc: true` nodes in `graph.json` must equal the count of terms that originated in the source document after any resume or Stage 3 reclassification. If Stage 2 reruns and Stage 3 reclassifies, this field can silently be lost. An explicit check — `assert len([n for n in graph["nodes"] if n.get("from_source_doc")]) == expected_source_term_count` — should run before Stage 4. Without it, the boundary between "document knowledge" and "augmented knowledge" becomes undefined in the output.
+
 **Output:** `state/taxonomy.json`, `state/graph.json`, `state/audit/classification_conflicts.json`
 
 ---
@@ -830,7 +846,7 @@ def fetch_bibliography(domain_label: str, depth: str,
 
 Split ratios and `frontier_months` are configurable in `config.yaml`. Default: 65/35 split, 24-month frontier window.
 
-Wikipedia lede (first 500 words of domain label article) as secondary anchor — useful for non-CS fields.
+**Anchor-neighborhood expansion:** after the two-bucket bibliography fetch, Stage 4 runs a second pass using the top-3 anchor `paperId` values against Semantic Scholar's `/paper/{id}/citations` endpoint. Papers published in the last 3 years that cite one of the top anchors are added to the frontier bucket (deduped against existing bibliography by DOI). This catches state-of-the-art work that doesn't surface on a domain-label query — the same pattern used by Connected Papers and ResearchRabbit. The fetch is best-effort, rate-limited through the shared SS limiter, and uses the same `_ss_paper_edges` helper. `neighbor_count` is emitted in the `domain_fetch_done` event.
 
 All fetches written to `state/audit/anchors_{domain}.json` and `state/audit/bibliography_{domain}.json`.
 
@@ -1323,36 +1339,7 @@ services:
       - OPENAI_API_KEY
       - GEMINI_API_KEY
       - OLLAMA_BASE_URL=http://ollama:11434
-    depends_on:
-      grobid:
-        condition: service_healthy
-      anystyle:
-        condition: service_started
     command: ["doc-expand", "/app/input/source.pdf", "--depth", "standard"]
-
-  grobid:
-    image: lfoppiano/grobid:0.8.2
-    ports:
-      - "8070:8070"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8070/api/isalive"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  anystyle:
-    # No verified official Docker image exists on Docker Hub.
-    # Build from source: https://github.com/inukshuk/anystyle-cli
-    build:
-      context: ./docker/anystyle
-      dockerfile: Dockerfile
-    ports:
-      - "4567:4567"
-
-  # phoenix:  [PLANNED] Phoenix observability profile not yet wired
-  #   image: arizephoenix/phoenix:latest
-  #   profiles: ["observability"]
-  #   ports: ["6006:6006", "4317:4317"]
 
   ollama:
     image: ollama/ollama:latest
@@ -1370,7 +1357,6 @@ services:
               count: all
 
 volumes:
-  phoenix_data:
   ollama_data:
 ```
 
@@ -1379,20 +1365,16 @@ volumes:
 | Service | Role | Port | Profile | Status |
 |---|---|---|---|---|
 | `app` | doc-expand pipeline | — | default | ✓ Implemented |
-| `grobid` | Reference extraction from source PDF | 8070 | default | [PLANNED] |
-| `anystyle` | Citation parsing (second extractor) | 4567 | default | [PLANNED] |
-| `phoenix` | Observability UI + OTLP trace ingest | 6006 / 4317 | `observability` | [PLANNED] |
 | `ollama` | Local LLM inference | 11434 | `local` | ✓ Supported via LiteLLM |
 
-**Actual observability (implemented):** `doc-expand tail` (plain text event stream, pipe-friendly) and `doc-expand serve` (HTTP tool dashboard at :7842 with Pipeline/Domains/Events/Gaps tabs). All output from JSONL event log in `logs/<run_id>/events.jsonl`.
+GROBID and AnyStyle have been removed. Docling `REFERENCE` label extraction + Semantic Scholar `search/match` resolution covers their use case without additional services. Phoenix/Langfuse have been removed; `doc-expand serve` is the observability surface; LangSmith handles multi-run production traces via env var only.
+
+**Actual observability (implemented):** `doc-expand serve` (self-contained HTTP dashboard at :7842 — left stage rail, full-width detail pane, run drawer, interview Q&A IPC, taxonomy review IPC). All events from `runs/{run_id}/events.jsonl`. `doc-expand tail` streams the JSONL event log to stdout for pipe-friendly debugging. The Phoenix and Langfuse planned items below are superseded by the `observe.py` dashboard — no external telemetry service is needed for single-run CLI use. For multi-run production traces, **LangSmith** is the recommended option since v0.2 (LangGraph 0.2+): it provides native LangGraph traces with no extra service, activated by setting `LANGCHAIN_API_KEY` and `LANGCHAIN_TRACING_V2=true` in the environment. No code changes required.
 
 **Usage:**
 ```bash
 # Standard run (cloud LLM, API key required)
 ANTHROPIC_API_KEY=sk-... docker compose up
-
-# With observability UI (Phoenix on :6006)
-docker compose --profile observability up
 
 # Fully local run (no API keys, Ollama + local models)
 docker compose --profile local up
@@ -1572,9 +1554,7 @@ The orchestrating LLM is told its model's capability tier at startup in the JSON
 With `--profile local`, no API keys are required. The entire pipeline runs on-device:
 
 - LLMs served by Ollama (llama3.2, qwen2.5, mistral, etc.)
-- GROBID and AnyStyle run in containers (Java/Ruby, no GPU needed)
-- Phoenix observability runs locally
-- OpenAlex, Semantic Scholar, Crossref API calls still require internet for bibliography fetch — disable with `--no-bibliography-fetch` to go fully air-gapped (Stage 4 then relies on GROBID+AnyStyle source extraction only)
+- OpenAlex, Semantic Scholar, Crossref API calls still require internet for bibliography fetch — disable with `--no-bibliography-fetch` to go fully air-gapped (Stage 4 then uses only `source_refs_raw.json` from Docling reference extraction)
 
 **Recommended local models by role:**
 
@@ -1837,11 +1817,13 @@ STORM's core contribution is **perspective-guided questioning**: before writing,
 
 **What it replaces:** ad-hoc "write a section about X" prompts. Gives Stage 5 agents a structured, debate-tested framework for generating deep, non-redundant coverage.
 
-#### GROBID + AnyStyle → Stage 4 bibliography seeding
+#### GROBID → Stage 4 bibliography seeding (evaluated, not adopted)
 
-Before fetching any papers from Semantic Scholar, GROBID (ML-based, 87-90% F1 on reference extraction, TEI-XML output) and AnyStyle (CRF-based, v1.6.0, self-hostable) extract and parse the references the source document itself already contains. These are the most relevant papers by definition — the authors chose them. Two independent extractors provide cross-validation: papers appearing in both outputs get `confidence: high` in `bibliography_{domain}.json`; papers in one only get `confidence: medium`. This seeds Stage 4 with ground-truth signal before any API call happens.
+**Status: not implemented.** Docling already extracts `REFERENCE`/`LIST_ITEM` labeled items from PDFs (`DocItemLabel.REFERENCE`), and Semantic Scholar's `/graph/v1/paper/search/match` endpoint resolves raw reference strings to confirmed papers. These two steps together cover the primary motivation for GROBID. AnyStyle has been dropped outright — it adds a Ruby Docker dependency and an alignment problem with Docling output that isn't justified by the accuracy delta.
 
-**What it replaces:** fetching cold from Semantic Scholar with no prior signal. GROBID+AnyStyle make Stage 4 bibliography fetch targeted, not exploratory.
+The correct decision path: run the pipeline on 3-5 representative papers and measure whether GROBID-extracted references materially improve bibliography quality over `source_refs_raw.json` + SS resolution. The current implementation already extracts raw reference strings at Stage 0 (`state/source_refs_raw.json`) and resolves them via `fetch_source_refs` in `bibliography.py`. If the bake-off shows no material improvement, GROBID stays out. If it shows a significant gap on non-CS PDFs (where Docling's reference label coverage is weaker), GROBID can be added as a best-effort service with a health-check gate — not a hard dependency.
+
+**What it would replace (if adopted):** fetching cold from Semantic Scholar with no prior signal. Source-doc reference extraction makes Stage 4 bibliography fetch targeted, not exploratory. Docling + SS resolution is the lightweight version of the same idea.
 
 #### OpenAlex concept taxonomy → Stage 3 Phase 1 taxonomy validation + Stage 4 anchor fetch
 
@@ -1891,17 +1873,16 @@ Typst (v0.14+, pre-1.0 but production-ready, actively maintained, millisecond in
 
 | Stage | Component | Tool | Why |
 |---|---|---|---|
-| 0 | Document parsing + structural zones | `Docling` (IBM, MIT) | Single-pass: layout (tables, equations, figures), semantic chunking via `HybridChunker`, structural zones from `SECTION_HEADER`/`TITLE` labels |
-| 0 | URL fetch | `httpx` | Async, timeout; PotatoMCP `fetch` as Cloudflare fallback |
-| 0 | Token counting | `anthropic` SDK | Consistent with Claude's actual tokenizer |
-| 1 | Lexical extraction (Signal A) | `spaCy` | Deterministic NER + noun chunker + regex acronyms; reused for structural zone term extraction in Stage 0 |
-| 1 | Conceptual extraction (Signal B) | LLM Agent B via LiteLLM | What a domain expert recognizes as load-bearing; one LLM call per chunk |
-| 1 | Semantic extraction (Signal C) | `KeyBERT` + `BGE-M3` | Embedding-based keyphrase centrality; non-LLM; strong divergence signal vs. Agent B |
-| 1 | Term deduplication | `numpy` cosine + Union-Find | BGE-M3 cosine finds near-duplicate pairs; Union-Find (stdlib, ~30 lines) clusters aliases; no library dependency |
-| 2 | Taxonomy validation | OpenAlex concept API | ~65k hierarchical concepts; L0-L5 depth validates lumper/splitter proposals |
-| 3 | Source doc reference extraction | `GROBID` + `AnyStyle` | **[PLANNED]** Two independent extractors; cross-validated confidence scoring |
-| 3 | Bibliography fetch | Semantic Scholar + Crossref | SS primary (CS/ML); Crossref secondary. Circuit breaker + `aiolimiter` rate limiting (1 req/s SS, configurable). |
-| 3 | External API rate limiting | `aiolimiter` (MIT) | Async token bucket per API. SS circuit breaker: global `_ss_cooldown_until` timestamp on burst 429s |
+| S0 | Document parsing + structural zones | `Docling` (IBM, MIT) | Single-pass: layout (tables, equations, figures), semantic chunking via `HybridChunker`, structural zones from `SECTION_HEADER`/`TITLE` labels; degenerate-parse guard raises on scan-only PDFs |
+| S0 | URL fetch | `httpx` | Async, timeout; PotatoMCP `fetch` as Cloudflare fallback |
+| S0 | Source ref extraction | Docling `REFERENCE` label | Raw reference strings to `source_refs_raw.json`; resolved via SS `search/match` in S4 |
+| S2 | Lexical extraction (Signal A) | `spaCy` | Deterministic NER + noun chunker + regex acronyms; reused for structural zone term extraction in Stage 0 |
+| S2 | Conceptual extraction (Signal B) | LLM Agent B via LiteLLM | What a domain expert recognizes as load-bearing; one LLM call per chunk |
+| S2 | Semantic extraction (Signal C) | `KeyBERT` + `BGE-M3` | Embedding-based keyphrase centrality; non-LLM; strong divergence signal vs. Agent B |
+| S2 | Term deduplication | `numpy` cosine + Union-Find | BGE-M3 cosine finds near-duplicate pairs; Union-Find (stdlib, ~30 lines) clusters aliases; no library dependency |
+| S3 | Taxonomy validation | OpenAlex concept API | ~65k hierarchical concepts; L0-L5 depth validates lumper/splitter proposals |
+| S4 | Bibliography fetch | Semantic Scholar + Crossref | SS primary (CS/ML); Crossref secondary. Two-bucket (65% foundational / 35% frontier, MNCS-sorted). Anchor-neighbor expansion via `/citations` endpoint. Circuit breaker + `aiolimiter` rate limiting. |
+| S4 | External API rate limiting | `aiolimiter` (MIT) | Async token bucket per API. SS circuit breaker: global `_ss_cooldown_until` timestamp on burst 429s |
 | 4/5 | Adversarial loops | litellm structured calls + `instructor` | Generator→Critic loop via `litellm.acompletion` with Pydantic `CritiqueResult` schema; intermediate round files prevent crash rework |
 | 4.5/6.5 | Agentic alignment | `langgraph` `StateGraph` + `ToolNode` | ReAct graphs with `@tool` async closures; FINISH_SENTINEL string detection stops the graph; context trimmed to last 20 messages per turn |
 | All | LLM routing | `LiteLLM` + `QuotaAwareRouter` | Provider-agnostic fallback chains from `models.yaml`. Retry-After header distinguishes burst 429 (sleep+retry) from quota exhaustion (next model) |
@@ -1931,7 +1912,8 @@ Typst (v0.14+, pre-1.0 but production-ready, actively maintained, millisecond in
 | **Prompt caching** | Anthropic prompt cache | Cache system prompts, format specs, bibliography JSONs; minimum: Sonnet 4.6 ≥2048 tokens, Haiku 4.5 ≥4096 tokens, Opus 4.7 ≥4096 tokens; up to 90% cost reduction |
 | **Response caching** | `DiskCache` | SQLite-backed local cache for deterministic API calls (taxonomy fetch, anchor fetch); zero external dependencies; benchmarks show it is faster than Redis in local scenarios due to NVMe/mmap leverage |
 | **Observability (default)** | flat `model_usage.jsonl` | Zero-dependency; `cat state/audit/model_usage.jsonl \| jq` answers every debug question |
-| **Observability (optional)** | `Phoenix` (Arize, ELv2) or `Langfuse` (MIT) | Enable with `--observability phoenix\|langfuse`; useful for multi-run tuning and agent session replay. Not required for single-document CLI use. |
+| **Observability (built-in)** | `observe.py` self-contained dashboard | `doc-expand serve` at :7842 — left stage rail, full-width detail pane, run drawer, interview/taxonomy IPC. All event data from `runs/{run_id}/events.jsonl`. Zero external dependencies. |
+| **Observability (multi-run)** | LangSmith | Native LangGraph integration; activated by env vars (`LANGCHAIN_API_KEY`, `LANGCHAIN_TRACING_V2=true`); no code changes required. Recommended over Phoenix/Langfuse for production trace analysis. |
 | **Graph storage** | `NetworkX` + `graph.json` | In-memory ops: topological sort, DAG traversal, neighbor lookup. Sufficient at ≤200 nodes; no compiled binary dependency. |
 | **Terminal UI** | `doc-expand tail` + `doc-expand serve` | `tail` streams `state/audit/events.jsonl` to terminal; `serve` runs a local HTTP dashboard (:7842) with Pipeline/Domains/Events/Gaps tabs. No Rich dependency. |
 | **Data validation (bulk)** | `Pandera` | DataFrame-level schema validation for batch term inventory and citation index |
@@ -1954,7 +1936,7 @@ Typst (v0.14+, pre-1.0 but production-ready, actively maintained, millisecond in
 | `ChromaDB` / `Qdrant` | Embedded vector DBs add persistence overhead; numpy cosine is sufficient for transient deduplication |
 | `marker-pdf` | GPL license constraint; Docling covers the same ground under MIT |
 | `nano` as default editor | Not universally available; use `os.environ.get("EDITOR", "vi")` |
-| Phoenix/Langfuse as required service | Nobody runs a telemetry Docker container for a single CLI run; make it `--observability` opt-in |
+| Phoenix/Langfuse as a Docker service dependency | `doc-expand serve` (`observe.py`) is the built-in observability surface — no external service needed. LangSmith is the multi-run option via env vars only. Neither Phoenix nor Langfuse should be in `docker-compose.yml`. |
 
 ---
 

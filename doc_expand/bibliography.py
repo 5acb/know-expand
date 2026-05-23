@@ -90,6 +90,7 @@ def _get_ss_limiter(cfg: Config) -> AsyncLimiter:
     return _ss_limiter
 
 _SS_BASE = "https://api.semanticscholar.org/graph/v1/paper/search"
+_SS_PAPER_BASE = "https://api.semanticscholar.org/graph/v1/paper"
 _SS_FIELDS = "title,year,citationCount,externalIds,abstract,authors,fieldsOfStudy"
 
 
@@ -209,18 +210,92 @@ async def _ss_search(
     return []
 
 
+async def _ss_paper_edges(
+    paper_id: str,
+    edge: str,
+    http: httpx.AsyncClient,
+    cfg: Config,
+    limit: int = 8,
+) -> list[dict]:
+    """Fetch citing or cited papers for an SS paperId (best-effort, rate-limited)."""
+    url = f"{_SS_PAPER_BASE}/{paper_id}/{edge}"
+    params = {"fields": _SS_FIELDS, "limit": limit}
+    headers = {"x-api-key": _SS_API_KEY} if _SS_API_KEY else {}
+    limiter = _get_ss_limiter(cfg)
+    async with limiter:
+        try:
+            resp = await http.get(url, params=params, headers=headers)
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            key = "citingPaper" if edge == "citations" else "citedPaper"
+            return [item[key] for item in data if item.get(key)]
+        except Exception as exc:
+            _logger.warning("SS %s fetch failed for %r: %s", edge, paper_id, exc)
+            return []
+
+
+async def fetch_anchor_neighbors(
+    anchor_ss_ids: list[str],
+    existing_bib: list[CitationRecord],
+    http: httpx.AsyncClient,
+    cfg: Config,
+    top_n: int = 3,
+    per_paper: int = 8,
+) -> list[CitationRecord]:
+    """Fetch papers citing the top-N anchor papers (frontier neighborhood expansion).
+
+    Catches frontier work that domain-label queries miss — the Connected Papers /
+    ResearchRabbit pattern applied to the bibliography stage.
+    Returns CitationRecord list with bucket='frontier', deduped against existing_bib.
+    """
+    ids = [sid for sid in anchor_ss_ids if sid][:top_n]
+    if not ids:
+        return []
+
+    seen_dois: set[str] = {r.DOI for r in existing_bib if r.DOI}
+    seen_local: set[str] = {r.id for r in existing_bib}
+    results: list[CitationRecord] = []
+
+    current_year = datetime.datetime.now().year
+    cutoff_year = current_year - 3
+
+    for paper_id in ids:
+        for paper in await _ss_paper_edges(paper_id, "citations", http, cfg, limit=per_paper):
+            year = paper.get("year") or 0
+            if year < cutoff_year:
+                continue
+            doi = ((paper.get("externalIds") or {}).get("DOI") or "").lower()
+            if doi and doi in seen_dois:
+                continue
+            if doi:
+                seen_dois.add(doi)
+            rec = _to_citation_record(paper, "frontier", seen_local)
+            results.append(rec)
+
+    emit({
+        "event": "anchor_neighbors_fetched",
+        "anchor_count": len(ids),
+        "neighbor_count": len(results),
+    })
+    return results
+
+
 async def fetch_anchors(
     domain_label: str,
     http: httpx.AsyncClient,
     cfg: Config,
     n: int | None = None,
-) -> list[CitationRecord]:
+) -> tuple[list[CitationRecord], list[str]]:
+    """Return (anchor_records, ss_paper_ids) for the top-N cited papers in the domain."""
     n = n if n is not None else cfg.bibliography.ss_anchors_n
     papers = await _ss_search(domain_label, http, cfg, limit=n * 4)
     papers.sort(key=lambda p: p.get("citationCount") or 0, reverse=True)
     seen: set[str] = set()
     seen_dois: set[str] = set()
-    results = []
+    results: list[CitationRecord] = []
+    ss_ids: list[str] = []
     for p in papers:
         doi = ((p.get("externalIds") or {}).get("DOI") or "").lower()
         if doi and doi in seen_dois:
@@ -228,8 +303,54 @@ async def fetch_anchors(
         if doi:
             seen_dois.add(doi)
         results.append(_to_citation_record(p, "anchor", seen))
+        if pid := p.get("paperId"):
+            ss_ids.append(pid)
         if len(results) >= n:
             break
+    return results, ss_ids
+
+
+def _clean_ref_query(raw: str, max_chars: int = 160) -> str:
+    """Strip leading [N] / (N) numbering and trim to a SS-friendly query length."""
+    text = re.sub(r"^\s*[\[\(]\d+[\]\)]\s*", "", raw).strip()
+    return text[:max_chars]
+
+
+async def fetch_source_refs(
+    raw_refs: list[str],
+    http: httpx.AsyncClient,
+    cfg: Config,
+    limit: int = 30,
+) -> list[CitationRecord]:
+    """Look up the source document's own reference list in Semantic Scholar.
+
+    Returns one CitationRecord per successfully matched ref, bucket="source_ref".
+    Capped at *limit* refs to stay within SS rate limits.
+    """
+    refs_to_fetch = raw_refs[:limit]
+    seen: set[str] = set()
+    seen_dois: set[str] = set()
+    results: list[CitationRecord] = []
+
+    for raw in refs_to_fetch:
+        query = _clean_ref_query(raw)
+        if not query:
+            continue
+        try:
+            papers = await _ss_search(query, http, cfg, limit=1)
+        except Exception as exc:
+            _logger.warning("source_ref SS lookup failed for %r: %s", query[:60], exc)
+            continue
+        if not papers:
+            continue
+        p = papers[0]
+        doi = ((p.get("externalIds") or {}).get("DOI") or "").lower()
+        if doi and doi in seen_dois:
+            continue
+        if doi:
+            seen_dois.add(doi)
+        results.append(_to_citation_record(p, "source_ref", seen))
+
     return results
 
 

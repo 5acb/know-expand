@@ -77,12 +77,31 @@ async def run(state: PipelineState, cfg: Config) -> None:
             doc = converter.convert(str(source_path)).document
             structural_zones = _extract_structural_zones(doc, nlp)
 
+            # Extract reference strings from bibliography section before chunking
+            ref_texts = [
+                item.text
+                for item, _ in doc.iterate_items()
+                if item.label == DocItemLabel.REFERENCE and item.text
+            ]
+            (state_dir / "source_refs_raw.json").write_text(
+                json.dumps(ref_texts, indent=2)
+            )
+
             chunker = HybridChunker(
                 tokenizer=cfg.nlp_models.tokenizer,
                 max_tokens=cfg.chunking.max_tokens,
                 merge_peers=True,
             )
             raw_chunks = list(chunker.chunk(doc))
+
+            if len(structural_zones) < 5 and len(raw_chunks) < 3:
+                raise ValueError(
+                    f"Docling extracted too few structural signals from the PDF "
+                    f"(structural_zones={len(structural_zones)}, chunks={len(raw_chunks)}). "
+                    "This is likely a scan-only or image-only PDF. "
+                    "Convert to searchable text first, or supply a URL or text file."
+                )
+
             for idx, chunk in enumerate(raw_chunks):
                 chunk_file = chunks_dir / f"chunk_{idx:04d}.json"
                 chunk_file.write_text(json.dumps({
@@ -95,6 +114,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
                 "path": str(source_path),
                 "title": source_path.stem,
                 "chunk_count": len(raw_chunks),
+                "ref_count": len(ref_texts),
             }
             # Also write source text for reference
             (state_dir / "source.txt").write_text(
@@ -140,11 +160,14 @@ async def run(state: PipelineState, cfg: Config) -> None:
     )
 
     chunk_count = len(list(chunks_dir.glob("chunk_*.json")))
+    source_ref_count = len(json.loads((state_dir / "source_refs_raw.json").read_text())) \
+        if (state_dir / "source_refs_raw.json").exists() else 0
     mark_stage_complete(state_dir, 0)
     emit({
         "event": "stage_complete",
         "stage": 0,
         "chunk_count": chunk_count,
         "structural_zone_count": len(structural_zones),
+        "source_ref_count": source_ref_count,
         "artifact": str(state_dir / "structural_zones.json"),
     })
