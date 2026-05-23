@@ -146,9 +146,12 @@ async def _do_geminicli_call(
             err_text = stderr_b.decode(errors="replace")
             is_quota, retry_s = _parse_geminicli_stderr(err_text)
             if is_quota:
-                # Terminal daily-cap exhausted — mark globally so every router
-                # skips geminicli immediately without spawning more subprocesses.
-                _PROBED_UNAVAILABLE.add(f"geminicli/{cli_model}")
+                # Terminal daily-cap exhausted — mark the original model string
+                # (from models.yaml, e.g. "geminicli/gemini-3.5-flash") so
+                # _next_model() finds it in _PROBED_UNAVAILABLE. Using cli_model
+                # here would add the wrong key ("geminicli/gemini-3.1-pro-preview")
+                # and the skip would silently not fire.
+                _PROBED_UNAVAILABLE.add(model)
                 retry_info = f" resets in {retry_s / 3600:.1f}h" if retry_s else ""
                 raise RuntimeError(f"geminicli quota exhausted{retry_info}")
             raise RuntimeError(f"gemini-cli returned no output (exit {proc.returncode}): {err_text[:400]}")
@@ -224,7 +227,7 @@ async def _do_geminicli_tool_call(
             err_text = stderr_b.decode(errors="replace")
             is_quota, retry_s = _parse_geminicli_stderr(err_text)
             if is_quota:
-                _PROBED_UNAVAILABLE.add(f"geminicli/{cli_model}")
+                _PROBED_UNAVAILABLE.add(model)  # use original models.yaml key, not cli_model
                 retry_info = f" resets in {retry_s / 3600:.1f}h" if retry_s else ""
                 raise RuntimeError(f"geminicli quota exhausted{retry_info}")
             raise RuntimeError(f"gemini-cli returned no output (exit {proc.returncode}): {err_text[:400]}")
