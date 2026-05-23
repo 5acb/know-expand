@@ -93,7 +93,8 @@ Timeout: `cfg.timeouts.get("geminicli_timeout_s", 120)` — currently 600s in `c
 |-------|------|--------|
 | `mistral/*` | `instructor.Mode.JSON` | `MISTRAL_STRUCTURED_OUTPUTS` requires `mistralai` SDK; litellm works with JSON mode |
 | `groq/*` | `instructor.Mode.JSON` | Groq Llama models return parallel tool calls in TOOLS mode |
-| everything else | `instructor.Mode.TOOLS` | Default; correct for OpenAI |
+| `gemini/*` (API, not geminicli) | `instructor.Mode.JSON` | `GEMINI_TOOLS` mode requires native `google-generativeai` SDK; litellm works with JSON mode |
+| everything else | `instructor.Mode.TOOLS` | Default; correct for OpenAI/Anthropic |
 
 ### Per-provider concurrency semaphores
 
@@ -101,7 +102,7 @@ Free-tier providers (Groq, Mistral) get their own `asyncio.Semaphore(3)` to prev
 
 ### `probe_models()`
 
-Runs at pipeline startup — checks env vars and binary presence only (no LLM calls). Adds unavailable models to `_PROBED_UNAVAILABLE`. Local prefixes (`llamacpp/`, `ollama/`, `lm_studio/`, `local/`) always skipped.
+Runs at pipeline startup — checks env vars, binary presence, and server health (no LLM calls). Adds unavailable models to `_PROBED_UNAVAILABLE`. `llamacpp/` is health-checked via HTTP GET to `cfg.llamacpp.base_url/health` and used if the server is up. Prefixes `ollama/`, `lm_studio/`, `local/` are always skipped.
 
 ## Multi-source knowledge (`sources.py`)
 
@@ -110,10 +111,10 @@ Fetches documentation for extracted terms. Routing by `term_type`:
 | `term_type` | Sources |
 |-------------|---------|
 | `tool_library` | PyPI JSON first, then Wikipedia |
-| `concept` | Wikipedia, then arXiv (2 papers) |
-| `academic` | Wikipedia only (SS handles bibliography) |
+| `concept` | Wikipedia first; OpenAlex as fallback (2 papers) |
+| `academic` | Wikipedia first; OpenAlex as fallback (SS handles bibliography) |
 
-Fetched in S4, cached at `audit/sources/sources_{domain_id}.json`. Injected into S5 persona prompts with caps: 8 terms / 1 source / 400 chars — keeps persona prompts under ~15k chars.
+Fetched in S4, cached at `audit/sources/sources_{domain_id}.json`. Injected into S5 persona prompts with depth-aware caps (`config.yaml` `research_context` section): survey 5 terms/1 source/300 chars, standard 8/1/400, deep 15/2/500. Prompt size ~20k chars at deep depth.
 
 Wikipedia requires `User-Agent` header or returns 403. Relevance gate rejects mismatches. PyPI stub filter rejects deprecated backport packages.
 
@@ -131,9 +132,9 @@ Caching threshold: 4,096 tokens for Sonnet 4.6 / Opus 4.7. Deep depth reliably e
 
 Planned `--batch-mode` flag for unattended deep runs: submits all 8-domain × 4 persona calls as one batch at 50% discount. Wall-clock increases to 1–3 hours (batch completes before any reconciler starts); this is intentional and not a concern for overnight runs. **Observability gap to solve before shipping:** the batch polling loop must emit `{"event": "s5_batch_poll", "pending": N, "completed": M}` every poll cycle so the web dashboard reflects progress. Without this the UI shows the pipeline frozen for up to an hour. See Anthropic Batches API docs for polling pattern.
 
-## S8 Citation classifier — abstract requirement
+## S8 Citation classifier — abstract field
 
-`_classify_citation_contexts` in `s8_verify.py` skips entries with no `abstract` field in `bibliography_{domain_id}.json`. Whether abstracts are present depends on whether `_to_citation_record` in `bibliography.py` fetches and stores them. **Verify in a real run:** check a live `bibliography_*.json` for an `abstract` key. If absent, the classifier always emits `s8_citation_classify_skipped` and does nothing. Fix would be fetching the abstract field from the SS `/paper/{id}` response in `_to_citation_record`.
+`_classify_citation_contexts` in `s8_verify.py` skips entries with no `abstract` field. Abstracts **are** fetched and stored: `bibliography.py` includes `"abstract"` in `_SS_FIELDS` and stores it in `_to_citation_record`. `s8_citation_classify_skipped` fires only when SS genuinely returns no abstract for a paper (common for older works).
 
 ## API keys
 
@@ -171,7 +172,8 @@ Single Python file serving a self-contained HTML/CSS/JS dashboard. No external f
 | POST | `/api/run` | Spawn pipeline subprocess |
 | POST | `/api/stop` | Send SIGTERM to pipeline process group |
 | POST | `/api/stage/:id/clear` | Remove stage from pipeline.json |
-| GET | `/api/models` | LiteLLM chat model list + `keys_set` |
+| GET | `/api/section/:id` | Rendered HTML for a section file |
+| GET | `/api/files` | File listing for a state subdirectory |
 | GET | `/api/keys` | Which API keys are set in server env |
 
 **IPC files (in state dir):**

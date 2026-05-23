@@ -18,7 +18,6 @@ from know_expand.centrality import compute_centrality, BOILERPLATE
 from know_expand.config import Config
 from know_expand.state import (
     PipelineState, emit, mark_stage_complete, stage_is_complete,
-    sentinel_exists, write_sentinel,
 )
 from know_expand.union_find import UnionFind
 
