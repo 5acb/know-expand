@@ -246,12 +246,14 @@ Models are tried in order; the `QuotaAwareRouter` falls back automatically on qu
 
 ```yaml
 roles:
-  # Slot 0: geminicli/gemini-3.5-flash — free OAuth CLI (no API key needed)
-  # Slot 1: gemini/gemini-3.5-flash    — paid API fallback (GEMINI_API_KEY)
-  # Local:  llamacpp/glm4              — llama-server at cfg.llamacpp.base_url
+  # Slot 0: geminicli/gemini-3.5-flash  — free OAuth CLI (~1500 req/day cap)
+  # Slot 1: gemini/gemini-2.5-flash     — $0.30/$2.50/M — primary paid fallback
+  # Slot 2: gemini/gemini-3.5-flash     — $1.50/$9.00/M — quality backstop only
+  # NOTE: 3.5-flash ≠ 2.5-flash. 3.5-flash (Google I/O 2026) costs 5× more.
 
   agent:           # LangGraph ReAct graphs — require reliable tool calling
     - "geminicli/gemini-3.5-flash"
+    - "gemini/gemini-2.5-flash"
     - "gemini/gemini-3.5-flash"
     - "groq/llama-3.3-70b-versatile"
     - "claude-sonnet-4-6"
@@ -259,9 +261,10 @@ roles:
 
   researcher:      # Long output, quality matters — no cheap shortcuts
     - "geminicli/gemini-3.5-flash"
+    - "gemini/gemini-2.5-flash"
+    - "mistral/mistral-small-latest"
     - "gemini/gemini-3.5-flash"
     - "groq/llama-3.3-70b-versatile"
-    - "mistral/mistral-small-latest"
     - "claude-opus-4-7"
     - "claude-sonnet-4-6"
     - "llamacpp/glm4"
@@ -270,7 +273,7 @@ roles:
     - "geminicli/gemini-3.5-flash"
     - "groq/llama-3.1-8b-instant"
     - "groq/llama-3.3-70b-versatile"
-    - "gemini/gemini-3.5-flash"
+    - "gemini/gemini-2.5-flash"
     - "mistral/mistral-small-latest"
     - "llamacpp/glm4"
 
@@ -278,7 +281,7 @@ roles:
     - "geminicli/gemini-3.5-flash"
     - "groq/llama-3.1-8b-instant"
     - "groq/llama-3.3-70b-versatile"
-    - "gemini/gemini-3.5-flash"
+    - "gemini/gemini-2.5-flash"
     - "mistral/mistral-small-latest"
     - "llamacpp/glm4"
 ```

@@ -196,4 +196,5 @@ Single Python file serving a self-contained HTML/CSS/JS dashboard. No external f
 - `[NEEDS_CITATION]` is logged, never a build failure
 - No Chinese API providers
 - Models and llama.cpp are pre-configured in `~/ccr` — do not pollute home or other locations
-- `gemini/gemini-3.5-flash` is the API model; `geminicli/gemini-3.5-flash` uses the free OAuth CLI — they are different providers
+- `gemini/gemini-3.5-flash` is the API model; `geminicli/gemini-3.5-flash` uses the free OAuth CLI — they are different providers and different costs ($1.50/$9.00 per M vs free)
+- `gemini/gemini-2.5-flash` ($0.30/$2.50/M) is the intended cheap paid fallback — do NOT confuse with 3.5-flash which is 5× more expensive
