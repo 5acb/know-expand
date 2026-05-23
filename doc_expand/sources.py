@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import httpx
+from aiolimiter import AsyncLimiter
 from pydantic import BaseModel
 
 _logger = logging.getLogger("doc_expand.sources")
@@ -27,11 +28,29 @@ _WIKI_HEADERS = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
 
 class FetchedSource(BaseModel):
     term: str
-    source_type: Literal["wikipedia", "pypi", "arxiv"]
+    source_type: Literal["wikipedia", "pypi", "arxiv", "openalex"]
     title: str
     url: str
     content: str   # truncated excerpt, max ~1500 chars
     fetched_at: str  # ISO timestamp
+
+
+# OpenAlex allows 10 req/s for polite pool (with email in User-Agent).
+# Lazy-initialised so the module can be imported without a Config in scope.
+_OPENALEX_LIMITER: AsyncLimiter | None = None
+
+
+def _get_openalex_limiter() -> AsyncLimiter:
+    global _OPENALEX_LIMITER
+    if _OPENALEX_LIMITER is None:
+        _OPENALEX_LIMITER = AsyncLimiter(10, 1)
+    return _OPENALEX_LIMITER
+
+
+_OPENALEX_HEADERS = {
+    "User-Agent": "doc-expand/1.0 (mailto:research@example.com)",
+    "Accept": "application/json",
+}
 
 
 def _now_iso() -> str:
@@ -47,6 +66,47 @@ def _strip_markup(text: str) -> str:
     # Collapse multiple blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _is_searchable_term(term: str) -> bool:
+    """Return False for terms that are structurally unsuitable as external search queries.
+
+    Uses only document-agnostic structural rules — no hardcoded domain vocabulary,
+    so the same filter works for any input document.
+    """
+    t = term.strip()
+    tl = t.lower()
+
+    # Too short or too long
+    if len(t) < 3 or len(t.split()) > 4:
+        return False
+
+    # Phrases starting with determiners/articles — sentence fragments, not concepts
+    if re.match(r'^(a |an |the |every |any |all |some |each |this |that |these |those )', tl):
+        return False
+
+    # "N <noun>" patterns — metrics/counts, not searchable concepts
+    # e.g. "300 terms", "24 months", "8 domains"
+    if re.match(r'^\d+\s+\w+', tl):
+        return False
+
+    # Possessive forms — refer to something else, not a standalone concept
+    # e.g. "stage 5's", "model's output"
+    if re.search(r"'s\b", tl):
+        return False
+
+    # snake_case or camelCase — almost certainly a variable/identifier artifact
+    if re.search(r'[a-z]_[a-z]', t) or re.search(r'[a-z][A-Z]', t):
+        return False
+
+    # Verb phrases — action descriptions extracted as terms
+    # e.g. "running docling", "mapping chunks", "writing sections"
+    if re.match(r'^(using|running|writing|reading|loading|saving|mapping|fetching|'
+                r'building|parsing|generating|computing|extracting|merging|'
+                r'resolving|validating|processing|producing|inserting)\b', tl):
+        return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -171,20 +231,29 @@ async def _fetch_pypi(term: str, http: httpx.AsyncClient) -> "FetchedSource | No
 
 
 async def _fetch_arxiv(
-    query: str, http: httpx.AsyncClient, max_results: int = 3
+    query: str, http: httpx.AsyncClient, domain_context: str = "", max_results: int = 3
 ) -> "list[FetchedSource]":
     """Fetch arXiv abstracts for a query.
 
     Uses `ti+abs` field search which returns more relevant results than bare `all:`.
     Multi-word queries are space-joined (Lucene AND within field).
+
+    Short terms (≤2 words) are enriched with domain_context to avoid off-topic results
+    (e.g. "domain" alone → astronomy; "domain NLP" → relevant ML papers).
     """
     # For multi-word queries search title OR abstract; single words use all fields.
     # Pass plain strings — httpx params= handles URL encoding automatically.
     words = query.strip().split()
-    if len(words) > 1:
-        arxiv_query = f"ti:{query} OR abs:{query}"
+
+    # Enrich short/generic queries with domain context to improve relevance
+    effective_query = query
+    if domain_context and len(words) <= 2:
+        effective_query = f"{query} {domain_context}"
+
+    if len(effective_query.strip().split()) > 1:
+        arxiv_query = f"ti:{effective_query} OR abs:{effective_query}"
     else:
-        arxiv_query = f"all:{query}"
+        arxiv_query = f"all:{effective_query}"
     results: list[FetchedSource] = []
     try:
         resp = await http.get(
@@ -225,6 +294,60 @@ async def _fetch_arxiv(
     return results
 
 
+def _reconstruct_abstract(inv_idx: dict) -> str:
+    """Reconstruct plaintext from an OpenAlex abstract_inverted_index."""
+    if not inv_idx:
+        return ""
+    words = sorted(
+        (pos, word)
+        for word, positions in inv_idx.items()
+        for pos in positions
+    )
+    return " ".join(w for _, w in words)
+
+
+async def _fetch_openalex_works(term: str, http: httpx.AsyncClient) -> "list[FetchedSource]":
+    """Fetch top cited works from OpenAlex for a term, returning up to 2 results."""
+    results: list[FetchedSource] = []
+    try:
+        limiter = _get_openalex_limiter()
+        async with limiter:
+            resp = await http.get(
+                "https://api.openalex.org/works",
+                params={
+                    "search": term,
+                    "filter": "has_abstract:true",
+                    "sort": "cited_by_count:desc",
+                    "per-page": 3,
+                },
+                headers=_OPENALEX_HEADERS,
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        for work in data.get("results", []):
+            title = work.get("title") or ""
+            inv_idx = work.get("abstract_inverted_index") or {}
+            abstract_text = _reconstruct_abstract(inv_idx)
+            if not abstract_text:
+                continue
+            doi = work.get("doi") or ""
+            results.append(FetchedSource(
+                term=term,
+                source_type="openalex",
+                title=title,
+                url=doi,
+                content=abstract_text[:600],
+                fetched_at=_now_iso(),
+            ))
+            if len(results) >= 2:
+                break
+    except Exception as exc:
+        _logger.debug("openalex fetch failed for %r: %s", term, exc)
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Dispatch by term type
 # ---------------------------------------------------------------------------
@@ -233,6 +356,7 @@ async def fetch_sources_for_term(
     term: str,
     term_type: str,
     http: httpx.AsyncClient,
+    domain_label: str = "",
 ) -> "list[FetchedSource]":
     """Fetch knowledge sources for a single term based on its type.
 
@@ -240,7 +364,13 @@ async def fetch_sources_for_term(
       "tool_library" -> PyPI first, then Wikipedia
       "concept"      -> Wikipedia, then arXiv (2 papers)
       "academic"     -> Wikipedia only (SS handles bibliography)
+
+    domain_label: passed to arXiv fetcher to enrich short/generic queries.
     """
+    if not _is_searchable_term(term):
+        _logger.debug("skipping unsearchable term %r (type=%s)", term, term_type)
+        return []
+
     sources: list[FetchedSource] = []
 
     if term_type == "tool_library":
@@ -255,13 +385,19 @@ async def fetch_sources_for_term(
         wiki = await _fetch_wikipedia(term, http)
         if wiki:
             sources.append(wiki)
-        arxiv_results = await _fetch_arxiv(term, http, max_results=2)
+        else:
+            oa_results = await _fetch_openalex_works(term, http)
+            sources.extend(oa_results)
+        arxiv_results = await _fetch_arxiv(term, http, domain_context=domain_label, max_results=2)
         sources.extend(arxiv_results)
 
     else:  # "academic" or fallback
         wiki = await _fetch_wikipedia(term, http)
         if wiki:
             sources.append(wiki)
+        else:
+            oa_results = await _fetch_openalex_works(term, http)
+            sources.extend(oa_results)
 
     return sources
 
@@ -270,6 +406,7 @@ async def fetch_sources_for_terms(
     terms: list[tuple[str, str]],
     http: httpx.AsyncClient,
     concurrency: int = 4,
+    domain_label: str = "",
 ) -> "dict[str, list[FetchedSource]]":
     """Fetch knowledge sources for multiple terms concurrently.
 
@@ -277,6 +414,8 @@ async def fetch_sources_for_terms(
         terms: List of (term_name, term_type) pairs.
         http: Shared async HTTP client.
         concurrency: Maximum parallel requests.
+        domain_label: Domain context string (e.g. "NLP", "computer vision") used to
+            enrich short/generic arXiv queries for concept-type terms.
 
     Returns:
         Dict mapping term_name -> list of FetchedSource. Terms with no results
@@ -288,7 +427,7 @@ async def fetch_sources_for_terms(
     async def _fetch_one(term: str, term_type: str) -> None:
         async with sem:
             try:
-                fetched = await fetch_sources_for_term(term, term_type, http)
+                fetched = await fetch_sources_for_term(term, term_type, http, domain_label=domain_label)
                 if fetched:
                     results[term] = fetched
             except Exception as exc:

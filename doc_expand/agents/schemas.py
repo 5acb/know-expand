@@ -265,6 +265,12 @@ class ConnectorOutput(BaseModel):
 # Stage 6 — Verify
 # ---------------------------------------------------------------------------
 
+class CitationCheck(BaseModel):
+    relation: Literal["supports", "contradicts", "mentions"]
+    reason: str
+
+
+
 class CitationAuditItem(BaseModel):
     section_file: str
     marker: str                 # the [NEEDS_CITATION] text or citation key

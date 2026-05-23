@@ -36,6 +36,7 @@ timeouts:
   http_fetch_seconds: 30
   openalex_seconds: 10
   http_async_seconds: 30
+  geminicli_timeout_s: 600   # allow 10 min for long-form persona generation
 
 adversarial_rounds:
   survey: 1
@@ -65,6 +66,28 @@ graph_defaults:
 llamacpp:
   base_url: "http://127.0.0.1:8080"
   # health_path: /health  (llama-server default)
+
+# S5 persona prompt sizing.
+# knowledge sources caps: survey=~1.5k / standard=~3.2k / deep=~15k chars.
+# All well under the ~44k that caused geminicli timeouts.
+# Raise deep.sources_max_terms if domain has 11+ core nodes and output quality is thin.
+research_context:
+  nodes_top_n: 30
+  sources_max_terms:
+    survey: 5
+    standard: 8
+    deep: 15
+  sources_max_per_term:
+    survey: 1
+    standard: 1
+    deep: 2
+  sources_max_chars:
+    survey: 300
+    standard: 400
+    deep: 500
+
+critic_thinking:
+  budget_tokens: 0        # 0 = disabled; 8192 = recommended for deep critic runs
 
 boilerplate_stop_list:
   - introduction

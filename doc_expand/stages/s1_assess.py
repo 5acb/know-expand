@@ -217,8 +217,9 @@ Turn 5+ — Fill remaining fields: \
 3. MC questions must have 4–7 options including one free-form escape ("Other — describe below").
 4. Never ask about job title or professional background as a standalone question. \
    Infer background from what they know and what they want to do.
-5. Set interview_complete=true once turns 1–3 and at least two of turns 4–5+ are done, \
-   or turn >= {max_turns}.
+5. You MUST NOT set interview_complete=true while "Fields still needed" lists anything. \
+   The only exceptions are: (a) turn >= {max_turns}, or (b) the reader stopped responding. \
+   If all fields show as covered, set interview_complete=true.
 """
 
 _CRITICAL_FIELDS = [
@@ -231,6 +232,45 @@ _CRITICAL_FIELDS = [
     "preferred_analogy_domain",
     "frustration_points",
 ]
+
+# Keywords whose presence in question OR answer text signals that a field was addressed.
+# Match is done on the lowercased concatenation of the Q and A texts.
+_FIELD_COVERAGE_KEYWORDS: dict[str, list[str]] = {
+    "familiarity_level":      ["familiar", "already know", "know well", "experience with",
+                                "expertise", "novice", "practitioner", "expert", "aware"],
+    "learning_goal":          ["want to do", "after reading", "goal", "use this for", "plan to",
+                                "build", "implement", "evaluate", "teach", "research", "apply"],
+    "time_available":         ["how deep", "time", "overview", "mastery", "quick",
+                                "30 min", "2 hr", "days", "depth"],
+    "unknown_concepts":       ["don't know", "not sure", "confus", "explain", "understand",
+                                "never heard", "unfamiliar", "struggling with", "gaps"],
+    "math_comfort":           ["math", "equation", "notation", "formula", "derivation",
+                                "formal", "proof", "symbol", "latex"],
+    "primary_use_case":       ["problem", "project", "work on", "applying", "use case",
+                                "decision", "system", "product", "research question"],
+    "preferred_analogy_domain": ["know well", "background in", "field you", "expert in",
+                                  "profession", "analogy", "compare to", "like a"],
+    "frustration_points":     ["tripped up", "frustrat", "difficult", "hard to understand",
+                                "confused by", "struggled", "barrier", "wall", "stuck"],
+}
+
+
+def _detect_covered_fields(qa_history: list[dict]) -> set[str]:
+    """Return the set of _CRITICAL_FIELDS addressed in the conversation so far.
+
+    Scans the lowercased concatenation of all questions and answers for the
+    keyword signatures of each field. Imperfect but sufficient to detect when
+    the agent has drifted past a dimension without covering it.
+    """
+    all_text = " ".join(
+        (pair.get("question", "") + " " + pair.get("answer", "")).lower()
+        for pair in qa_history
+    )
+    return {
+        field
+        for field, keywords in _FIELD_COVERAGE_KEYWORDS.items()
+        if any(kw in all_text for kw in keywords)
+    }
 
 
 def _extract_embedded_options(text: str, existing_options: list[str]) -> tuple[str, list[str]]:
@@ -284,11 +324,9 @@ def _build_interview_prompt(
         history_lines.append(f"A{i + 1}: {pair['answer']}")
     history_text = "\n".join(history_lines) if history_lines else "(no questions asked yet)"
 
-    # Guess which fields have been covered based on history length
-    asked_count = len(qa_history)
-    covered = _CRITICAL_FIELDS[:asked_count] if asked_count < len(_CRITICAL_FIELDS) else _CRITICAL_FIELDS
+    covered = _detect_covered_fields(qa_history)
     remaining = [f for f in _CRITICAL_FIELDS if f not in covered]
-    remaining_fields = ", ".join(remaining) if remaining else "all covered — may wrap up"
+    remaining_fields = ", ".join(remaining) if remaining else "all covered — you MAY set interview_complete=true"
 
     return _INTERVIEW_SYSTEM.format(
         document_context=document_context,
@@ -415,7 +453,26 @@ async def _conduct_interview(
         decision: InterviewDecision = await router.call(messages, InterviewDecision)
 
         if decision.interview_complete or decision.next_question is None:
-            emit({"event": "stage1_interview_complete", "turns_completed": turn, "reason": "agent_declared_complete"})
+            covered = _detect_covered_fields(qa_history)
+            uncovered = [f for f in _CRITICAL_FIELDS if f not in covered]
+            if uncovered and turn < _MIN_TURNS:
+                # Agent declared complete but critical signals are missing.
+                # Override — the next iteration rebuilds the prompt with accurate
+                # remaining_fields so the agent knows what it still needs to ask.
+                emit({
+                    "event": "stage1_coverage_override",
+                    "turn": turn,
+                    "uncovered_fields": uncovered,
+                })
+                # Synthesise a stub answer so the loop can continue; the agent
+                # declared complete rather than asking, so there is no real answer.
+                # Next iteration's prompt will list the uncovered fields explicitly.
+                qa_history.append({"question": "(coverage check)", "answer": "(agent skipped)"})
+                turn += 1
+                continue
+            emit({"event": "stage1_interview_complete", "turns_completed": turn,
+                  "reason": "agent_declared_complete",
+                  "uncovered_fields": [f for f in _CRITICAL_FIELDS if f not in covered]})
             break
 
         q = decision.next_question
