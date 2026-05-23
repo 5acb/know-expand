@@ -2,7 +2,7 @@ from pathlib import Path
 
 from langgraph.graph import StateGraph, END
 
-from know_expand.config import Config, load_config
+from know_expand.config import Config
 from know_expand.state import PipelineState, emit, load_pipeline_json
 from know_expand.stages import (
     s0_ingest,

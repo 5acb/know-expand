@@ -67,7 +67,7 @@ def _insert_primer_by_position(section_path: Path, term: str, position: str, pri
     existing = section_path.read_text()
 
     # Deduplicate: don't insert a primer for the same term twice
-    marker = f"> **Primer:**"
+    marker = "> **Primer:**"
     term_marker = f"*{term}*"
     if marker.lower() in existing.lower() and term_marker.lower() in existing.lower():
         return f"Primer for '{term}' already exists — skipped."
