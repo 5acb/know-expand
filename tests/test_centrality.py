@@ -1,5 +1,5 @@
-from doc_expand.centrality import compute_centrality
-from doc_expand.config import CentralityConfig
+from know_expand.centrality import compute_centrality
+from know_expand.config import CentralityConfig
 
 _CFG = CentralityConfig()
 

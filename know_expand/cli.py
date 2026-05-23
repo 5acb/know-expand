@@ -8,8 +8,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-from doc_expand.config import load_config
-from doc_expand.state import emit, load_pipeline_json, new_run_id, setup_logging
+from know_expand.config import load_config
+from know_expand.state import emit, load_pipeline_json, new_run_id, setup_logging
 
 
 def _install_sigterm_handler() -> None:
@@ -55,7 +55,7 @@ def main() -> None:
         raw_argv = raw_argv[1:]
 
     parser = argparse.ArgumentParser(
-        prog="doc-expand",
+        prog="know-expand",
         description="Expand a technical document into a research-grade knowledge document.",
     )
     parser.add_argument("input", nargs="?", help="File path, URL, or - for stdin")
@@ -113,12 +113,12 @@ def main() -> None:
 
     # Handle subcommands first
     if args.command == "tail":
-        from doc_expand.observe import cmd_tail
+        from know_expand.observe import cmd_tail
         cmd_tail(args.run_id, args.runs_dir)
         return
 
     if args.command == "serve":
-        from doc_expand.observe import cmd_serve
+        from know_expand.observe import cmd_serve
         cmd_serve(args.runs_dir, port=args.port)
         return
 
@@ -162,7 +162,7 @@ def main() -> None:
     if args.concurrency is not None:
         cfg.concurrency.default = args.concurrency
 
-    from doc_expand.pipeline import run_pipeline
+    from know_expand.pipeline import run_pipeline
 
     asyncio.run(run_pipeline(
         input_path=input_path,

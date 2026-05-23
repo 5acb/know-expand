@@ -8,13 +8,13 @@ from pathlib import Path
 
 import httpx
 
-from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import GapAnalysisResult, GapFinding
-from doc_expand.bibliography import fetch_anchor_neighbors, fetch_anchors, fetch_bibliography, reset_ss_limiter
-from doc_expand.config import Config
-from doc_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
+from know_expand.agents.base import make_router
+from know_expand.agents.schemas import GapAnalysisResult, GapFinding
+from know_expand.bibliography import fetch_anchor_neighbors, fetch_anchors, fetch_bibliography, reset_ss_limiter
+from know_expand.config import Config
+from know_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
 
-_logger = logging.getLogger("doc_expand.s3")
+_logger = logging.getLogger("know_expand.s4")
 
 _GAP_FINDER_PROMPT = """\
 You are a research gap analyst. Given the terms from a domain's knowledge graph and \
@@ -229,7 +229,7 @@ async def _process_domain(
 
     if not sources_cache.exists():
         try:
-            from doc_expand.sources import fetch_sources_for_terms  # noqa: PLC0415
+            from know_expand.sources import fetch_sources_for_terms  # noqa: PLC0415
             # Only fetch core + supporting terms, not incidental
             nodes_for_fetch = domain_nodes or []
             terms_to_fetch = [

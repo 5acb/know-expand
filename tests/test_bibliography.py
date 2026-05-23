@@ -1,4 +1,4 @@
-"""Tests for doc_expand.bibliography — two-bucket Semantic Scholar fetcher."""
+"""Tests for know_expand.bibliography — two-bucket Semantic Scholar fetcher."""
 
 import json
 import re
@@ -6,13 +6,13 @@ from unittest.mock import patch
 
 import pytest
 
-from doc_expand.agents.schemas import CitationRecord
-from doc_expand.bibliography import (
+from know_expand.agents.schemas import CitationRecord
+from know_expand.bibliography import (
     _to_citation_record,
     fetch_anchors,
     fetch_bibliography,
 )
-from doc_expand.config import BibliographyConfig, Config, CentralityConfig, ConcurrencyConfig, RateLimitConfig
+from know_expand.config import BibliographyConfig, Config, CentralityConfig, ConcurrencyConfig, RateLimitConfig
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +124,7 @@ async def test_deduplicate_by_doi(httpx_mock, cfg):
     )
 
     import httpx as _httpx
-    with patch("doc_expand.bibliography._ss_limiter", _NoOpLimiter()):
+    with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
         async with _httpx.AsyncClient() as client:
             results = await fetch_anchors("test domain", client, cfg, n=3)
 
@@ -146,7 +146,7 @@ async def test_deduplicate_doi_none_kept(httpx_mock, cfg):
     )
 
     import httpx as _httpx
-    with patch("doc_expand.bibliography._ss_limiter", _NoOpLimiter()):
+    with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
         async with _httpx.AsyncClient() as client:
             results = await fetch_anchors("no doi domain", client, cfg, n=2)
 
@@ -173,7 +173,7 @@ async def test_fetch_anchors_returns_top_cited(httpx_mock, cfg):
     )
 
     import httpx as _httpx
-    with patch("doc_expand.bibliography._ss_limiter", _NoOpLimiter()):
+    with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
         async with _httpx.AsyncClient() as client:
             results = await fetch_anchors("attention mechanism", client, cfg, n=3)
 
@@ -206,7 +206,7 @@ async def test_frontier_papers_have_correct_bucket(httpx_mock):
 
     import httpx as _httpx
     cfg = _make_cfg()
-    with patch("doc_expand.bibliography._ss_limiter", _NoOpLimiter()):
+    with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
         async with _httpx.AsyncClient() as client:
             results = await fetch_bibliography("transformers", "survey", cfg, client)
 
@@ -245,7 +245,7 @@ async def test_bucket_split_survey(httpx_mock):
     assert cfg.bibliography.depth_totals["survey"] == 10
     assert cfg.bibliography.foundational_fraction == 0.65
 
-    with patch("doc_expand.bibliography._ss_limiter", _NoOpLimiter()):
+    with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
         async with _httpx.AsyncClient() as client:
             results = await fetch_bibliography("neural networks", "survey", cfg, client)
 
@@ -281,7 +281,7 @@ async def test_bucket_split_standard(httpx_mock):
     cfg = _make_cfg()
     assert cfg.bibliography.depth_totals["standard"] == 30
 
-    with patch("doc_expand.bibliography._ss_limiter", _NoOpLimiter()):
+    with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
         async with _httpx.AsyncClient() as client:
             results = await fetch_bibliography("language models", "standard", cfg, client)
 

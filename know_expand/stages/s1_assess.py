@@ -21,10 +21,10 @@ import sys
 import time
 from pathlib import Path
 
-from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import ConceptList, InterviewDecision, UserProfile
-from doc_expand.config import Config
-from doc_expand.state import (
+from know_expand.agents.base import make_router
+from know_expand.agents.schemas import ConceptList, InterviewDecision, UserProfile
+from know_expand.config import Config
+from know_expand.state import (
     PipelineState,
     atomic_write,
     emit,

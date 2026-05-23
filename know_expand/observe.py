@@ -1,4 +1,4 @@
-"""Observability commands: `doc-expand tail` and `doc-expand serve`.
+"""Observability commands: `know-expand tail` and `know-expand serve`.
 
 tail  — streams formatted event lines to stdout (pipe-friendly, greppable)
 serve — split-pane dashboard at localhost: stage list + stage detail (progress + results)
@@ -146,7 +146,7 @@ _PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>doc-expand</title>
+<title>know-expand</title>
 <style>
 :root {
   --bg: #0d0f18; --surface: #131621; --surface2: #191c2e; --surface3: #1f2235;
@@ -679,7 +679,7 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, -apple
 <div id="topbar">
   <div id="topbar-logo">
     <div id="pulse"></div>
-    <h1>doc-expand</h1>
+    <h1>know-expand</h1>
   </div>
   <div class="topbar-sep"></div>
   <span class="run-id" id="run-label"></span>
@@ -2235,13 +2235,13 @@ def _load_stage_artifacts(stage_id: str, state_dir: Path) -> dict:
                             did = evt.get("domain_id", "")
                             if not did:
                                 continue
-                            if ev == "s4_personas_done":
+                            if ev == "s5_personas_done":
                                 personas_done.add(did)
-                            elif ev == "s4_reconciler_done":
+                            elif ev == "s5_reconciler_done":
                                 reconciled.add(did)
-                            elif ev == "s4_critic_done":
+                            elif ev == "s5_critic_done":
                                 critic_done.add(did)
-                            elif ev == "s4_section_written":
+                            elif ev == "s5_section_written":
                                 section_written.add(did)
                     except Exception:
                         pass
@@ -2444,7 +2444,7 @@ def _list_files(dir_param: str) -> dict:
 
 def _spawn_pipeline(runs_dir: Path, params: dict) -> int:
     """Determine run_id, create run dir tree, clear Q&A state, spawn pipeline subprocess, return PID."""
-    from doc_expand.state import new_run_id as _new_run_id
+    from know_expand.state import new_run_id as _new_run_id
 
     is_resume = params.get("resume", False)
 
@@ -2488,11 +2488,11 @@ def _spawn_pipeline(runs_dir: Path, params: dict) -> int:
             except Exception:
                 pass
 
-    cli_path = Path(sys.executable).parent / "doc-expand"
+    cli_path = Path(sys.executable).parent / "know-expand"
     if cli_path.exists():
         cmd: list = [str(cli_path)]
     else:
-        cmd = [sys.executable, "-m", "doc_expand.cli"]
+        cmd = [sys.executable, "-m", "know_expand.cli"]
 
     input_path = params.get("input", "")
     # For resume, fall back to input_path stored in pipeline.json if not supplied

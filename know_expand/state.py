@@ -1,5 +1,5 @@
 """
-Logging and state management for the doc-expand pipeline.
+Logging and state management for the know-expand pipeline.
 
 Log layout per run (runs/{run_id}/logs/):
   events.jsonl  — every emit() call as a timestamped JSON Line
@@ -27,7 +27,7 @@ from typing import TextIO, TypedDict
 _run_id: str = ""
 _log_dir: Path | None = None
 _event_fh: TextIO | None = None
-_logger = logging.getLogger("doc_expand")
+_logger = logging.getLogger("know_expand")
 
 
 def new_run_id() -> str:
@@ -76,7 +76,7 @@ def setup_logging(run_id: str, log_dir: Path) -> Path:
     error_handler.setLevel(logging.WARNING)
     error_handler.setFormatter(fmt)
 
-    root = logging.getLogger("doc_expand")
+    root = logging.getLogger("know_expand")
     root.setLevel(logging.DEBUG)
     root.handlers.clear()
     root.addHandler(pipeline_handler)

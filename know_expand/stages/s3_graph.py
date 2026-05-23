@@ -8,13 +8,13 @@ from pathlib import Path
 
 import httpx
 
-from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import (
+from know_expand.agents.base import make_router
+from know_expand.agents.schemas import (
     TaxonomyProposal, KnowledgeGraph,
     GraphNode, DomainProposal,
 )
-from doc_expand.config import Config
-from doc_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
+from know_expand.config import Config
+from know_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
 
 _BOLD  = "\033[1m"
 _CYAN  = "\033[36m"
@@ -34,7 +34,7 @@ async def _explain_taxonomy(
     splitter: TaxonomyProposal,
     router,
 ) -> None:
-    from doc_expand.agents.schemas import TaxonomyExplanation
+    from know_expand.agents.schemas import TaxonomyExplanation
     msg = [{
         "role": "user",
         "content": _EXPLAIN_PROMPT.format(

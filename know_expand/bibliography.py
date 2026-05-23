@@ -9,9 +9,9 @@ import re
 import httpx
 from aiolimiter import AsyncLimiter
 
-from doc_expand.agents.schemas import CitationRecord
-from doc_expand.config import Config
-from doc_expand.state import emit
+from know_expand.agents.schemas import CitationRecord
+from know_expand.config import Config
+from know_expand.state import emit
 
 _FIELD_BASELINES: dict[tuple[str, int], float] = {
     # Field, Year -> approximate avg citation count for a paper in that field/year
@@ -61,7 +61,7 @@ def _mncs_score(citation_count: int, field: str, year: int, field_baselines: dic
 
 _SS_API_KEY: str = os.environ.get("SS_API_KEY", "")
 
-_logger = logging.getLogger("doc_expand.bibliography")
+_logger = logging.getLogger("know_expand.bibliography")
 _ss_limiter: AsyncLimiter | None = None
 _ss_interval: float = 20.0  # cached for emit
 _ss_cooldown_until: float = 0.0  # monotonic clock; all tasks pause until this time

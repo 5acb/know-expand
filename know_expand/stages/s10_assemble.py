@@ -7,9 +7,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from doc_expand.agents.schemas import AssemblyManifest
-from doc_expand.config import Config
-from doc_expand.state import (
+from know_expand.agents.schemas import AssemblyManifest
+from know_expand.config import Config
+from know_expand.state import (
     PipelineState,
     atomic_write,
     emit,
@@ -17,7 +17,7 @@ from doc_expand.state import (
     stage_is_complete,
 )
 
-_logger = logging.getLogger("doc_expand.s7")
+_logger = logging.getLogger("know_expand.s10")
 
 
 # ---------------------------------------------------------------------------

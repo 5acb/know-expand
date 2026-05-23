@@ -1,14 +1,14 @@
-# doc-expand — CLAUDE.md
+# know-expand — CLAUDE.md
 
 Multi-agent CLI that turns any technical document (PDF, URL, text) into a research-grade knowledge expansion. Runs as a LangGraph pipeline with an optional web dashboard.
 
 ## Run / serve
 
 ```bash
-uv run doc-expand path/to/paper.pdf          # run pipeline (stdout progress)
-uv run doc-expand serve                       # web UI at http://localhost:7842
-uv run doc-expand serve --port 7843          # custom port
-uv run doc-expand --status                   # check current state_dir
+uv run know-expand path/to/paper.pdf          # run pipeline (stdout progress)
+uv run know-expand serve                       # web UI at http://localhost:7842
+uv run know-expand serve --port 7843          # custom port
+uv run know-expand --status                   # check current state_dir
 ```
 
 Each run creates `runs/{run_id}/` containing `state/`, `logs/`, `output/`.
@@ -39,7 +39,7 @@ Stages skip automatically if already complete (`stage_is_complete()` checks `pip
 ## Key files
 
 ```
-doc_expand/
+know_expand/
   cli.py          — entry point; SIGTERM handler emits run_stopped then sys.exit(0)
   pipeline.py     — LangGraph StateGraph; writes run_id + input_path to pipeline.json at startup
   state.py        — emit(), mark_stage_complete(), PipelineState TypedDict, log setup

@@ -10,10 +10,10 @@ import httpx
 import litellm
 from pydantic import BaseModel
 
-from doc_expand.config import Config
-from doc_expand.state import emit
+from know_expand.config import Config
+from know_expand.state import emit
 
-_logger = logging.getLogger("doc_expand.router")
+_logger = logging.getLogger("know_expand.router")
 
 T = TypeVar("T", bound=BaseModel)
 
