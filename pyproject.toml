@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "doc-expand"
+name = "know-expand"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -34,7 +34,7 @@ dependencies = [
 ]
 
 [project.scripts]
-doc-expand = "doc_expand.cli:main"
+know-expand = "know_expand.cli:main"
 
 [project.optional-dependencies]
 dev = [

@@ -1,4 +1,4 @@
-"""Tests for doc_expand.stages.s6_verify."""
+"""Tests for know_expand.stages.s6_verify."""
 
 import json
 from pathlib import Path
@@ -6,14 +6,14 @@ from unittest.mock import patch
 
 import pytest
 
-from doc_expand.config import (
+from know_expand.config import (
     BibliographyConfig,
     CentralityConfig,
     ConcurrencyConfig,
     Config,
     RateLimitConfig,
 )
-from doc_expand.stages import s6_verify
+from know_expand.stages import s6_verify
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +166,7 @@ async def test_s6_citation_index_contains_all_valid_ids(tmp_path):
 @pytest.mark.asyncio
 async def test_s6_idempotent_when_complete(tmp_path):
     """Stage 6 is skipped if already marked complete."""
-    from doc_expand.state import mark_stage_complete
+    from know_expand.state import mark_stage_complete
 
     cfg = _make_cfg()
     state_dir = tmp_path / "state"

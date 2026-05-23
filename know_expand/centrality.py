@@ -1,4 +1,4 @@
-from doc_expand.config import CentralityConfig
+from know_expand.config import CentralityConfig
 
 _DEFAULT = CentralityConfig()
 

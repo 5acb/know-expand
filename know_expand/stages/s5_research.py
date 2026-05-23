@@ -9,17 +9,17 @@ from pathlib import Path
 
 import httpx
 
-from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import (
+from know_expand.agents.base import make_router
+from know_expand.agents.schemas import (
     CitationRecord,
     CritiqueResult,
     DomainSummary,
     PersonaOutput,
     ReconcilerOutput,
 )
-from doc_expand.bibliography import _ss_search, _get_ss_limiter, _to_citation_record, _make_id
-from doc_expand.config import Config
-from doc_expand.state import (
+from know_expand.bibliography import _ss_search, _get_ss_limiter, _to_citation_record, _make_id
+from know_expand.config import Config
+from know_expand.state import (
     PipelineState,
     atomic_write,
     emit,
@@ -27,7 +27,7 @@ from doc_expand.state import (
     stage_is_complete,
 )
 
-_logger = logging.getLogger("doc_expand.s4")
+_logger = logging.getLogger("know_expand.s5")
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -412,7 +412,7 @@ async def _expand_bibliography(
         return bibliography, personas
 
     emit({
-        "event": "s4_bibliography_expansion_start",
+        "event": "s5_bibliography_expansion_start",
         "domain_id": domain_id,
         "missing_citation_ids": len(missing_ids),
         "needs_citation_markers": len(needs_citation_contexts),
@@ -441,7 +441,7 @@ async def _expand_bibliography(
             )
     except Exception as exc:
         _logger.warning("s4 bibliography expansion: SS unavailable, skipping (%s)", exc)
-        emit({"event": "s4_bibliography_expansion_skipped", "domain_id": domain_id, "reason": str(exc)[:120]})
+        emit({"event": "s5_bibliography_expansion_skipped", "domain_id": domain_id, "reason": str(exc)[:120]})
         return bibliography, personas
 
     # Process missing-ID results
@@ -492,7 +492,7 @@ async def _expand_bibliography(
 
     updated_bibliography = bibliography + new_papers
     emit({
-        "event": "s4_bibliography_expanded",
+        "event": "s5_bibliography_expanded",
         "domain_id": domain_id,
         "new_papers": len(new_papers),
         "needs_citation_resolved": nc_resolved,
@@ -664,7 +664,7 @@ async def _research_domain(
     sentinel = sections_dir / f"section_{domain_id}.md.done"
     if sentinel.exists():
         emit({
-            "event": "s4_domain_start",
+            "event": "s5_domain_start",
             "domain_id": domain_id,
             "skipped": True,
             "reason": "sentinel_exists",
@@ -680,7 +680,7 @@ async def _research_domain(
             sections=[],
         )
 
-    emit({"event": "s4_domain_start", "domain_id": domain_id, "label": domain_label})
+    emit({"event": "s5_domain_start", "domain_id": domain_id, "label": domain_label})
 
     # Load bibliography
     bib_path = audit_dir / f"bibliography_{domain_id}.json"
@@ -689,7 +689,7 @@ async def _research_domain(
         bibliography = json.loads(bib_path.read_text())
 
     # Load fetched knowledge sources (written by s4_audit)
-    from doc_expand.sources import format_sources  # noqa: PLC0415
+    from know_expand.sources import format_sources  # noqa: PLC0415
     sources_cache = audit_dir / "sources" / f"sources_{domain_id}.json"
     term_sources: dict = {}
     if sources_cache.exists():
@@ -782,7 +782,7 @@ async def _research_domain(
         router.call(practitioner_msg, PersonaOutput),
     )
 
-    emit({"event": "s4_personas_done", "domain_id": domain_id,
+    emit({"event": "s5_personas_done", "domain_id": domain_id,
           "theoretician_sections": len(theoretician_result.sections),
           "engineer_sections": len(engineer_result.sections),
           "practitioner_sections": len(practitioner_result.sections)})
@@ -816,7 +816,7 @@ async def _research_domain(
         anti_hallucination=_ANTI_HALLUCINATION,
     )}]
     reconciled: ReconcilerOutput = await router.call(reconciler_msg, ReconcilerOutput)
-    emit({"event": "s4_reconciler_done", "domain_id": domain_id})
+    emit({"event": "s5_reconciler_done", "domain_id": domain_id})
 
     # Adversarial critic loop with convergence termination
     rounds = cfg.adversarial_rounds.get(depth, 1)
@@ -827,7 +827,7 @@ async def _research_domain(
 
     for rnd in range(1, rounds + 1):
         emit({
-            "event": "s4_domain_critique_round",
+            "event": "s5_domain_critique_round",
             "domain_id": domain_id,
             "round": rnd,
             "total_rounds": rounds,
@@ -843,7 +843,7 @@ async def _research_domain(
         critique: CritiqueResult = await critic_router.call(critic_msg, CritiqueResult)
 
         # Write critique artifact
-        critique_path = audit_dir / f"critique_s4_{domain_id}_round{rnd}.md"
+        critique_path = audit_dir / f"critique_s5_{domain_id}_round{rnd}.md"
         critique_lines = [
             f"# Critique — {domain_label} Round {rnd}\n",
             f"**Verdict:** {critique.verdict}\n",
@@ -881,7 +881,7 @@ async def _research_domain(
             if jaccard > 0.85:
                 termination_reason = "critic_stalled"
                 emit({
-                    "event": "s4_critic_stalled",
+                    "event": "s5_critic_stalled",
                     "domain_id": domain_id,
                     "round": rnd,
                     "issue_count": len(current_issues),
@@ -905,7 +905,7 @@ async def _research_domain(
         final_summary = revised.summary
 
     emit({
-        "event": "s4_critic_loop_done",
+        "event": "s5_critic_loop_done",
         "domain_id": domain_id,
         "termination_reason": termination_reason,
         "rounds_run": rnd,
@@ -925,7 +925,7 @@ async def _research_domain(
     sentinel.touch()
 
     emit({
-        "event": "s4_domain_complete",
+        "event": "s5_domain_complete",
         "domain_id": domain_id,
         "elapsed_s": round(time.monotonic() - t0, 2),
         "section_file": str(section_path),
@@ -998,7 +998,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
             failed += 1
             failed_ids.append(domain["id"])
             emit({
-                "event": "s4_domain_failed",
+                "event": "s5_domain_failed",
                 "domain_id": domain["id"],
                 "error": str(result)[:200],
             })

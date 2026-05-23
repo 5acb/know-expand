@@ -5,7 +5,7 @@ Exhaustive tests for s10_assemble PDF helpers:
 """
 
 import pytest
-from doc_expand.stages.s10_assemble import _fix_bare_math, _sanitize_bib_entry
+from know_expand.stages.s10_assemble import _fix_bare_math, _sanitize_bib_entry
 
 
 # ===========================================================================

@@ -7,15 +7,15 @@ import re
 import time
 from pathlib import Path
 
-from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import (
+from know_expand.agents.base import make_router
+from know_expand.agents.schemas import (
     ConnectorOutput,
     CrossDomainBridge,
     SynthesisCritique,
     SynthesisDraft,
 )
-from doc_expand.config import Config
-from doc_expand.state import (
+from know_expand.config import Config
+from know_expand.state import (
     PipelineState,
     atomic_write,
     emit,
@@ -23,7 +23,7 @@ from doc_expand.state import (
     stage_is_complete,
 )
 
-_logger = logging.getLogger("doc_expand.s5")
+_logger = logging.getLogger("know_expand.s7")
 
 # ---------------------------------------------------------------------------
 # Prompts

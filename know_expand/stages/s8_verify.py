@@ -5,17 +5,17 @@ import logging
 import re
 from pathlib import Path
 
-from doc_expand.agents.base import make_router
-from doc_expand.agents.schemas import CitationAuditItem, CitationAuditResult, CitationCheck
-from doc_expand.config import Config
-from doc_expand.state import (
+from know_expand.agents.base import make_router
+from know_expand.agents.schemas import CitationAuditItem, CitationAuditResult, CitationCheck
+from know_expand.config import Config
+from know_expand.state import (
     PipelineState,
     emit,
     mark_stage_complete,
     stage_is_complete,
 )
 
-_logger = logging.getLogger("doc_expand.s6")
+_logger = logging.getLogger("know_expand.s8")
 
 # Pattern for [NEEDS_CITATION] markers
 _NEEDS_CITATION_RE = re.compile(r"\[NEEDS_CITATION\]")
