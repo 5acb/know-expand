@@ -83,7 +83,7 @@ Input Document (text / file / URL / PDF)
 │ S1: ASSESS (User Calibration)                         │
 │ 10–15 turn interview using real extracted terms       │
 │ → UserProfile (depth, math mode, known concepts)      │
-│ ← Human interaction #1 (opt-in via --interactive;    │
+│ ← Human interaction #1 (web UI Q&A or TTY;           │
 │   skipped by default in autonomous mode)              │
 └───────────────────────────┬───────────────────────────┘
                             │  state/user_profile.json
@@ -161,16 +161,16 @@ Stages skip automatically if already complete (`stage_is_complete()` checks `pip
 
 ```
 know-expand <input> [options]
-know-expand tail [run_id] [--log-dir DIR]
-know-expand serve [--port PORT]
+know-expand tail [run_id] [--runs-dir DIR]
+know-expand serve [--runs-dir DIR] [--port PORT]
 
 Arguments:
   <input>                   File path (.txt .md .pdf), URL, or - (stdin)
 
 Subcommands:
   tail [run_id]             Stream pipeline events to stdout. Reads
-                            runs/<run_id>/events.jsonl; uses latest run if
-                            run_id omitted. Pipe-friendly, greppable.
+                            runs/<run_id>/logs/events.jsonl; uses latest
+                            run if run_id omitted. Pipe-friendly, greppable.
   serve                     Launch HTTP dashboard at localhost:7842.
                             Left stage rail + full-width detail pane + run
                             drawer. Interview Q&A and taxonomy review IPC
@@ -185,17 +185,16 @@ Pipeline control:
   --status                  Emit pipeline_status from pipeline.json; no work runs
   --resume STAGE            Resume from stage N (e.g. --resume 4)
   --stage STAGE             Run only stage N then stop
-  --interactive             Run S1 user calibration interactively (default: skipped)
   --user-profile <path>     Load pre-computed UserProfile JSON; skips S1
   --auto-taxonomy           Skip editor review; orchestrating LLM decides taxonomy
+  --no-bibliography-fetch   Skip Semantic Scholar / Crossref fetches (air-gapped mode)
+  --primary-model MODEL     Prepend MODEL to every role's fallback list
 
 Paths:
-  --output-dir              Path for final output  (default: runs/{id}/output)
-  --runs-dir                Base directory for all runs  (default: ./runs)
+  --runs-dir DIR            Base directory for all runs  (default: ./runs)
 
 Concurrency:
-  --cloud-concurrency N     Override config concurrency.cloud_default
-  --local-concurrency N     Override config concurrency.local_default
+  --concurrency N           Override config concurrency.default (default: 8)
 
 Run identity:
   --run-id ID               Reuse an existing run ID (for --resume)
@@ -247,44 +246,46 @@ Models are tried in order; the `QuotaAwareRouter` falls back automatically on qu
 
 ```yaml
 roles:
-  agent:                        # LangGraph ReAct graphs (S4.5, S6 — require tool calling)
-    - "gemini/gemini-2.5-pro"
-    - "llamacpp/qwen2.5-7b-instruct"
-  researcher:
+  # Slot 0: geminicli/gemini-3.5-flash — free OAuth CLI (no API key needed)
+  # Slot 1: gemini/gemini-3.5-flash    — paid API fallback (GEMINI_API_KEY)
+  # Local:  llamacpp/glm4              — llama-server at cfg.llamacpp.base_url
+
+  agent:           # LangGraph ReAct graphs — require reliable tool calling
+    - "geminicli/gemini-3.5-flash"
+    - "gemini/gemini-3.5-flash"
+    - "groq/llama-3.3-70b-versatile"
+    - "claude-sonnet-4-6"
+    - "llamacpp/glm4"
+
+  researcher:      # Long output, quality matters — no cheap shortcuts
+    - "geminicli/gemini-3.5-flash"
+    - "gemini/gemini-3.5-flash"
+    - "groq/llama-3.3-70b-versatile"
+    - "mistral/mistral-small-latest"
     - "claude-opus-4-7"
     - "claude-sonnet-4-6"
-    - "gpt-4o"
-    - "gemini/gemini-2.5-pro"
-    - "ollama/qwen2.5:14b"
-  synthesizer:
-    - "claude-opus-4-7"
-    - "claude-sonnet-4-6"
-    - "gpt-4o"
-    - "gemini/gemini-2.5-pro"
-    - "ollama/qwen2.5:14b"
-  critic:
-    - "claude-sonnet-4-6"
-    - "gpt-4o-mini"
-    - "gemini/gemini-2.5-pro"
-    - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
-    - "ollama/llama3.2:3b"
-  extractor:
-    - "claude-sonnet-4-6"
-    - "gpt-4o-mini"
-    - "gemini/gemini-2.5-pro"
-    - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
-    - "ollama/llama3.2:3b"
-  classifier:
-    - "claude-sonnet-4-6"
-    - "gpt-4o-mini"
-    - "gemini/gemini-2.5-pro"
-    - "llamacpp/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
-    - "ollama/llama3.2:3b"
+    - "llamacpp/glm4"
+
+  extractor:       # Bulk structured JSON per-chunk — fast cheap model first
+    - "geminicli/gemini-3.5-flash"
+    - "groq/llama-3.1-8b-instant"
+    - "groq/llama-3.3-70b-versatile"
+    - "gemini/gemini-3.5-flash"
+    - "mistral/mistral-small-latest"
+    - "llamacpp/glm4"
+
+  classifier:      # Highest volume, simplest task
+    - "geminicli/gemini-3.5-flash"
+    - "groq/llama-3.1-8b-instant"
+    - "groq/llama-3.3-70b-versatile"
+    - "gemini/gemini-3.5-flash"
+    - "mistral/mistral-small-latest"
+    - "llamacpp/glm4"
 ```
 
-Override any role at runtime:
+Override the primary model for any run without editing the file:
 ```bash
-LITELLM_RESEARCHER=gpt-4o LITELLM_EXTRACTOR=ollama/llama3.2 know-expand paper.pdf
+know-expand paper.pdf --primary-model claude-opus-4-7
 ```
 
 ### API keys
@@ -352,7 +353,7 @@ The three signals operate in fundamentally different representation spaces — l
 <details>
 <summary><strong>S1 — Assess (User Calibration)</strong></summary>
 
-**Position:** After S2, before S3. Skipped by default. Opt-in via `--interactive` for direct human use, or web UI Q&A during a `serve` run.
+**Position:** After S2, before S3. Runs automatically — answered via the web UI (`serve`) or TTY. Pass `--user-profile <path>` to skip entirely with a pre-computed profile.
 
 **Purpose:** 10–15 turn LLM-driven interview that establishes a `UserProfile` — familiarity level, background field, math comfort, known/unknown concepts — which calibrates every downstream stage. Questions reference real terms from `state/terms.json`, not LLM guesses.
 
@@ -645,7 +646,7 @@ If the pipeline crashes at S5 and `--resume 5` is run, it must not append to par
 
 Exactly two human-facing interactions are permitted, both at the very beginning of the pipeline, both skippable via flags:
 
-1. **S1 — User calibration** (skip with `--interactive` absent or `--user-profile`): 10–15 questions asked once. Calibrates every downstream stage.
+1. **S1 — User calibration** (skip with `--user-profile <path>`): 10–15 questions answered via web UI or TTY. Calibrates every downstream stage.
 2. **S3 — Taxonomy lock** (skip with `--auto-taxonomy`): review and approve the domain taxonomy before classification and research run.
 
 Both are at the absolute start of the pipeline. All other stages are fully autonomous. Any `input()`, `subprocess.call([editor, ...])`, or `pause_for_review()` outside S1 and S3 is a design defect.
@@ -817,7 +818,7 @@ With `--profile local`, no API keys are required. Semantic Scholar, Crossref, an
 
 Expected quality at local depth: roughly `survey` regardless of `--depth` flag. Structure, citations, and adversarial audit are all intact; narrative depth and mathematical derivations are shallower.
 
-Local concurrency: Stage 5 domain agents are serialized via `asyncio.Semaphore(1)` by default when Ollama is the provider. Increase with `--local-concurrency 2` only on workstations with ≥32GB VRAM.
+Concurrency: global semaphore defaults to 8 (`config.yaml concurrency.default`; override with `--concurrency N`). Groq and Mistral get their own `Semaphore(3)` to prevent burst 429s on free-tier limits. llamacpp shares the global semaphore.
 
 ### Observability
 
