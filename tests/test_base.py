@@ -238,6 +238,58 @@ async def test_router_geminicli_error_skips_and_continues():
     assert "geminicli/gemini-3.5-flash" in router._skip
 
 
+@pytest.mark.asyncio
+async def test_geminicli_quota_adds_original_model_key_to_probed_unavailable():
+    """
+    _PROBED_UNAVAILABLE must receive the original models.yaml key
+    (e.g. "geminicli/gemini-3.5-flash"), NOT the internal cli_model name
+    ("geminicli/gemini-3.1-pro-preview").  The router's _next_model() looks
+    up the models.yaml key, so the wrong key silently never fires.
+    """
+    import know_expand.agents.base as base_mod
+    from unittest.mock import MagicMock
+
+    original = set(base_mod._PROBED_UNAVAILABLE)
+    try:
+        # Build a fake subprocess result: empty stdout + TerminalQuotaError stderr
+        quota_stderr = b"Error: TerminalQuotaError retryDelayMs: 3600000"
+        proc = MagicMock()
+        proc.returncode = 1
+
+        async def fake_communicate():
+            return b"", quota_stderr
+
+        proc.communicate = fake_communicate
+
+        async def fake_create_subprocess(*args, **kwargs):
+            return proc
+
+        from know_expand.config import load_config
+        cfg = load_config()
+
+        from pydantic import BaseModel as PBM
+
+        class _Dummy(PBM):
+            value: str
+
+        with patch("asyncio.create_subprocess_exec", side_effect=fake_create_subprocess):
+            with pytest.raises(RuntimeError, match="geminicli quota exhausted"):
+                await base_mod._do_geminicli_call(
+                    model="geminicli/gemini-3.5-flash",
+                    messages=[{"role": "user", "content": "hi"}],
+                    schema=_Dummy,
+                    cfg=cfg,
+                    role="researcher",
+                )
+
+        # The original model string must be in PROBED_UNAVAILABLE, not the cli model name
+        assert "geminicli/gemini-3.5-flash" in base_mod._PROBED_UNAVAILABLE
+        assert "geminicli/gemini-3.1-pro-preview" not in base_mod._PROBED_UNAVAILABLE
+    finally:
+        base_mod._PROBED_UNAVAILABLE.clear()
+        base_mod._PROBED_UNAVAILABLE.update(original)
+
+
 # ---------------------------------------------------------------------------
 # _parse_geminicli_stderr — quota detection
 # ---------------------------------------------------------------------------
