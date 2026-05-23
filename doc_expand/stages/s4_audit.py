@@ -10,7 +10,7 @@ import httpx
 
 from doc_expand.agents.base import make_router
 from doc_expand.agents.schemas import GapAnalysisResult, GapFinding
-from doc_expand.bibliography import fetch_anchors, fetch_bibliography, reset_ss_limiter
+from doc_expand.bibliography import fetch_anchor_neighbors, fetch_anchors, fetch_bibliography, reset_ss_limiter
 from doc_expand.config import Config
 from doc_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
 
@@ -248,7 +248,7 @@ async def _process_domain(
                     "domain_id": domain_id,
                     "term_count": len(terms_to_fetch),
                 })
-                fetched = await fetch_sources_for_terms(terms_to_fetch, http, concurrency=4)
+                fetched = await fetch_sources_for_terms(terms_to_fetch, http, concurrency=4, domain_label=domain_label)
                 raw_dump = {k: [s.model_dump() for s in v] for k, v in fetched.items()}
                 sources_cache.write_text(json.dumps(raw_dump, indent=2))
                 emit({
@@ -281,14 +281,18 @@ async def _process_domain(
     })
 
     emit({"event": "domain_fetch_start", "domain_id": domain_id, "depth": depth})
-    anchors_list, bibliography = await asyncio.gather(
+    (anchors_list, anchor_ss_ids), bibliography = await asyncio.gather(
         fetch_anchors(domain_label, http, cfg),
         fetch_bibliography(domain_label, depth, cfg, http),
     )
+    neighbor_papers = await fetch_anchor_neighbors(anchor_ss_ids, bibliography, http, cfg)
+    if neighbor_papers:
+        bibliography = bibliography + neighbor_papers
     emit({
         "event": "domain_fetch_done",
         "domain_id": domain_id,
         "elapsed_s": round(time.monotonic() - t0, 2),
+        "neighbor_count": len(neighbor_papers),
     })
 
     anchors_dicts = [a.model_dump() for a in anchors_list]
