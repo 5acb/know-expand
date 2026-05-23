@@ -71,6 +71,30 @@ class LlamaCppConfig:
 
 
 @dataclass
+class CriticThinkingConfig:
+    budget_tokens: int = 0
+
+
+@dataclass
+class ResearchContextConfig:
+    """Prompt-size controls for S5 persona prompts.
+
+    Depth-aware caps prevent the ~44k-char prompts that caused geminicli timeouts
+    while still giving deep runs more context than shallow ones.
+    """
+    nodes_top_n: int = 30
+    sources_max_terms: dict[str, int] = field(default_factory=lambda: {
+        "survey": 5, "standard": 8, "deep": 15
+    })
+    sources_max_per_term: dict[str, int] = field(default_factory=lambda: {
+        "survey": 1, "standard": 1, "deep": 2
+    })
+    sources_max_chars: dict[str, int] = field(default_factory=lambda: {
+        "survey": 300, "standard": 400, "deep": 500
+    })
+
+
+@dataclass
 class Config:
     bibliography: BibliographyConfig
     centrality: CentralityConfig
@@ -85,6 +109,8 @@ class Config:
     keyword_extraction: KeywordExtractionConfig = field(default_factory=KeywordExtractionConfig)
     graph_defaults: GraphDefaultsConfig = field(default_factory=GraphDefaultsConfig)
     llamacpp: LlamaCppConfig = field(default_factory=LlamaCppConfig)
+    research_context: ResearchContextConfig = field(default_factory=ResearchContextConfig)
+    critic_thinking: CriticThinkingConfig = field(default_factory=CriticThinkingConfig)
 
 
 def load_config(
@@ -115,4 +141,6 @@ def load_config(
         keyword_extraction=_section("keyword_extraction", KeywordExtractionConfig),
         graph_defaults=_section("graph_defaults", GraphDefaultsConfig),
         llamacpp=_section("llamacpp", LlamaCppConfig),
+        research_context=_section("research_context", ResearchContextConfig),
+        critic_thinking=_section("critic_thinking", CriticThinkingConfig),
     )

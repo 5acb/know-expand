@@ -306,6 +306,30 @@ def _fix_bare_math(text: str) -> str:
     return "\n".join(result_lines)
 
 
+def _fix_mixed_display_math(text: str) -> str:
+    """Remove $...$ markers incorrectly embedded inside \\[...\\] display math blocks,
+    and remove \\[...\\] markers incorrectly embedded inside $$...$$ display math blocks.
+
+    The LLM occasionally generates \\[expr = $\\frac{...}$\\] which is invalid
+    LaTeX — display math cannot nest inline math delimiters.
+    """
+    # Fix \\[...$...\\] — remove lone $ (not $$) inside \\[...\\]
+    def _strip_inline_dollars(m: re.Match) -> str:
+        inner = re.sub(r'(?<!\$)\$(?!\$)', '', m.group(1))
+        return r'\[' + inner + r'\]'
+
+    text = re.sub(r'\\\[(.*?)\\\]', _strip_inline_dollars, text, flags=re.DOTALL)
+
+    # Fix $$...\\[...\\]...$$ — remove \\[ \\] inside $$...$$
+    def _strip_display_in_dmath(m: re.Match) -> str:
+        inner = m.group(1)
+        inner = inner.replace(r'\[', '').replace(r'\]', '')
+        return '$$' + inner + '$$'
+
+    text = re.sub(r'\$\$(.*?)\$\$', _strip_display_in_dmath, text, flags=re.DOTALL)
+    return text
+
+
 _UNVALIDATED_RE = re.compile(r"\s*\[UNVALIDATED\]\s*", re.IGNORECASE)
 _NEEDS_CITATION_RE = re.compile(r"\s*\[NEEDS_CITATION\]\s*", re.IGNORECASE)
 _CITATION_NEEDED_RE = re.compile(r"\s*\[citation needed\]\s*", re.IGNORECASE)
@@ -333,6 +357,7 @@ def _clean_section_text(text: str) -> str:
     text = _INFERRED_COMMENT_RE.sub("", text)
     text = _CITE_SYNTAX_RE.sub(lambda m: _convert_cite_syntax(m.group(1)), text)
     text = _ORPHAN_SPACE_PUNCT_RE.sub(r'\1', text)
+    text = _fix_mixed_display_math(text)
     text = _fix_bare_math(text)
     return text
 

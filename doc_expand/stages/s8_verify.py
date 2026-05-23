@@ -5,7 +5,8 @@ import logging
 import re
 from pathlib import Path
 
-from doc_expand.agents.schemas import CitationAuditItem, CitationAuditResult
+from doc_expand.agents.base import make_router
+from doc_expand.agents.schemas import CitationAuditItem, CitationAuditResult, CitationCheck
 from doc_expand.config import Config
 from doc_expand.state import (
     PipelineState,
@@ -82,6 +83,90 @@ def _audit_section_file(
     return items
 
 
+_CITATION_CLASSIFIER_PROMPT = """\
+You are checking whether a cited paper actually supports the claim made in a document.
+
+Claim sentence (from the document):
+{claim_sentence}
+
+Cited paper abstract:
+{abstract}
+
+Does the abstract support, contradict, or merely mention (without supporting) the claim?
+Return a CitationCheck with:
+- relation: "supports", "contradicts", or "mentions"
+- reason: one sentence explaining why
+"""
+
+# Regex to find citation markers [@key] in assembled markdown
+_CITATION_MARKER_RE = re.compile(r"\[@([^\]]+)\]")
+# Capture sentence surrounding a citation — up to 300 chars each side
+_CLAIM_CONTEXT_RE = re.compile(r"[^.!?\n]{0,300}\[@[^\]]+\][^.!?\n]{0,300}")
+
+
+async def _classify_citation_contexts(
+    narrative_md: str,
+    bibliography: list[dict],
+    router,
+    domain_id: str,
+) -> list[dict]:
+    """Classify whether each cited paper's abstract supports the citing claim.
+
+    Returns a list of contradiction dicts with keys: citation_id, claim, reason.
+    Skips entries without an abstract. Capped at 50 classifications per domain.
+    """
+    bib_by_id = {entry.get("id", ""): entry for entry in bibliography}
+
+    # Strip fenced code blocks to avoid false positives
+    scan_text = _FENCED_CODE_RE.sub("", narrative_md)
+    scan_text = _INLINE_CODE_RE.sub("", scan_text)
+
+    # Collect unique (claim_sentence, citation_id) pairs
+    seen: set[tuple[str, str]] = set()
+    pairs: list[tuple[str, str]] = []
+    for m in _CLAIM_CONTEXT_RE.finditer(scan_text):
+        claim_sentence = m.group(0).strip()
+        for key_m in _CITATION_MARKER_RE.finditer(claim_sentence):
+            citation_id = key_m.group(1)
+            if citation_id in _PIPELINE_MARKERS:
+                continue
+            key = (claim_sentence[:200], citation_id)
+            if key not in seen:
+                seen.add(key)
+                pairs.append((claim_sentence, citation_id))
+
+    # Cap to avoid excessive runtime
+    pairs = pairs[:50]
+
+    contradictions: list[dict] = []
+    for claim_sentence, citation_id in pairs:
+        entry = bib_by_id.get(citation_id)
+        if not entry:
+            continue
+        abstract = entry.get("abstract", "")
+        if not abstract:
+            continue
+
+        prompt = _CITATION_CLASSIFIER_PROMPT.format(
+            claim_sentence=claim_sentence[:600],
+            abstract=abstract[:800],
+        )
+        try:
+            check: CitationCheck = await router.call(
+                [{"role": "user", "content": prompt}], CitationCheck
+            )
+            if check.relation == "contradicts":
+                contradictions.append({
+                    "citation_id": citation_id,
+                    "claim": claim_sentence[:300],
+                    "reason": check.reason,
+                })
+        except Exception as exc:
+            _logger.debug("s8 citation classify failed for %r: %s", citation_id, exc)
+
+    return contradictions
+
+
 def _build_needs_citation_md(result: CitationAuditResult) -> str:
     lines = [
         "# Citation Audit\n",
@@ -121,12 +206,17 @@ async def run(state: PipelineState, cfg: Config) -> None:
     emit({"event": "stage_start", "stage": 8})
     emit({"event": "s8_start"})
 
-    # Build valid citation ID set from all bibliography JSONs
+    # Build valid citation ID set from all bibliography JSONs, keyed by domain
     valid_citation_ids: set[str] = set()
     bibliography_index: dict[str, dict] = {}
+    domain_bibliographies: dict[str, list[dict]] = {}
 
     for bib_file in sorted(audit_dir.glob("bibliography_*.json")):
+        # Extract domain_id from filename: bibliography_{domain_id}.json
+        stem = bib_file.stem  # e.g. "bibliography_nlp"
+        domain_id = stem[len("bibliography_"):]
         entries = json.loads(bib_file.read_text())
+        domain_bibliographies[domain_id] = entries
         for entry in entries:
             cid = entry.get("id", "")
             if cid:
@@ -155,7 +245,54 @@ async def run(state: PipelineState, cfg: Config) -> None:
     )
 
     needs_citation_path = audit_dir / "needs_citation.md"
-    needs_citation_path.write_text(_build_needs_citation_md(audit_result))
+    needs_citation_md = _build_needs_citation_md(audit_result)
+
+    # Semantic misattribution detection: classify citation contexts per domain.
+    # Only runs if at least one bibliography entry has an abstract field populated.
+    classifier_router = make_router("classifier", cfg)
+    all_mismatches: list[str] = []
+
+    for domain_id, bibliography in domain_bibliographies.items():
+        has_abstracts = any(e.get("abstract") for e in bibliography)
+        if not has_abstracts:
+            emit({
+                "event": "s8_citation_classify_skipped",
+                "domain_id": domain_id,
+                "reason": "no_abstracts",
+            })
+            continue
+
+        section_path = sections_dir / f"section_{domain_id}.md"
+        if not section_path.exists():
+            continue
+
+        narrative_md = section_path.read_text()
+        try:
+            contradictions = await _classify_citation_contexts(
+                narrative_md, bibliography, classifier_router, domain_id
+            )
+        except Exception as exc:
+            _logger.warning("s8 citation classification failed for %s: %s", domain_id, exc)
+            continue
+
+        if contradictions:
+            emit({
+                "event": "s8_citation_mismatch_found",
+                "domain_id": domain_id,
+                "count": len(contradictions),
+            })
+            for c in contradictions:
+                all_mismatches.append(
+                    f"**[CITATION_MISMATCH]** domain=`{domain_id}` "
+                    f"key=`{c['citation_id']}`\n"
+                    f"> Claim: {c['claim']}\n"
+                    f"> Reason: {c['reason']}\n"
+                )
+
+    if all_mismatches:
+        needs_citation_md += "\n\n## Citation Mismatches\n\n" + "\n".join(all_mismatches)
+
+    needs_citation_path.write_text(needs_citation_md)
 
     citation_index_path = audit_dir / "citation_index.json"
     citation_index_path.write_text(json.dumps(bibliography_index, indent=2))

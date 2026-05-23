@@ -137,14 +137,21 @@ async def _do_geminicli_call(
         )
         stdout_b, stderr_b = await asyncio.wait_for(
             proc.communicate(),
-            timeout=getattr(cfg, "geminicli_timeout_s", 120),
+            timeout=cfg.timeouts.get("geminicli_timeout_s", 120),
         )
         raw = stdout_b.decode(errors="replace").strip()
         # The CLI exits non-zero even on success when MCP warnings are present.
         # Treat empty stdout as the real failure signal; non-empty stdout = success.
         if not raw:
-            err_text = stderr_b.decode(errors="replace")[:400]
-            raise RuntimeError(f"gemini-cli returned no output (exit {proc.returncode}): {err_text}")
+            err_text = stderr_b.decode(errors="replace")
+            is_quota, retry_s = _parse_geminicli_stderr(err_text)
+            if is_quota:
+                # Terminal daily-cap exhausted — mark globally so every router
+                # skips geminicli immediately without spawning more subprocesses.
+                _PROBED_UNAVAILABLE.add(f"geminicli/{cli_model}")
+                retry_info = f" resets in {retry_s / 3600:.1f}h" if retry_s else ""
+                raise RuntimeError(f"geminicli quota exhausted{retry_info}")
+            raise RuntimeError(f"gemini-cli returned no output (exit {proc.returncode}): {err_text[:400]}")
 
         json_text = _extract_json(raw)
         result = schema.model_validate_json(json_text)
@@ -210,12 +217,17 @@ async def _do_geminicli_tool_call(
         )
         stdout_b, stderr_b = await asyncio.wait_for(
             proc.communicate(),
-            timeout=getattr(cfg, "geminicli_timeout_s", 120),
+            timeout=cfg.timeouts.get("geminicli_timeout_s", 120),
         )
         raw = stdout_b.decode(errors="replace").strip()
         if not raw:
-            err_text = stderr_b.decode(errors="replace")[:400]
-            raise RuntimeError(f"gemini-cli returned no output (exit {proc.returncode}): {err_text}")
+            err_text = stderr_b.decode(errors="replace")
+            is_quota, retry_s = _parse_geminicli_stderr(err_text)
+            if is_quota:
+                _PROBED_UNAVAILABLE.add(f"geminicli/{cli_model}")
+                retry_info = f" resets in {retry_s / 3600:.1f}h" if retry_s else ""
+                raise RuntimeError(f"geminicli quota exhausted{retry_info}")
+            raise RuntimeError(f"gemini-cli returned no output (exit {proc.returncode}): {err_text[:400]}")
 
         elapsed = time.monotonic() - t0
         emit({
@@ -280,6 +292,18 @@ async def _llamacpp_is_available(cfg) -> bool:
         return False
 
 
+def _msg_chars(messages: list[dict]) -> int:
+    """Total character count across all message content, handling list-block content."""
+    total = 0
+    for m in messages:
+        content = m.get("content", "")
+        if isinstance(content, list):
+            total += sum(len(b.get("text", "")) for b in content if isinstance(b, dict))
+        else:
+            total += len(content)
+    return total
+
+
 async def _do_llamacpp_call(
     model: str,
     messages: list[dict],
@@ -301,7 +325,7 @@ async def _do_llamacpp_call(
         "role": role,
         "model": model,
         "schema": schema.__name__,
-        "msg_chars": sum(len(m.get("content", "")) for m in messages),
+        "msg_chars": _msg_chars(messages),
     })
     try:
         result, completion = await client.chat.completions.create_with_completion(
@@ -341,11 +365,27 @@ async def _do_llamacpp_call(
 
 
 # Populated once by probe_models() at pipeline startup.
-# Every new QuotaAwareRouter copies this as its initial skip set.
+# Also updated at runtime when a terminal quota error is detected so that ALL
+# routers (not just the one that saw the error) stop trying the model immediately.
 _PROBED_UNAVAILABLE: set[str] = set()
 
 # Exponential backoff delays (seconds) for consecutive headerless failures.
 _BURST_BACKOFF = [2, 4, 8]
+
+
+def _parse_geminicli_stderr(stderr_text: str) -> tuple[bool, float | None]:
+    """Check stderr for a terminal quota error.
+
+    Returns (is_quota_error, retry_after_seconds_or_None).
+    TerminalQuotaError means the free-tier daily cap is hit — no amount of
+    waiting within a run will fix it.  We detect it and mark geminicli
+    globally unavailable so every subsequent _next_model() call skips it.
+    """
+    if "TerminalQuotaError" not in stderr_text and "exhausted your capacity" not in stderr_text:
+        return False, None
+    m = re.search(r"retryDelayMs[:\s]+([0-9.]+)", stderr_text)
+    retry_s = float(m.group(1)) / 1000.0 if m else None
+    return True, retry_s
 
 
 def _find_in_chain(exc: BaseException, *types) -> BaseException | None:
@@ -455,13 +495,91 @@ async def probe_models(cfg: Config) -> None:
 
 
 _SEMAPHORE: asyncio.Semaphore | None = None
+# Separate, tighter semaphores for rate-limited free-tier providers.
+# Groq free tier: ~30 req/min on 8B, ~30 req/min on 70B — cap at 3 concurrent
+# to avoid bursting all 20 map-phase tasks into them simultaneously.
+_GROQ_SEMAPHORE: asyncio.Semaphore | None = None
+_MISTRAL_SEMAPHORE: asyncio.Semaphore | None = None
 
 
 def _get_semaphore(model: str, cfg: Config) -> asyncio.Semaphore:
-    global _SEMAPHORE
+    global _SEMAPHORE, _GROQ_SEMAPHORE, _MISTRAL_SEMAPHORE
+    if "groq" in model:
+        if _GROQ_SEMAPHORE is None:
+            _GROQ_SEMAPHORE = asyncio.Semaphore(3)
+        return _GROQ_SEMAPHORE
+    if "mistral" in model:
+        if _MISTRAL_SEMAPHORE is None:
+            _MISTRAL_SEMAPHORE = asyncio.Semaphore(3)
+        return _MISTRAL_SEMAPHORE
     if _SEMAPHORE is None:
         _SEMAPHORE = asyncio.Semaphore(cfg.concurrency.default)
     return _SEMAPHORE
+
+
+def _instructor_mode(model: str):
+    """Return the right instructor mode for a given model.
+
+    TOOLS mode (default) sends the schema as a function definition and expects
+    exactly one tool call back.  Mistral sometimes returns parallel tool calls
+    for a single-schema request, which instructor rejects.  Groq (Llama) has
+    the same parallel-tool-call behaviour.  Use native structured-output modes
+    for both so instructor never touches the tool-calling path.
+    """
+    import instructor
+    if "mistral" in model:
+        # MISTRAL_STRUCTURED_OUTPUTS requires the mistralai SDK.
+        # We route through litellm, so JSON mode (response_format json_object) works.
+        return instructor.Mode.JSON
+    if "groq" in model:
+        return instructor.Mode.JSON
+    if "gemini" in model and not _is_geminicli(model):
+        # gemini/ API models route through litellm, not the native Google SDK.
+        # GEMINI_TOOLS mode requires model set at client-patch time (native SDK only);
+        # JSON mode works fine through litellm's openai-compat translation layer.
+        return instructor.Mode.JSON
+    return instructor.Mode.TOOLS
+
+
+def _make_sanitized_completion():
+    """Wrap litellm.acompletion to repair invalid JSON escape sequences.
+
+    Gemini in JSON mode emits bare LaTeX backslashes (\\frac, \\mid, etc.)
+    inside JSON string values. These are invalid JSON escapes and cause
+    instructor's pydantic validation to fail with 'Invalid JSON: invalid escape'.
+    We repair them by doubling any backslash not already part of a valid JSON
+    escape sequence before instructor parses the response.
+    """
+    _valid_escapes = set('"\\' + '/bfnrtu')
+
+    def _repair(text: str) -> str:
+        # Replace \X where X is not a valid JSON escape char with \\X.
+        out: list[str] = []
+        i = 0
+        while i < len(text):
+            if text[i] == '\\' and i + 1 < len(text):
+                nxt = text[i + 1]
+                if nxt not in _valid_escapes:
+                    out.append('\\\\')
+                    i += 1
+                    continue
+            out.append(text[i])
+            i += 1
+        return ''.join(out)
+
+    async def _wrapper(*args, **kwargs):
+        resp = await litellm.acompletion(*args, **kwargs)
+        try:
+            for choice in getattr(resp, 'choices', []):
+                msg = getattr(choice, 'message', None)
+                if msg is not None:
+                    content = getattr(msg, 'content', None)
+                    if content:
+                        msg.content = _repair(content)
+        except Exception:
+            pass  # never block on sanitization failure
+        return resp
+    return _wrapper
 
 
 async def _do_call(
@@ -477,14 +595,14 @@ async def _do_call(
         return await _do_llamacpp_call(model, messages, schema, cfg, role)
 
     import instructor
-    client = instructor.from_litellm(litellm.acompletion)
+    client = instructor.from_litellm(_make_sanitized_completion(), mode=_instructor_mode(model))
     t0 = time.monotonic()
     emit({
         "event": "llm_call_start",
         "role": role,
         "model": model,
         "schema": schema.__name__,
-        "msg_chars": sum(len(m.get("content", "")) for m in messages),
+        "msg_chars": _msg_chars(messages),
     })
     try:
         result, completion = await client.chat.completions.create_with_completion(
@@ -497,6 +615,8 @@ async def _do_call(
         tok_out = getattr(usage, "completion_tokens", None)
         tok_in = getattr(usage, "prompt_tokens", None)
         tok_s = round(tok_out / elapsed, 1) if tok_out and elapsed > 0 else None
+        cache_write = getattr(usage, "cache_creation_input_tokens", None)
+        cache_read = getattr(usage, "cache_read_input_tokens", None)
         emit({
             "event": "llm_call_done",
             "role": role,
@@ -506,6 +626,76 @@ async def _do_call(
             "tok_in": tok_in,
             "tok_out": tok_out,
             "tok_s": tok_s,
+            "cache_write_tok": cache_write,
+            "cache_read_tok": cache_read,
+        })
+        return result
+    except Exception as exc:
+        elapsed = time.monotonic() - t0
+        emit({
+            "event": "llm_call_error",
+            "role": role,
+            "model": model,
+            "schema": schema.__name__,
+            "elapsed_s": round(elapsed, 2),
+            "error": str(exc)[:200],
+        })
+        raise
+
+
+async def _do_call_with_thinking(
+    model: str,
+    messages: list[dict],
+    schema: type[T],
+    cfg: Config,
+    role: str = "?",
+    budget: int = 0,
+) -> T:
+    """Like _do_call but enables extended thinking for Claude/Anthropic models.
+
+    Extended thinking is incompatible with TOOLS mode, so we force JSON mode.
+    For non-Claude models or budget=0, delegates to _do_call().
+    """
+    if budget <= 0 or not ("claude" in model or "anthropic" in model):
+        return await _do_call(model, messages, schema, cfg, role)
+
+    import instructor
+    client = instructor.from_litellm(_make_sanitized_completion(), mode=instructor.Mode.JSON)
+    t0 = time.monotonic()
+    emit({
+        "event": "llm_call_start",
+        "role": role,
+        "model": model,
+        "schema": schema.__name__,
+        "msg_chars": _msg_chars(messages),
+        "thinking_budget": budget,
+    })
+    try:
+        result, completion = await client.chat.completions.create_with_completion(
+            model=model,
+            messages=messages,
+            response_model=schema,
+            thinking={"type": "enabled", "budget_tokens": budget},
+        )
+        elapsed = time.monotonic() - t0
+        usage = getattr(completion, "usage", None)
+        tok_out = getattr(usage, "completion_tokens", None)
+        tok_in = getattr(usage, "prompt_tokens", None)
+        tok_s = round(tok_out / elapsed, 1) if tok_out and elapsed > 0 else None
+        cache_write = getattr(usage, "cache_creation_input_tokens", None)
+        cache_read = getattr(usage, "cache_read_input_tokens", None)
+        emit({
+            "event": "llm_call_done",
+            "role": role,
+            "model": model,
+            "schema": schema.__name__,
+            "elapsed_s": round(elapsed, 2),
+            "tok_in": tok_in,
+            "tok_out": tok_out,
+            "tok_s": tok_s,
+            "cache_write_tok": cache_write,
+            "cache_read_tok": cache_read,
+            "thinking_budget": budget,
         })
         return result
     except Exception as exc:
@@ -522,10 +712,11 @@ async def _do_call(
 
 
 class QuotaAwareRouter:
-    def __init__(self, role: str, models: list[str], cfg: Config) -> None:
+    def __init__(self, role: str, models: list[str], cfg: Config, thinking_budget: int = 0) -> None:
         self.role = role
         self.models = models
         self.cfg = cfg
+        self.thinking_budget = thinking_budget
         # Seed from probe results so unavailable models are never attempted.
         self._skip: set[str] = set(_PROBED_UNAVAILABLE)
         self._lock = asyncio.Lock()
@@ -534,7 +725,7 @@ class QuotaAwareRouter:
 
     def _next_model(self) -> str | None:
         for m in self.models:
-            if m not in self._skip:
+            if m not in self._skip and m not in _PROBED_UNAVAILABLE:
                 return m
         return None
 
@@ -546,7 +737,9 @@ class QuotaAwareRouter:
             sem = _get_semaphore(model, self.cfg)
             try:
                 async with sem:
-                    result = await _do_call(model, messages, schema, self.cfg, role=self.role)
+                    result = await _do_call_with_thinking(
+                        model, messages, schema, self.cfg, role=self.role, budget=self.thinking_budget
+                    )
                 self._fail_counts.pop(model, None)
                 return result
             except Exception as e:
@@ -601,6 +794,20 @@ class QuotaAwareRouter:
                         "reason": str(transient_err),
                     })
                 else:
+                    # geminicli errors are always terminal for this run (quota,
+                    # session expired, empty output) — skip and try next model.
+                    if _is_geminicli(model):
+                        async with self._lock:
+                            self._skip.add(model)
+                            next_model = self._next_model()
+                        emit({
+                            "event": "model_geminicli_skip",
+                            "role": self.role,
+                            "skipped_model": model,
+                            "next_model": next_model,
+                            "reason": str(e)[:200],
+                        })
+                        continue
                     raise
 
         emit({
@@ -730,9 +937,21 @@ class QuotaAwareRouter:
                         "reason": str(transient_err),
                     })
                 else:
+                    if _is_geminicli(model):
+                        async with self._lock:
+                            self._skip.add(model)
+                            next_model = self._next_model()
+                        emit({
+                            "event": "model_geminicli_skip",
+                            "role": self.role,
+                            "skipped_model": model,
+                            "next_model": next_model,
+                            "reason": str(e)[:200],
+                        })
+                        continue
                     raise
         raise RuntimeError(f"All models exhausted for agent role: {self.role}")
 
 
-def make_router(role: str, cfg: Config) -> QuotaAwareRouter:
-    return QuotaAwareRouter(role=role, models=cfg.models[role], cfg=cfg)
+def make_router(role: str, cfg: Config, thinking_budget: int = 0) -> QuotaAwareRouter:
+    return QuotaAwareRouter(role=role, models=cfg.models[role], cfg=cfg, thinking_budget=thinking_budget)

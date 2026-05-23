@@ -58,17 +58,6 @@ MATHEMATICS PROTOCOL — apply to EVERY non-trivial concept that involves an equ
 5. WHY IT MATTERS: One sentence on the practical payoff.
 """
 
-_CLOSING_SECTION = """\
-The FINAL section must be titled "Where to Go Next" with this structure:
-- **Open problems**: 2-3 specific, unresolved questions at the research \
-  frontier of {domain_label}.
-- **Start here**: One codebase, dataset, or benchmark a reader can clone and \
-  run today to begin contributing.
-- **Essential reading**: Exactly 3 papers from the bibliography that would \
-  most accelerate a newcomer's understanding of this domain. Explain in one \
-  sentence why each paper matters.
-"""
-
 _ANTI_HALLUCINATION = """\
 ANTI-HALLUCINATION RULES:
 - Cite only from the bibliography using [@citation_id] notation.
@@ -89,18 +78,12 @@ ROLE DISCIPLINE — you are ONLY a {persona_name}. Stay strictly within this rol
 """
 
 # ---------------------------------------------------------------------------
-# Persona prompts
+# Shared context block — same for all three personas in a given domain.
+# Marked with cache_control so Anthropic's prompt cache activates on resume /
+# retry runs and for the second+third persona within a single-domain retry.
 # ---------------------------------------------------------------------------
 
-_THEORETICIAN_PROMPT = """\
-You are a THEORETICIAN writing one persona's contribution to a self-contained \
-learning chapter on {domain_label}. The reader's goal is to go from zero \
-knowledge to being able to build on and advance the field.
-
-Your role: provide mathematical foundations, formal definitions, historical \
-context, and first-principles derivations. Work TOP-DOWN: establish the mental \
-model and axiomatic basis first, then derive mechanisms from theory.
-
+_SHARED_CONTEXT_BLOCK = """\
 Domain: {domain_label} (id: {domain_id})
 Reader profile: {reader_profile}
 {reader_profile_note}
@@ -116,6 +99,25 @@ Bibliography (cite ONLY from this list using the citation id field):
 
 Fetched Knowledge Sources (retrieved documentation — use for technical accuracy on tools and concepts):
 {knowledge_sources}
+
+{math_protocol}
+{concept_protocol}
+{anti_hallucination}
+"""
+
+# ---------------------------------------------------------------------------
+# Persona task blocks — persona-specific role + structure + output instruction.
+# These are the second content block in each persona message.
+# ---------------------------------------------------------------------------
+
+_THEORETICIAN_TASK = """\
+You are a THEORETICIAN writing one persona's contribution to a self-contained \
+learning chapter on {domain_label}. The reader's goal is to go from zero \
+knowledge to being able to build on and advance the field.
+
+Your role: provide mathematical foundations, formal definitions, historical \
+context, and first-principles derivations. Work TOP-DOWN: establish the mental \
+model and axiomatic basis first, then derive mechanisms from theory.
 
 STRUCTURE (follow this section order exactly):
 1. "What is {domain_label}?" — 3–5 paragraphs. One-sentence definition. \
@@ -130,11 +132,8 @@ STRUCTURE (follow this section order exactly):
 5. "Theoretical Limits and Guarantees" — What the theory proves is possible \
    or impossible. Apply MATHEMATICS PROTOCOL to any bound or theorem.
 
-{math_protocol}
-{concept_protocol}
 {closing_section_note}
 
-{anti_hallucination}
 {drift_guard}
 
 Write a PersonaOutput with persona="theoretician" and domain_id="{domain_id}". \
@@ -143,29 +142,13 @@ key_claims should list 3–7 central theoretical claims you make. \
 citations_used should list every citation id you reference.
 """
 
-_ENGINEER_PROMPT = """\
+_ENGINEER_TASK = """\
 You are an ENGINEER writing one persona's contribution to a self-contained \
 learning chapter on {domain_label}. The reader's goal is to go from zero \
 knowledge to being able to build on and advance the field.
 
 Your role: cover algorithms, architectures, implementation patterns, and system \
 design. Work FROM MECHANISM TO THEORY: show how things are built, then explain why.
-
-Domain: {domain_label} (id: {domain_id})
-Reader profile: {reader_profile}
-{reader_profile_note}
-
-Knowledge graph nodes:
-{graph_nodes}
-
-Gap analysis findings for this domain:
-{gap_analysis}
-
-Bibliography (cite ONLY from this list using the citation id field):
-{bibliography}
-
-Fetched Knowledge Sources (retrieved documentation — use for technical accuracy on tools and concepts):
-{knowledge_sources}
 
 STRUCTURE (follow this section order exactly):
 1. "Key Algorithms" — The main algorithms with pseudocode. Derive from first \
@@ -180,9 +163,6 @@ STRUCTURE (follow this section order exactly):
 5. "Common Failure Modes" — What breaks, why, and how to diagnose it. \
    Include concrete debugging checklists.
 
-{math_protocol}
-{concept_protocol}
-{anti_hallucination}
 {drift_guard}
 
 Write a PersonaOutput with persona="engineer" and domain_id="{domain_id}". \
@@ -191,7 +171,7 @@ key_claims should list 3–7 central engineering claims you make. \
 citations_used should list every citation id you reference.
 """
 
-_PRACTITIONER_PROMPT = """\
+_PRACTITIONER_TASK = """\
 You are a PRACTITIONER writing one persona's contribution to a self-contained \
 learning chapter on {domain_label}. The reader's goal is to go from zero \
 knowledge to being able to build on and advance the field.
@@ -199,22 +179,6 @@ knowledge to being able to build on and advance the field.
 Your role: cover real-world trade-offs, failure modes, benchmarks, gotchas, \
 and where to go next. Work FROM USAGE TO MECHANISM: start with what a \
 practitioner does, then explain why it works.
-
-Domain: {domain_label} (id: {domain_id})
-Reader profile: {reader_profile}
-{reader_profile_note}
-
-Knowledge graph nodes:
-{graph_nodes}
-
-Gap analysis findings for this domain:
-{gap_analysis}
-
-Bibliography (cite ONLY from this list using the citation id field):
-{bibliography}
-
-Fetched Knowledge Sources (retrieved documentation — use for technical accuracy on tools and concepts):
-{knowledge_sources}
 
 STRUCTURE (follow this section order exactly):
 1. "Minimal Working Example" — The simplest possible demonstration of \
@@ -236,9 +200,6 @@ STRUCTURE (follow this section order exactly):
      most accelerate a newcomer's understanding of this domain. Explain in one \
      sentence why each paper matters.
 
-{math_protocol}
-{concept_protocol}
-{anti_hallucination}
 {drift_guard}
 
 Write a PersonaOutput with persona="practitioner" and domain_id="{domain_id}". \
@@ -693,6 +654,7 @@ async def _research_domain(
     depth: str,
     cfg: Config,
     router,
+    critic_router,
     user_profile: dict | None = None,
 ) -> DomainSummary:
     domain_id = domain["id"]
@@ -735,54 +697,83 @@ async def _research_domain(
             term_sources = json.loads(sources_cache.read_text())
         except Exception as exc:
             _logger.warning("s5 sources load failed for %r: %s", domain_id, exc)
-    knowledge_sources_str = format_sources(term_sources)
+
+    # Depth-aware caps — keeps persona prompts under ~20k chars at all depths.
+    # Defaults: survey≈1.5k / standard≈3.2k / deep≈15k chars of knowledge sources.
+    ctx = cfg.research_context
+    knowledge_sources_str = format_sources(
+        term_sources,
+        max_terms=ctx.sources_max_terms.get(depth, 8),
+        max_sources_per_term=ctx.sources_max_per_term.get(depth, 1),
+        max_chars_per_source=ctx.sources_max_chars.get(depth, 400),
+    )
 
     gap_context = _extract_gap_context(gap_md, domain_id, domain_label)
     bib_str = _bib_summary(bibliography)
     bib_ids = [b.get("id", "") for b in bibliography]
 
     domain_nodes = [n for n in graph_nodes if n.get("domain") == domain_id]
+    # Top-N by tier+centrality: core first, then supporting, then incidental.
+    _tier_rank = {"core": 0, "supporting": 1, "incidental": 2}
+    domain_nodes_sorted = sorted(
+        domain_nodes,
+        key=lambda n: (_tier_rank.get(n.get("centrality", "incidental"), 2), n.get("name", "")),
+    )[:ctx.nodes_top_n]
     nodes_str = json.dumps(
-        [{"name": n.get("name"), "tier": n.get("tier"), "centrality": n.get("centrality")} for n in domain_nodes],
+        [{"name": n.get("name"), "tier": n.get("tier"), "centrality": n.get("centrality")}
+         for n in domain_nodes_sorted],
         indent=2,
     )
 
     reader_profile_str, reader_profile_note = _reader_profile_strings(user_profile or {})
 
-    closing_section = _CLOSING_SECTION.format(domain_label=domain_label)
     closing_section_note = (
         "NOTE: The Practitioner agent will write the 'Where to Go Next' section. "
         "You do NOT need to include it."
     )
 
-    # Shared format kwargs for persona prompts
-    _persona_kwargs = dict(
+    # Shared context block — identical across all three personas for this domain.
+    # cache_control tells Anthropic to cache this prefix; the 90% cache-read discount
+    # activates on resume/retry runs and when parallel personas complete and the
+    # reconciler reuses the same prefix. Requires ≥4096 tokens (deep depth reliably
+    # exceeds this; verify via cache_read_input_tokens in llm_call_done events).
+    _shared_block = {
+        "type": "text",
+        "text": _SHARED_CONTEXT_BLOCK.format(
+            domain_label=domain_label,
+            domain_id=domain_id,
+            graph_nodes=nodes_str,
+            gap_analysis=gap_context,
+            bibliography=bib_str,
+            knowledge_sources=knowledge_sources_str,
+            reader_profile=reader_profile_str,
+            reader_profile_note=reader_profile_note,
+            math_protocol=_MATH_PROTOCOL,
+            concept_protocol=_CONCEPT_PROTOCOL,
+            anti_hallucination=_ANTI_HALLUCINATION,
+        ),
+        "cache_control": {"type": "ephemeral"},
+    }
+
+    def _persona_msg(task_text: str) -> list[dict]:
+        return [{"role": "user", "content": [_shared_block, {"type": "text", "text": task_text}]}]
+
+    theoretician_msg = _persona_msg(_THEORETICIAN_TASK.format(
         domain_label=domain_label,
         domain_id=domain_id,
-        graph_nodes=nodes_str,
-        gap_analysis=gap_context,
-        bibliography=bib_str,
-        knowledge_sources=knowledge_sources_str,
-        reader_profile=reader_profile_str,
-        reader_profile_note=reader_profile_note,
-        math_protocol=_MATH_PROTOCOL,
-        concept_protocol=_CONCEPT_PROTOCOL,
-        anti_hallucination=_ANTI_HALLUCINATION,
-        drift_guard=_PERSONA_DRIFT_GUARD,  # filled per-persona below
-    )
-
-    # Inject persona-specific drift guard (persona_name filled at call site)
-    def _with_persona(name: str) -> dict:
-        d = dict(_persona_kwargs)
-        d["drift_guard"] = _PERSONA_DRIFT_GUARD.format(persona_name=name)
-        return d
-
-    theoretician_msg = [{"role": "user", "content": _THEORETICIAN_PROMPT.format(
-        **_with_persona("THEORETICIAN"),
         closing_section_note=closing_section_note,
-    )}]
-    engineer_msg = [{"role": "user", "content": _ENGINEER_PROMPT.format(**_with_persona("ENGINEER"))}]
-    practitioner_msg = [{"role": "user", "content": _PRACTITIONER_PROMPT.format(**_with_persona("PRACTITIONER"))}]
+        drift_guard=_PERSONA_DRIFT_GUARD.format(persona_name="THEORETICIAN"),
+    ))
+    engineer_msg = _persona_msg(_ENGINEER_TASK.format(
+        domain_label=domain_label,
+        domain_id=domain_id,
+        drift_guard=_PERSONA_DRIFT_GUARD.format(persona_name="ENGINEER"),
+    ))
+    practitioner_msg = _persona_msg(_PRACTITIONER_TASK.format(
+        domain_label=domain_label,
+        domain_id=domain_id,
+        drift_guard=_PERSONA_DRIFT_GUARD.format(persona_name="PRACTITIONER"),
+    ))
 
     # Run all three personas in parallel
     theoretician_result, engineer_result, practitioner_result = await asyncio.gather(
@@ -849,7 +840,7 @@ async def _research_domain(
             gap_analysis=gap_context,
             narrative=_compact_narrative(current_reconciled.narrative, domain_label),
         )}]
-        critique: CritiqueResult = await router.call(critic_msg, CritiqueResult)
+        critique: CritiqueResult = await critic_router.call(critic_msg, CritiqueResult)
 
         # Write critique artifact
         critique_path = audit_dir / f"critique_s4_{domain_id}_round{rnd}.md"
@@ -879,16 +870,24 @@ async def _research_domain(
             termination_reason = "no_issues"
             break
 
-        # (c) Gap list identical to prior round — critic has stalled
-        if prev_issues is not None and current_issues == prev_issues:
-            termination_reason = "critic_stalled"
-            emit({
-                "event": "s4_critic_stalled",
-                "domain_id": domain_id,
-                "round": rnd,
-                "issue_count": len(current_issues),
-            })
-            break
+        # (c) Critic has stalled — same issues rephrased, no new ground covered.
+        # Exact set equality rarely fires (model rephrases); use token-level Jaccard
+        # so "same structural concerns, different wording" is caught at >0.85 similarity.
+        if prev_issues is not None:
+            all_prev = set(" ".join(prev_issues).lower().split())
+            all_cur = set(" ".join(current_issues).lower().split())
+            union = all_prev | all_cur
+            jaccard = len(all_prev & all_cur) / len(union) if union else 1.0
+            if jaccard > 0.85:
+                termination_reason = "critic_stalled"
+                emit({
+                    "event": "s4_critic_stalled",
+                    "domain_id": domain_id,
+                    "round": rnd,
+                    "issue_count": len(current_issues),
+                    "jaccard": round(jaccard, 3),
+                })
+                break
 
         prev_issues = current_issues
 
@@ -965,6 +964,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
 
     depth = state["depth"]
     router = make_router("researcher", cfg)
+    critic_router = make_router("researcher", cfg, thinking_budget=cfg.critic_thinking.budget_tokens)
 
     profile_path = state_dir / "user_profile.json"
     user_profile: dict = {}
@@ -982,6 +982,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
             depth=depth,
             cfg=cfg,
             router=router,
+            critic_router=critic_router,
             user_profile=user_profile,
         )
         for domain in domains
@@ -991,9 +992,11 @@ async def run(state: PipelineState, cfg: Config) -> None:
 
     failed = 0
     succeeded = 0
+    failed_ids: list[str] = []
     for domain, result in zip(domains, raw_results):
         if isinstance(result, Exception):
             failed += 1
+            failed_ids.append(domain["id"])
             emit({
                 "event": "s4_domain_failed",
                 "domain_id": domain["id"],
@@ -1002,10 +1005,14 @@ async def run(state: PipelineState, cfg: Config) -> None:
         else:
             succeeded += 1
 
+    if failed_ids:
+        _logger.warning("s5: %d domain(s) failed to produce content: %s", len(failed_ids), ", ".join(failed_ids))
+
     mark_stage_complete(state_dir, 5)
     emit({
         "event": "s5_research_complete",
         "stage": 5,
         "domains_succeeded": succeeded,
         "domains_failed": failed,
+        "domains_failed_ids": failed_ids,
     })
