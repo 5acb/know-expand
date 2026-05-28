@@ -47,12 +47,12 @@ know_expand/
   observe.py      — self-contained web server + HTML/CSS/JS dashboard (~2700 lines)
   sources.py      — multi-source knowledge fetcher: Wikipedia REST / PyPI JSON / arXiv Atom
   agents/
-    base.py       — QuotaAwareRouter, geminicli provider, _instructor_mode(), probe_models()
+    base.py       — QuotaAwareRouter, _instructor_mode(), probe_models()
     schemas.py    — all Pydantic models for LLM structured outputs
   stages/
     s*.py         — one file per stage
 
-config.yaml       — all tunable knobs; timeouts.geminicli_timeout_s = 600
+config.yaml       — all tunable knobs
 models.yaml       — model lists per role (researcher, extractor, classifier, etc.)
 runs/             — one subdir per run: state/ logs/ output/
 ```
@@ -68,22 +68,9 @@ Tries models in order from `models.yaml` for the given role. Fallback rules:
 | `litellm.AuthenticationError` (may be wrapped in `InstructorRetryException`) | Permanently skip model; use `_find_in_chain()` to walk exception chain |
 | Rate-limit / 503 **with** `Retry-After` header | Sleep exact duration, retry same model |
 | Headerless 429/503 | Exponential backoff (2s → 4s → 8s); skip after 3 consecutive failures |
-| geminicli `RuntimeError` (any) | Permanently skip geminicli for this run; emit `model_geminicli_skip`; try next model |
 | All models exhausted | Emit `quota_exhausted`; raise `RuntimeError` |
 
 `_next_model()` checks both `self._skip` (per-router) **and** `_PROBED_UNAVAILABLE` (global) — so a quota discovery in one coroutine immediately affects all other routers.
-
-### geminicli provider (`geminicli/` prefix)
-
-Spawns `npx @google/gemini-cli -m gemini-3.1-pro-preview -p <prompt>` as a subprocess. No API key — uses cached OAuth from `~/.gemini/oauth_creds.json`.
-
-**Quota detection:** `_parse_geminicli_stderr()` checks stderr for `TerminalQuotaError`. When found:
-1. Adds `geminicli/{model}` to the global `_PROBED_UNAVAILABLE` set immediately — all routers across all roles stop trying geminicli without spawning further subprocesses
-2. Raises `RuntimeError("geminicli quota exhausted resets in Xh")` with parsed `retryDelayMs`
-
-Timeout: `cfg.timeouts.get("geminicli_timeout_s", 120)` — currently 600s in `config.yaml`.
-
-**Do not use `getattr(cfg, "geminicli_timeout_s", 120)`** — `Config.timeouts` is a `dict`, not dataclass fields.
 
 ### Instructor modes (`_instructor_mode(model)`)
 
@@ -93,7 +80,7 @@ Timeout: `cfg.timeouts.get("geminicli_timeout_s", 120)` — currently 600s in `c
 |-------|------|--------|
 | `mistral/*` | `instructor.Mode.JSON` | `MISTRAL_STRUCTURED_OUTPUTS` requires `mistralai` SDK; litellm works with JSON mode |
 | `groq/*` | `instructor.Mode.JSON` | Groq Llama models return parallel tool calls in TOOLS mode |
-| `gemini/*` (API, not geminicli) | `instructor.Mode.JSON` | `GEMINI_TOOLS` mode requires native `google-generativeai` SDK; litellm works with JSON mode |
+| `gemini/*` | `instructor.Mode.JSON` | `GEMINI_TOOLS` mode requires native `google-generativeai` SDK; litellm works with JSON mode |
 | everything else | `instructor.Mode.TOOLS` | Default; correct for OpenAI/Anthropic |
 
 ### Per-provider concurrency semaphores
@@ -141,7 +128,7 @@ Planned `--batch-mode` flag for unattended deep runs: submits all 8-domain × 4 
 Set in `.env` or via web UI (session only — not persisted to disk):
 - `GROQ_API_KEY` — required for groq fallback (present in `.env`)
 - `MISTRAL_API_KEY` — required for mistral fallback (present in `.env`)
-- `GEMINI_API_KEY` / `GOOGLE_API_KEY` — for `gemini/` API models (not geminicli)
+- `GEMINI_API_KEY` / `GOOGLE_API_KEY` — for `gemini/` API models
 - `ANTHROPIC_API_KEY` — for Claude models
 - `OPENAI_API_KEY` — for GPT models
 - `SS_API_KEY` — Semantic Scholar (optional, raises rate limit from 0.1 → 1 req/s)
@@ -196,5 +183,4 @@ Single Python file serving a self-contained HTML/CSS/JS dashboard. No external f
 - `[NEEDS_CITATION]` is logged, never a build failure
 - No Chinese API providers
 - Models and llama.cpp are pre-configured in `~/ccr` — do not pollute home or other locations
-- `gemini/gemini-3.5-flash` is the API model; `geminicli/gemini-3.5-flash` uses the free OAuth CLI — they are different providers and different costs ($1.50/$9.00 per M vs free)
-- `gemini/gemini-2.5-flash` ($0.30/$2.50/M) is the intended cheap paid fallback — do NOT confuse with 3.5-flash which is 5× more expensive
+- `gemini/gemini-2.5-flash` ($0.30/$2.50/M) is the intended cheap paid fallback — do NOT confuse with `gemini/gemini-3.5-flash` which is 5× more expensive

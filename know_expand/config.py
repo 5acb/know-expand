@@ -68,6 +68,8 @@ class GraphDefaultsConfig:
 @dataclass
 class LlamaCppConfig:
     base_url: str = "http://192.168.1.117:8080"
+    timeout_s: int = 1200     # per-call HTTP timeout; thinking models can take minutes
+    concurrency: int = 1      # serialize calls — local server handles one at a time
 
 
 @dataclass
@@ -79,7 +81,7 @@ class CriticThinkingConfig:
 class ResearchContextConfig:
     """Prompt-size controls for S5 persona prompts.
 
-    Depth-aware caps prevent the ~44k-char prompts that caused geminicli timeouts
+    Depth-aware caps keep persona prompts well under 15k chars
     while still giving deep runs more context than shallow ones.
     """
     nodes_top_n: int = 30
@@ -111,6 +113,7 @@ class Config:
     llamacpp: LlamaCppConfig = field(default_factory=LlamaCppConfig)
     research_context: ResearchContextConfig = field(default_factory=ResearchContextConfig)
     critic_thinking: CriticThinkingConfig = field(default_factory=CriticThinkingConfig)
+    free_mode: bool = False  # --free flag: route all calls through llamacpp only
 
 
 def load_config(

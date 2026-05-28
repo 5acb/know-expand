@@ -17,265 +17,11 @@ _logger = logging.getLogger("know_expand.router")
 
 T = TypeVar("T", bound=BaseModel)
 
-# ---------------------------------------------------------------------------
-# Gemini CLI provider  (prefix "geminicli/")
-# ---------------------------------------------------------------------------
-# Uses `npx @google/gemini-cli` with cached OAuth — no API key required.
-# Structured output is achieved by injecting the JSON schema into the prompt
-# and extracting the first JSON object/array from the response.
-
-_GEMINICLI_PREFIX = "geminicli/"
-# Model passed to the CLI binary (free OAuth path).
-_GEMINICLI_CLI_MODEL = "gemini-3.1-pro-preview"
-
 _LLAMACPP_PREFIX = "llamacpp/"
-
-
-def _is_geminicli(model: str) -> bool:
-    return model.startswith(_GEMINICLI_PREFIX)
 
 
 def _is_llamacpp(model: str) -> bool:
     return model.startswith(_LLAMACPP_PREFIX)
-
-
-def _geminicli_model_name(model: str) -> str:
-    """Return the model name to pass to the CLI binary."""
-    return _GEMINICLI_CLI_MODEL
-
-
-def _messages_to_prompt(messages: list[dict]) -> str:
-    """Flatten a messages list into a single text prompt for the CLI."""
-    parts: list[str] = []
-    for m in messages:
-        role = m.get("role", "user")
-        content = m.get("content", "")
-        if isinstance(content, list):
-            # multi-part content blocks
-            content = "\n".join(
-                block.get("text", "") for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
-            )
-        if role == "system":
-            parts.append(f"[System]\n{content}")
-        elif role == "assistant":
-            parts.append(f"[Assistant]\n{content}")
-        else:
-            parts.append(f"[User]\n{content}")
-    return "\n\n".join(parts)
-
-
-def _extract_json(text: str) -> str:
-    """Pull the first JSON object or array out of CLI response text."""
-    # Strip markdown code fences
-    text = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.MULTILINE)
-    text = re.sub(r"```\s*$", "", text.strip(), flags=re.MULTILINE)
-    text = text.strip()
-    # Find outermost { } or [ ]
-    for start_char, end_char in [('{', '}'), ('[', ']')]:
-        start = text.find(start_char)
-        if start == -1:
-            continue
-        depth = 0
-        in_str = False
-        escape = False
-        for i, ch in enumerate(text[start:], start):
-            if escape:
-                escape = False
-                continue
-            if ch == '\\' and in_str:
-                escape = True
-                continue
-            if ch == '"' and not escape:
-                in_str = not in_str
-                continue
-            if in_str:
-                continue
-            if ch == start_char:
-                depth += 1
-            elif ch == end_char:
-                depth -= 1
-                if depth == 0:
-                    return text[start:i + 1]
-    return text  # fall back to raw text; Pydantic will error cleanly
-
-
-async def _do_geminicli_call(
-    model: str,
-    messages: list[dict],
-    schema: type[T],
-    cfg: Config,
-    role: str = "?",
-) -> "T":
-    cli_model = _geminicli_model_name(model)
-    schema_json = json.dumps(schema.model_json_schema(), indent=2)
-    base_prompt = _messages_to_prompt(messages)
-    full_prompt = (
-        f"{base_prompt}\n\n"
-        f"---\n"
-        f"Respond with a single JSON object that strictly matches this JSON Schema "
-        f"(no extra keys, no markdown, no explanation — raw JSON only):\n"
-        f"{schema_json}"
-    )
-
-    t0 = time.monotonic()
-    emit({
-        "event": "llm_call_start",
-        "role": role,
-        "model": f"geminicli/{cli_model}",
-        "schema": schema.__name__,
-        "msg_chars": len(full_prompt),
-    })
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "npx", "--yes", "@google/gemini-cli",
-            "-m", cli_model,
-            "-p", full_prompt,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=cfg.timeouts.get("geminicli_timeout_s", 120),
-        )
-        raw = stdout_b.decode(errors="replace").strip()
-        # The CLI exits non-zero even on success when MCP warnings are present.
-        # Treat empty stdout as the real failure signal; non-empty stdout = success.
-        if not raw:
-            err_text = stderr_b.decode(errors="replace")
-            is_quota, retry_s = _parse_geminicli_stderr(err_text)
-            if is_quota:
-                # Terminal daily-cap exhausted — mark the original model string
-                # (from models.yaml, e.g. "geminicli/gemini-3.5-flash") so
-                # _next_model() finds it in _PROBED_UNAVAILABLE. Using cli_model
-                # here would add the wrong key ("geminicli/gemini-3.1-pro-preview")
-                # and the skip would silently not fire.
-                _PROBED_UNAVAILABLE.add(model)
-                retry_info = f" resets in {retry_s / 3600:.1f}h" if retry_s else ""
-                raise RuntimeError(f"geminicli quota exhausted{retry_info}")
-            raise RuntimeError(f"gemini-cli returned no output (exit {proc.returncode}): {err_text[:400]}")
-
-        json_text = _extract_json(raw)
-        result = schema.model_validate_json(json_text)
-
-        elapsed = time.monotonic() - t0
-        emit({
-            "event": "llm_call_done",
-            "role": role,
-            "model": f"geminicli/{cli_model}",
-            "schema": schema.__name__,
-            "elapsed_s": round(elapsed, 2),
-            "tok_in": None,
-            "tok_out": None,
-            "tok_s": None,
-        })
-        return result
-
-    except Exception as exc:
-        elapsed = time.monotonic() - t0
-        emit({
-            "event": "llm_call_error",
-            "role": role,
-            "model": f"geminicli/{cli_model}",
-            "schema": schema.__name__,
-            "elapsed_s": round(elapsed, 2),
-            "error": str(exc)[:200],
-        })
-        raise
-
-
-async def _do_geminicli_tool_call(
-    model: str,
-    messages: list[dict],
-    tools: list[dict],
-    cfg: Config,
-    role: str = "?",
-) -> dict:
-    """Tool-use via Gemini CLI: describe tools as JSON in the prompt, parse back."""
-    cli_model = _geminicli_model_name(model)
-    tools_json = json.dumps(tools, indent=2)
-    base_prompt = _messages_to_prompt(messages)
-    full_prompt = (
-        f"{base_prompt}\n\n"
-        f"---\n"
-        f"You have access to the following tools:\n{tools_json}\n\n"
-        f"If you need to call a tool, respond with a JSON object in this exact format "
-        f"(raw JSON only, no markdown):\n"
-        f'{{"tool_call": {{"name": "<tool_name>", "arguments": {{...}}}}}}\n\n'
-        f"If no tool call is needed, respond normally as plain text."
-    )
-
-    reported_model = f"geminicli/{cli_model}"
-    t0 = time.monotonic()
-    emit({"event": "agent_tool_call_start", "role": role, "model": reported_model})
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "npx", "--yes", "@google/gemini-cli",
-            "-m", cli_model,
-            "-p", full_prompt,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=cfg.timeouts.get("geminicli_timeout_s", 120),
-        )
-        raw = stdout_b.decode(errors="replace").strip()
-        if not raw:
-            err_text = stderr_b.decode(errors="replace")
-            is_quota, retry_s = _parse_geminicli_stderr(err_text)
-            if is_quota:
-                _PROBED_UNAVAILABLE.add(model)  # use original models.yaml key, not cli_model
-                retry_info = f" resets in {retry_s / 3600:.1f}h" if retry_s else ""
-                raise RuntimeError(f"geminicli quota exhausted{retry_info}")
-            raise RuntimeError(f"gemini-cli returned no output (exit {proc.returncode}): {err_text[:400]}")
-
-        elapsed = time.monotonic() - t0
-        emit({
-            "event": "agent_tool_call_done",
-            "role": role,
-            "model": reported_model,
-            "elapsed_s": round(elapsed, 2),
-            "tool_calls": 0,
-        })
-
-        # Try to parse a tool call from the response
-        json_text = _extract_json(raw)
-        try:
-            parsed = json.loads(json_text)
-            if "tool_call" in parsed:
-                tc = parsed["tool_call"]
-                return {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{
-                        "id": f"cli_{int(t0)}",
-                        "type": "function",
-                        "function": {
-                            "name": tc.get("name", ""),
-                            "arguments": json.dumps(tc.get("arguments", {})),
-                        },
-                    }],
-                }
-        except Exception:
-            pass
-
-        # No tool call — plain text response
-        return {"role": "assistant", "content": raw, "tool_calls": None}
-
-    except Exception as exc:
-        elapsed = time.monotonic() - t0
-        emit({
-            "event": "llm_call_error",
-            "role": role,
-            "model": reported_model,
-            "schema": "tool_call",
-            "elapsed_s": round(elapsed, 2),
-            "error": str(exc)[:200],
-        })
-        raise
 
 # ---------------------------------------------------------------------------
 # llamacpp provider  (prefix "llamacpp/")
@@ -337,6 +83,7 @@ async def _do_llamacpp_call(
             api_key="not-needed",
             messages=messages,
             response_model=schema,
+            timeout=cfg.llamacpp.timeout_s,
         )
         elapsed = time.monotonic() - t0
         usage = getattr(completion, "usage", None)
@@ -376,21 +123,6 @@ _PROBED_UNAVAILABLE: set[str] = set()
 _BURST_BACKOFF = [2, 4, 8]
 
 
-def _parse_geminicli_stderr(stderr_text: str) -> tuple[bool, float | None]:
-    """Check stderr for a terminal quota error.
-
-    Returns (is_quota_error, retry_after_seconds_or_None).
-    TerminalQuotaError means the free-tier daily cap is hit — no amount of
-    waiting within a run will fix it.  We detect it and mark geminicli
-    globally unavailable so every subsequent _next_model() call skips it.
-    """
-    if "TerminalQuotaError" not in stderr_text and "exhausted your capacity" not in stderr_text:
-        return False, None
-    m = re.search(r"retryDelayMs[:\s]+([0-9.]+)", stderr_text)
-    retry_s = float(m.group(1)) / 1000.0 if m else None
-    return True, retry_s
-
-
 def _find_in_chain(exc: BaseException, *types) -> BaseException | None:
     """Walk __cause__ / __context__ chain; return first match for any of types."""
     seen = set()
@@ -420,20 +152,8 @@ def _is_auth_error(exc: BaseException) -> BaseException | None:
     return None
 
 
-def _geminicli_is_available() -> bool:
-    """True if npx exists and the Gemini CLI OAuth credentials are cached."""
-    import shutil
-    if not shutil.which("npx"):
-        return False
-    # Gemini CLI stores OAuth creds in ~/.gemini/oauth_creds.json
-    creds = os.path.expanduser("~/.gemini/oauth_creds.json")
-    return os.path.exists(creds)
-
-
 async def _probe_one(model: str, cfg: Config) -> bool:
     """Return True if model appears usable. Checks env vars only — no LLM call."""
-    if _is_geminicli(model):
-        return _geminicli_is_available()
     if "claude" in model or "anthropic" in model:
         return bool(os.environ.get("ANTHROPIC_API_KEY"))
     if "gpt" in model or "openai" in model:
@@ -470,26 +190,16 @@ async def probe_models(cfg: Config) -> None:
     available = all_models - unavailable
     _PROBED_UNAVAILABLE = unavailable
 
-    def _report_name(m: str) -> str:
-        return f"geminicli/{_GEMINICLI_CLI_MODEL}" if _is_geminicli(m) else m
-
     emit({
         "event": "model_probe_done",
-        "available": sorted(_report_name(m) for m in available),
+        "available": sorted(available),
         "unavailable": sorted(unavailable),
     })
-
-    # Compute the first available model for each role and emit as an assignment map.
-    # For geminicli/ entries, report the real CLI model name so the log is truthful.
-    def _effective_name(m: str) -> str:
-        if _is_geminicli(m):
-            return f"geminicli/{_GEMINICLI_CLI_MODEL}"
-        return m
 
     assignments: dict[str, str | None] = {}
     for role, models in cfg.models.items():
         chosen = next((m for m in models if m not in unavailable), None)
-        assignments[role] = _effective_name(chosen) if chosen else None
+        assignments[role] = chosen
 
     emit({
         "event": "model_role_assignments",
@@ -503,10 +213,17 @@ _SEMAPHORE: asyncio.Semaphore | None = None
 # to avoid bursting all 20 map-phase tasks into them simultaneously.
 _GROQ_SEMAPHORE: asyncio.Semaphore | None = None
 _MISTRAL_SEMAPHORE: asyncio.Semaphore | None = None
+# llamacpp runs on a single local server — serialize by default (concurrency=1)
+# so parallel map-phase tasks queue rather than thrash a single GPU.
+_LLAMACPP_SEMAPHORE: asyncio.Semaphore | None = None
 
 
 def _get_semaphore(model: str, cfg: Config) -> asyncio.Semaphore:
-    global _SEMAPHORE, _GROQ_SEMAPHORE, _MISTRAL_SEMAPHORE
+    global _SEMAPHORE, _GROQ_SEMAPHORE, _MISTRAL_SEMAPHORE, _LLAMACPP_SEMAPHORE
+    if model.startswith(_LLAMACPP_PREFIX):
+        if _LLAMACPP_SEMAPHORE is None:
+            _LLAMACPP_SEMAPHORE = asyncio.Semaphore(cfg.llamacpp.concurrency)
+        return _LLAMACPP_SEMAPHORE
     if "groq" in model:
         if _GROQ_SEMAPHORE is None:
             _GROQ_SEMAPHORE = asyncio.Semaphore(3)
@@ -536,7 +253,7 @@ def _instructor_mode(model: str):
         return instructor.Mode.JSON
     if "groq" in model:
         return instructor.Mode.JSON
-    if "gemini" in model and not _is_geminicli(model):
+    if "gemini" in model:
         # gemini/ API models route through litellm, not the native Google SDK.
         # GEMINI_TOOLS mode requires model set at client-patch time (native SDK only);
         # JSON mode works fine through litellm's openai-compat translation layer.
@@ -592,8 +309,6 @@ async def _do_call(
     cfg: Config,
     role: str = "?",
 ) -> T:
-    if _is_geminicli(model):
-        return await _do_geminicli_call(model, messages, schema, cfg, role)
     if _is_llamacpp(model):
         return await _do_llamacpp_call(model, messages, schema, cfg, role)
 
@@ -797,20 +512,6 @@ class QuotaAwareRouter:
                         "reason": str(transient_err),
                     })
                 else:
-                    # geminicli errors are always terminal for this run (quota,
-                    # session expired, empty output) — skip and try next model.
-                    if _is_geminicli(model):
-                        async with self._lock:
-                            self._skip.add(model)
-                            next_model = self._next_model()
-                        emit({
-                            "event": "model_geminicli_skip",
-                            "role": self.role,
-                            "skipped_model": model,
-                            "next_model": next_model,
-                            "reason": str(e)[:200],
-                        })
-                        continue
                     raise
 
         emit({
@@ -840,14 +541,6 @@ class QuotaAwareRouter:
                 "model": model,
             })
             try:
-                if _is_geminicli(model):
-                    async with sem:
-                        result_msg = await _do_geminicli_tool_call(
-                            model, messages, tools, self.cfg, role=self.role
-                        )
-                    self._fail_counts.pop(model, None)
-                    return result_msg
-
                 # llamacpp tool-calling: route to foiba OpenAI-compat endpoint
                 if _is_llamacpp(model):
                     model_name = model[len(_LLAMACPP_PREFIX):]
@@ -861,6 +554,7 @@ class QuotaAwareRouter:
                             messages=messages,
                             tools=tools,
                             tool_choice="auto",
+                            timeout=self.cfg.llamacpp.timeout_s,
                         )
                 else:
                     async with sem:
@@ -940,21 +634,17 @@ class QuotaAwareRouter:
                         "reason": str(transient_err),
                     })
                 else:
-                    if _is_geminicli(model):
-                        async with self._lock:
-                            self._skip.add(model)
-                            next_model = self._next_model()
-                        emit({
-                            "event": "model_geminicli_skip",
-                            "role": self.role,
-                            "skipped_model": model,
-                            "next_model": next_model,
-                            "reason": str(e)[:200],
-                        })
-                        continue
                     raise
         raise RuntimeError(f"All models exhausted for agent role: {self.role}")
 
 
 def make_router(role: str, cfg: Config, thinking_budget: int = 0) -> QuotaAwareRouter:
-    return QuotaAwareRouter(role=role, models=cfg.models[role], cfg=cfg, thinking_budget=thinking_budget)
+    models = cfg.models[role]
+    if cfg.free_mode:
+        models = [m for m in models if m.startswith(_LLAMACPP_PREFIX)]
+        if not models:
+            raise RuntimeError(
+                f"--free mode: no llamacpp/ model configured for role '{role}'. "
+                f"Add a 'llamacpp/<name>' entry to models.yaml for this role."
+            )
+    return QuotaAwareRouter(role=role, models=models, cfg=cfg, thinking_budget=thinking_budget)

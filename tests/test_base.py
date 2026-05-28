@@ -9,9 +9,9 @@ from know_expand.agents.base import (
     QuotaAwareRouter,
     _msg_chars,
     _PROBED_UNAVAILABLE,
-    _parse_geminicli_stderr,
     _find_in_chain,
     _instructor_mode,
+    make_router,
 )
 from know_expand.config import (
     BibliographyConfig,
@@ -32,7 +32,7 @@ def _make_cfg(models: dict[str, list[str]] | None = None) -> Config:
         centrality=CentralityConfig(),
         rate_limits={"semantic_scholar": RateLimitConfig(max_rate=100, time_period=300)},
         concurrency=ConcurrencyConfig(default=4),
-        timeouts={"default": 30, "geminicli_timeout_s": 600},
+        timeouts={"default": 30},
         adversarial_rounds={"survey": 1, "standard": 2, "deep": 3},
         boilerplate_stop_list=[],
         models=models or {"researcher": ["claude-3-haiku"]},
@@ -213,108 +213,6 @@ async def test_router_auth_error_skips_model_and_tries_next():
     assert call_count["n"] == 2
 
 
-@pytest.mark.asyncio
-async def test_router_geminicli_error_skips_and_continues():
-    """Any RuntimeError from geminicli causes the model to be skipped; next model is tried."""
-    from pydantic import BaseModel
-
-    class Dummy(BaseModel):
-        value: str
-
-    cfg = _make_cfg({"researcher": ["geminicli/gemini-3.5-flash", "fallback-model"]})
-    router = QuotaAwareRouter("researcher", ["geminicli/gemini-3.5-flash", "fallback-model"], cfg)
-
-    fallback_result = Dummy(value="from_fallback")
-
-    async def fake_do_call(model, messages, schema, cfg_, role="?", budget=0):
-        if "geminicli" in model:
-            raise RuntimeError("geminicli quota exhausted resets in 12.0h")
-        return fallback_result
-
-    with patch("know_expand.agents.base._do_call_with_thinking", side_effect=fake_do_call):
-        result = await router.call([{"role": "user", "content": "test"}], Dummy)
-
-    assert result.value == "from_fallback"
-    assert "geminicli/gemini-3.5-flash" in router._skip
-
-
-@pytest.mark.asyncio
-async def test_geminicli_quota_adds_original_model_key_to_probed_unavailable():
-    """
-    _PROBED_UNAVAILABLE must receive the original models.yaml key
-    (e.g. "geminicli/gemini-3.5-flash"), NOT the internal cli_model name
-    ("geminicli/gemini-3.1-pro-preview").  The router's _next_model() looks
-    up the models.yaml key, so the wrong key silently never fires.
-    """
-    import know_expand.agents.base as base_mod
-    from unittest.mock import MagicMock
-
-    original = set(base_mod._PROBED_UNAVAILABLE)
-    try:
-        # Build a fake subprocess result: empty stdout + TerminalQuotaError stderr
-        quota_stderr = b"Error: TerminalQuotaError retryDelayMs: 3600000"
-        proc = MagicMock()
-        proc.returncode = 1
-
-        async def fake_communicate():
-            return b"", quota_stderr
-
-        proc.communicate = fake_communicate
-
-        async def fake_create_subprocess(*args, **kwargs):
-            return proc
-
-        from know_expand.config import load_config
-        cfg = load_config()
-
-        from pydantic import BaseModel as PBM
-
-        class _Dummy(PBM):
-            value: str
-
-        with patch("asyncio.create_subprocess_exec", side_effect=fake_create_subprocess):
-            with pytest.raises(RuntimeError, match="geminicli quota exhausted"):
-                await base_mod._do_geminicli_call(
-                    model="geminicli/gemini-3.5-flash",
-                    messages=[{"role": "user", "content": "hi"}],
-                    schema=_Dummy,
-                    cfg=cfg,
-                    role="researcher",
-                )
-
-        # The original model string must be in PROBED_UNAVAILABLE, not the cli model name
-        assert "geminicli/gemini-3.5-flash" in base_mod._PROBED_UNAVAILABLE
-        assert "geminicli/gemini-3.1-pro-preview" not in base_mod._PROBED_UNAVAILABLE
-    finally:
-        base_mod._PROBED_UNAVAILABLE.clear()
-        base_mod._PROBED_UNAVAILABLE.update(original)
-
-
-# ---------------------------------------------------------------------------
-# _parse_geminicli_stderr — quota detection
-# ---------------------------------------------------------------------------
-
-def test_parse_geminicli_stderr_detects_terminal_quota():
-    stderr = "Error: TerminalQuotaError — you have exhausted your capacity. retryDelayMs: 86400000"
-    is_quota, retry_s = _parse_geminicli_stderr(stderr)
-    assert is_quota is True
-    assert retry_s == pytest.approx(86400.0)
-
-
-def test_parse_geminicli_stderr_no_quota():
-    stderr = "Warning: some MCP server issue\nConnected to 3 servers"
-    is_quota, retry_s = _parse_geminicli_stderr(stderr)
-    assert is_quota is False
-    assert retry_s is None
-
-
-def test_parse_geminicli_stderr_quota_without_retry_delay():
-    stderr = "TerminalQuotaError: capacity exceeded"
-    is_quota, retry_s = _parse_geminicli_stderr(stderr)
-    assert is_quota is True
-    assert retry_s is None
-
-
 # ---------------------------------------------------------------------------
 # _find_in_chain — exception chain walker
 # ---------------------------------------------------------------------------
@@ -383,12 +281,35 @@ def test_instructor_mode_openai():
     assert _instructor_mode("gpt-4o") == instructor.Mode.TOOLS
 
 
-def test_instructor_mode_geminicli_not_json():
-    """geminicli models bypass instructor entirely, but _instructor_mode should
-    return TOOLS (not JSON) for them since the geminicli path never uses instructor."""
-    import instructor
-    # geminicli does NOT contain plain "gemini" — starts with "geminicli/"
-    # The JSON mode check is only for "gemini" AND NOT geminicli
-    result = _instructor_mode("geminicli/gemini-3.5-flash")
-    # Should be TOOLS because the geminicli check is `not _is_geminicli(model)`
-    assert result == instructor.Mode.TOOLS
+
+
+# ---------------------------------------------------------------------------
+# --free mode — make_router() model filtering
+# ---------------------------------------------------------------------------
+
+def test_make_router_free_mode_filters_to_llamacpp():
+    """free_mode=True: only llamacpp/ entries survive into the router."""
+    cfg = _make_cfg({"researcher": [
+        "gemini/gemini-2.5-flash",
+        "groq/llama-3.3-70b-versatile",
+        "llamacpp/glm4",
+    ]})
+    cfg.free_mode = True
+    router = make_router("researcher", cfg)
+    assert router.models == ["llamacpp/glm4"]
+
+
+def test_make_router_free_mode_no_llamacpp_raises():
+    """free_mode=True with no llamacpp/ models raises a clear RuntimeError."""
+    cfg = _make_cfg({"researcher": ["gemini/gemini-2.5-flash", "groq/llama-3.3-70b-versatile"]})
+    cfg.free_mode = True
+    with pytest.raises(RuntimeError, match="llamacpp"):
+        make_router("researcher", cfg)
+
+
+def test_make_router_normal_mode_unfiltered():
+    """free_mode=False (default): all models are passed through unchanged."""
+    models = ["gemini/gemini-2.5-flash", "llamacpp/glm4"]
+    cfg = _make_cfg({"researcher": models})
+    router = make_router("researcher", cfg)
+    assert router.models == models

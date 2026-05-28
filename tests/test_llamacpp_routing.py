@@ -13,21 +13,25 @@ def _cfg_with_llamacpp(base_url: str = "http://localhost:8080") -> Config:
     return cfg
 
 
-def test_llamacpp_uses_global_semaphore():
-    """llamacpp/ and cloud models both use the global default semaphore.
-    Groq/Mistral get their own tighter semaphores."""
-    from know_expand.agents.base import _get_semaphore, _GROQ_SEMAPHORE, _MISTRAL_SEMAPHORE
+def test_llamacpp_has_own_semaphore():
+    """llamacpp/ gets its own dedicated semaphore (sized to cfg.llamacpp.concurrency).
+    Groq and Mistral also get their own tighter semaphores.
+    Cloud models (claude, openai, gemini, …) share the global default semaphore."""
+    from know_expand.agents.base import _get_semaphore
     cfg = _cfg_with_llamacpp()
     sem_local = _get_semaphore("llamacpp/llama-3.2-3b", cfg)
     sem_cloud = _get_semaphore("claude-sonnet-4-6", cfg)
     sem_groq = _get_semaphore("groq/llama-3.3-70b-versatile", cfg)
     sem_mistral = _get_semaphore("mistral/mistral-small-latest", cfg)
-    # llamacpp and cloud models share the same global semaphore
-    assert sem_local is sem_cloud
-    # Groq and Mistral get their own tighter semaphores
+    # Each provider has its own semaphore
+    assert sem_local is not sem_cloud
     assert sem_groq is not sem_cloud
     assert sem_mistral is not sem_cloud
     assert sem_groq is not sem_mistral
+    assert sem_local is not sem_groq
+    assert sem_local is not sem_mistral
+    # llamacpp semaphore is sized to cfg.llamacpp.concurrency (default 1)
+    assert sem_local._value == cfg.llamacpp.concurrency
 
 
 @pytest.mark.asyncio

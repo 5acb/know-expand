@@ -227,7 +227,6 @@ concurrency:
   mistral: 3
 
 timeouts:
-  geminicli_timeout_s: 600    # use cfg.timeouts.get(), not getattr()
   domain_research_s: 2700
 
 bibliography:
@@ -246,13 +245,11 @@ Models are tried in order; the `QuotaAwareRouter` falls back automatically on qu
 
 ```yaml
 roles:
-  # Slot 0: geminicli/gemini-3.5-flash  — free OAuth CLI (~1500 req/day cap)
-  # Slot 1: gemini/gemini-2.5-flash     — $0.30/$2.50/M — primary paid fallback
-  # Slot 2: gemini/gemini-3.5-flash     — $1.50/$9.00/M — quality backstop only
+  # Slot 0: gemini/gemini-2.5-flash     — $0.30/$2.50/M — primary paid fallback
+  # Slot 1: gemini/gemini-3.5-flash     — $1.50/$9.00/M — quality backstop only
   # NOTE: 3.5-flash ≠ 2.5-flash. 3.5-flash (Google I/O 2026) costs 5× more.
 
   agent:           # LangGraph ReAct graphs — require reliable tool calling
-    - "geminicli/gemini-3.5-flash"
     - "gemini/gemini-2.5-flash"
     - "gemini/gemini-3.5-flash"
     - "groq/llama-3.3-70b-versatile"
@@ -260,7 +257,6 @@ roles:
     - "llamacpp/glm4"
 
   researcher:      # Long output, quality matters — no cheap shortcuts
-    - "geminicli/gemini-3.5-flash"
     - "gemini/gemini-2.5-flash"
     - "mistral/mistral-small-latest"
     - "gemini/gemini-3.5-flash"
@@ -270,7 +266,6 @@ roles:
     - "llamacpp/glm4"
 
   extractor:       # Bulk structured JSON per-chunk — fast cheap model first
-    - "geminicli/gemini-3.5-flash"
     - "groq/llama-3.1-8b-instant"
     - "groq/llama-3.3-70b-versatile"
     - "gemini/gemini-2.5-flash"
@@ -278,7 +273,6 @@ roles:
     - "llamacpp/glm4"
 
   classifier:      # Highest volume, simplest task
-    - "geminicli/gemini-3.5-flash"
     - "groq/llama-3.1-8b-instant"
     - "groq/llama-3.3-70b-versatile"
     - "gemini/gemini-2.5-flash"
@@ -301,7 +295,7 @@ Set in `.env` or via the web UI (session only — not persisted to disk):
 | `OPENAI_API_KEY` | GPT models |
 | `GROQ_API_KEY` | Groq fallback |
 | `MISTRAL_API_KEY` | Mistral fallback |
-| `GEMINI_API_KEY` | Gemini API models (not geminicli) |
+| `GEMINI_API_KEY` | Gemini API models |
 | `SS_API_KEY` | Semantic Scholar (optional; raises rate limit from 0.1 → 1 req/s) |
 
 **Never commit `.env` or write keys to disk from the serve process.**
@@ -689,16 +683,9 @@ Tries models in order from `models.yaml` for the given role:
 | `litellm.AuthenticationError` (may be wrapped in `InstructorRetryException`) | Permanently skip model; walk exception chain with `_find_in_chain()` |
 | 429 + `Retry-After` header | Sleep exact duration; retry same model |
 | Headerless 429/503 | Exponential backoff (2s → 4s → 8s); skip after 3 consecutive failures |
-| geminicli `RuntimeError` | Permanently skip geminicli for this run; emit `model_geminicli_skip` |
 | All models exhausted | Emit `quota_exhausted`; raise `RuntimeError` |
 
 `_next_model()` checks both `self._skip` (per-router) and `_PROBED_UNAVAILABLE` (global) — a quota discovery in one coroutine immediately affects all other routers.
-
-### geminicli provider
-
-Spawns `npx @google/gemini-cli` as a subprocess. No API key — uses cached OAuth from `~/.gemini/oauth_creds.json`. Timeout: `cfg.timeouts.get("geminicli_timeout_s", 120)` — do not use `getattr()`, `Config.timeouts` is a `dict`.
-
-`gemini/gemini-2.5-pro` (API) and `geminicli/gemini-2.5-pro` (OAuth CLI) are different providers.
 
 ### Instructor modes
 
@@ -998,7 +985,7 @@ know_expand/
   observe.py      — self-contained web server + HTML/CSS/JS dashboard (~2700 lines)
   sources.py      — multi-source knowledge fetcher: Wikipedia REST / PyPI JSON / arXiv Atom
   agents/
-    base.py       — QuotaAwareRouter, geminicli provider, _instructor_mode(), probe_models()
+    base.py       — QuotaAwareRouter, _instructor_mode(), probe_models()
     schemas.py    — all Pydantic models for LLM structured outputs
   stages/
     s*.py         — one file per stage
@@ -1019,4 +1006,4 @@ style/
 - 65% foundational / 35% frontier bibliography split — non-negotiable
 - Two xelatex passes — always
 - `[NEEDS_CITATION]` is logged, never a build failure
-- `gemini/gemini-2.5-pro` and `geminicli/gemini-2.5-pro` are different providers
+- `gemini/gemini-2.5-flash` ($0.30/$2.50/M) is the primary paid fallback — do NOT use `gemini/gemini-3.5-flash` as slot 0; it costs 5× more

@@ -797,11 +797,11 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, -apple
             </div>
             <div class="toggle-row">
               <div>
-                <div class="toggle-label">Skip PDF render</div>
-                <div class="toggle-sub">Use text extraction only</div>
+                <div class="toggle-label">Free mode</div>
+                <div class="toggle-sub">Local LLM only — no paid APIs</div>
               </div>
               <label class="toggle-wrap">
-                <input type="checkbox" id="run-no-pdf" checked />
+                <input type="checkbox" id="run-free-mode" />
                 <span class="toggle-track"></span>
               </label>
             </div>
@@ -1427,6 +1427,14 @@ async function poll() {
       const ed = await er.json();
       allEvents = ed.events || [];
 
+      // Detect free mode from pipeline_init event
+      const initEvt = allEvents.find(e => e.event === 'pipeline_init');
+      const nowFree = !!(initEvt && initEvt.free_mode);
+      if (nowFree !== _freeModeActive) {
+        _freeModeActive = nowFree;
+        updateRunActiveInfo();
+      }
+
       // Refresh active view
       if (selectedView && selectedView !== 'all-events') {
         const windows = buildStageWindows(allEvents);
@@ -1529,10 +1537,13 @@ function setResumeMode(doResume) {
   }
 }
 
+let _freeModeActive = false;
+
 function updateRunActiveInfo() {
   const el = $('run-active-info');
   if (!el) return;
   const parts = [];
+  if (_freeModeActive) parts.push('🖥  free mode — local LLM only\ncalls may take several minutes each');
   if (_stateDir) parts.push(_stateDir);
   if (_runId)    parts.push('run: ' + _runId);
   el.textContent = parts.join('\n');
@@ -1575,6 +1586,7 @@ let qaHistory = []; // [{question: str, answer: str}]
 function setRunMode(mode) {
   const prev = runPaneMode;
   runPaneMode = mode;
+  if (mode === 'setup') { _freeModeActive = false; updateRunActiveInfo(); }
   $('run-setup').style.display = mode === 'setup' ? 'flex' : 'none';
   $('run-taxonomy').style.display = mode === 'taxonomy' ? 'flex' : 'none';
   $('run-qa').style.display = mode === 'qa' ? 'flex' : 'none';
@@ -1656,7 +1668,6 @@ function toggleMkPanel() {
 }
 
 const PROV_META = [
-  { id: 'geminicli', label: 'Gemini CLI',  note: 'oauth' },
   { id: 'gemini',    label: 'Gemini API'  },
   { id: 'groq',      label: 'Groq'        },
   { id: 'mistral',   label: 'Mistral'     },
@@ -1706,11 +1717,11 @@ async function startRun() {
     }
     return;
   }
-  // In resume mode depth/autoTax/noPdf come from the prior run — pass
+  // In resume mode depth/autoTax come from the prior run — pass
   // sensible defaults; the pipeline already has them baked into state.
   const depth = isResume ? 'standard' : $('run-depth').value;
   const autoTax = isResume ? true : $('run-auto-tax').checked;
-  const noPdf = isResume ? true : $('run-no-pdf').checked;
+  const freeMode = isResume ? false : $('run-free-mode').checked;
   const resume = isResume;
 
   $('run-start-btn').disabled = true;
@@ -1721,8 +1732,8 @@ async function startRun() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        input, depth, auto_taxonomy: autoTax, no_pdf: noPdf,
-        resume,
+        input, depth, auto_taxonomy: autoTax,
+        free_mode: freeMode, resume,
       }),
     });
 
@@ -2506,12 +2517,12 @@ def _spawn_pipeline(runs_dir: Path, params: dict) -> int:
 
     depth = params.get("depth", "standard")
     auto_taxonomy = params.get("auto_taxonomy", False)
-    no_pdf = params.get("no_pdf", False)
+    free_mode = params.get("free_mode", False)
     args = [input_path, "--runs-dir", str(runs_dir), "--run-id", run_id, "--depth", str(depth)]
     if auto_taxonomy:
         args.append("--auto-taxonomy")
-    if no_pdf:
-        args.append("--no-pdf")
+    if free_mode:
+        args.append("--free")
 
     # Reset SIGCHLD to SIG_DFL in the child before exec.  The server sets
     # SIGCHLD=SIG_IGN to prevent zombie accumulation, but SIG_IGN survives
@@ -2657,13 +2668,7 @@ def cmd_serve(runs_dir: Path, port: int = 7842) -> None:
                 _json_response(self, _list_files(dir_param))
 
             elif self.path == "/api/keys":
-                import shutil as _shutil
-                _gcli_ok = bool(
-                    _shutil.which("npx") and
-                    os.path.exists(os.path.expanduser("~/.gemini/oauth_creds.json"))
-                )
                 _json_response(self, {
-                    "geminicli": _gcli_ok,
                     "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
                     "openai":    bool(os.environ.get("OPENAI_API_KEY")),
                     "gemini":    bool(os.environ.get("GEMINI_API_KEY")),

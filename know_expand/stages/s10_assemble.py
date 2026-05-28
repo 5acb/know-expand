@@ -392,7 +392,7 @@ def _dedup_exact_primers(text: str) -> str:
     return "\n\n".join(kept)
 
 
-async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
+async def run(state: PipelineState, cfg: Config) -> None:
     state_dir = Path(state["state_dir"])
     output_dir = Path(state["output_dir"])
     audit_dir = state_dir / "audit"
@@ -552,67 +552,64 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
     output_pdf: str | None = None
     pdf_path = output_dir / "expanded.pdf"
 
-    if no_pdf:
-        emit({"event": "s7_pdf_skipped", "reason": "no_pdf_flag"})
+    pandoc_available = shutil.which("pandoc") is not None
+    xelatex_available = shutil.which("xelatex") is not None
+
+    if not pandoc_available or not xelatex_available:
+        missing = []
+        if not pandoc_available:
+            missing.append("pandoc")
+        if not xelatex_available:
+            missing.append("xelatex")
+        emit({
+            "event": "s7_pdf_skipped",
+            "reason": "missing_tools",
+            "missing": missing,
+        })
     else:
-        pandoc_available = shutil.which("pandoc") is not None
-        xelatex_available = shutil.which("xelatex") is not None
+        emit({"event": "s7_pdf_start", "output": str(pdf_path)})
+        pandoc_cmd = [
+            "pandoc",
+            str(pandoc_md),
+            "--pdf-engine=xelatex",
+            "--citeproc",           # process [@key] citations via frontmatter bibliography
+            "-o", str(pdf_path),
+        ]
 
-        if not pandoc_available or not xelatex_available:
-            missing = []
-            if not pandoc_available:
-                missing.append("pandoc")
-            if not xelatex_available:
-                missing.append("xelatex")
-            emit({
-                "event": "s7_pdf_skipped",
-                "reason": "missing_tools",
-                "missing": missing,
-            })
-        else:
-            emit({"event": "s7_pdf_start", "output": str(pdf_path)})
-            pandoc_cmd = [
-                "pandoc",
-                str(pandoc_md),
-                "--pdf-engine=xelatex",
-                "--citeproc",           # process [@key] citations via frontmatter bibliography
-                "-o", str(pdf_path),
-            ]
-
-            try:
-                result = subprocess.run(
-                    pandoc_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                )
-                if result.returncode != 0:
+        try:
+            result = subprocess.run(
+                pandoc_cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                emit({
+                    "event": "s7_pdf_error",
+                    "reason": "pandoc_error",
+                    "returncode": result.returncode,
+                    "stderr": result.stderr[:1000],
+                })
+                _logger.error("s10: pandoc failed (rc=%d): %s", result.returncode, result.stderr[:500])
+            else:
+                if pdf_path.exists() and pdf_path.stat().st_size > 0:
+                    pages = _count_pdf_pages(pdf_path)
+                    output_pdf = str(pdf_path)
+                    emit({
+                        "event": "s7_pdf_complete",
+                        "path": str(pdf_path),
+                        "pages": pages,
+                    })
+                else:
                     emit({
                         "event": "s7_pdf_error",
-                        "reason": "pandoc_error",
-                        "returncode": result.returncode,
-                        "stderr": result.stderr[:1000],
+                        "reason": "pdf_not_created",
+                        "stderr": result.stderr[:500],
                     })
-                    _logger.error("s10: pandoc failed (rc=%d): %s", result.returncode, result.stderr[:500])
-                else:
-                    if pdf_path.exists() and pdf_path.stat().st_size > 0:
-                        pages = _count_pdf_pages(pdf_path)
-                        output_pdf = str(pdf_path)
-                        emit({
-                            "event": "s7_pdf_complete",
-                            "path": str(pdf_path),
-                            "pages": pages,
-                        })
-                    else:
-                        emit({
-                            "event": "s7_pdf_error",
-                            "reason": "pdf_not_created",
-                            "stderr": result.stderr[:500],
-                        })
-            except subprocess.TimeoutExpired:
-                emit({"event": "s7_pdf_error", "reason": "pandoc_timeout"})
-            except Exception as exc:
-                emit({"event": "s7_pdf_error", "reason": "pandoc_exception", "error": str(exc)[:200]})
+        except subprocess.TimeoutExpired:
+            emit({"event": "s7_pdf_error", "reason": "pandoc_timeout"})
+        except Exception as exc:
+            emit({"event": "s7_pdf_error", "reason": "pandoc_exception", "error": str(exc)[:200]})
 
     manifest = AssemblyManifest(
         domain_order=ordered_domain_ids,

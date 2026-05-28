@@ -22,7 +22,6 @@ from know_expand.stages import (
 def build_graph(
     cfg: Config,
     auto_taxonomy: bool,
-    no_pdf: bool = False,
 ) -> StateGraph:
     graph = StateGraph(PipelineState)
 
@@ -67,7 +66,7 @@ def build_graph(
         return state
 
     async def node_assemble(state: PipelineState) -> PipelineState:
-        await s10_assemble.run(state, cfg, no_pdf=no_pdf)
+        await s10_assemble.run(state, cfg)
         return state
 
     graph.add_node("ingest", node_ingest)
@@ -106,12 +105,11 @@ async def run_pipeline(
     cfg: Config,
     auto_taxonomy: bool = False,
     primary_model: str | None = None,
-    no_pdf: bool = False,
     resume_stage: int | None = None,
 ) -> None:
     import uuid
 
-    if primary_model:
+    if primary_model and not cfg.free_mode:
         for role in cfg.models:
             models = cfg.models[role]
             if primary_model not in models:
@@ -145,11 +143,12 @@ async def run_pipeline(
         "input": input_path,
         "depth": depth,
         "state_dir": str(state_dir),
+        "free_mode": cfg.free_mode,
     })
 
     from know_expand.agents.base import probe_models
     await probe_models(cfg)
 
-    graph = build_graph(cfg, auto_taxonomy=auto_taxonomy, no_pdf=no_pdf)
+    graph = build_graph(cfg, auto_taxonomy=auto_taxonomy)
     compiled = graph.compile()
     await compiled.ainvoke(state)

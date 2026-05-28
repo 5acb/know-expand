@@ -79,6 +79,25 @@ def _write_state_files(
 
 
 # ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _block_pdf_tools(monkeypatch):
+    """Prevent tests from spawning real pandoc/xelatex processes.
+    PDF generation is skipped via the missing-tools auto-skip path."""
+    import shutil as _shutil
+    _real_which = _shutil.which
+
+    def _patched(name, *args, **kwargs):
+        if name in ("pandoc", "xelatex"):
+            return None
+        return _real_which(name, *args, **kwargs)
+
+    monkeypatch.setattr("know_expand.stages.s10_assemble.shutil.which", _patched)
+
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
@@ -91,7 +110,7 @@ async def test_s7_creates_expanded_md(tmp_path):
     _write_state_files(state_dir, ["domain_a", "domain_b"])
     state = _make_state(state_dir)
 
-    await s10_assemble.run(state, cfg, no_pdf=True)
+    await s10_assemble.run(state, cfg)
 
     output_dir = state_dir / "output"
     assert (output_dir / "expanded.md").exists()
@@ -126,7 +145,7 @@ async def test_s7_bibliography_dedup_by_doi(tmp_path):
     _write_state_files(state_dir, ["domain_a", "domain_b"], {"domain_a": bib_a, "domain_b": bib_b})
     state = _make_state(state_dir)
 
-    await s10_assemble.run(state, cfg, no_pdf=True)
+    await s10_assemble.run(state, cfg)
 
     bib_path = state_dir / "bibliography.json"
     merged = json.loads(bib_path.read_text())
@@ -153,7 +172,7 @@ async def test_s7_bibliography_dedup_by_title(tmp_path):
     _write_state_files(state_dir, ["domain_a", "domain_b"], {"domain_a": bib_a, "domain_b": bib_b})
     state = _make_state(state_dir)
 
-    await s10_assemble.run(state, cfg, no_pdf=True)
+    await s10_assemble.run(state, cfg)
 
     bib_path = state_dir / "bibliography.json"
     merged = json.loads(bib_path.read_text())
@@ -170,28 +189,11 @@ async def test_s7_pdf_skip_when_pandoc_unavailable(tmp_path):
     _write_state_files(state_dir, ["domain_a"])
     state = _make_state(state_dir)
 
-    with patch("know_expand.stages.s10_assemble.shutil.which", return_value=None):
-        await s10_assemble.run(state, cfg, no_pdf=False)
+    await s10_assemble.run(state, cfg)
 
     output_dir = state_dir / "output"
     assert (output_dir / "expanded.md").exists()
     # PDF should not exist
-    assert not (output_dir / "expanded.pdf").exists()
-
-
-@pytest.mark.asyncio
-async def test_s7_pdf_skip_with_no_pdf_flag(tmp_path):
-    """PDF generation is skipped when no_pdf=True."""
-    cfg = _make_cfg()
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    _write_state_files(state_dir, ["domain_a"])
-    state = _make_state(state_dir)
-
-    await s10_assemble.run(state, cfg, no_pdf=True)
-
-    output_dir = state_dir / "output"
-    assert (output_dir / "expanded.md").exists()
     assert not (output_dir / "expanded.pdf").exists()
 
 
@@ -226,7 +228,7 @@ async def test_s7_domain_order_uses_prerequisite_count(tmp_path):
     (audit_dir / "bibliography_advanced.json").write_text("[]")
 
     state = _make_state(state_dir)
-    await s10_assemble.run(state, cfg, no_pdf=True)
+    await s10_assemble.run(state, cfg)
 
     md_text = (state_dir / "output" / "expanded.md").read_text()
     basics_pos = md_text.find("# Basics")
@@ -247,4 +249,4 @@ async def test_s7_idempotent_when_complete(tmp_path):
     state = _make_state(state_dir)
 
     # Should not raise even though files are missing
-    await s10_assemble.run(state, cfg, no_pdf=True)
+    await s10_assemble.run(state, cfg)

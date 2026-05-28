@@ -73,7 +73,6 @@ def main() -> None:
 
     # Output / mode
     parser.add_argument("--human", action="store_true", help="Rich terminal output")
-    parser.add_argument("--no-pdf", action="store_true", help="Skip PDF build")
 
     # Pipeline control
     parser.add_argument(
@@ -85,6 +84,10 @@ def main() -> None:
     parser.add_argument("--user-profile", type=Path, metavar="PATH")
     parser.add_argument("--auto-taxonomy", action="store_true")
     parser.add_argument("--no-bibliography-fetch", action="store_true")
+    parser.add_argument(
+        "--free", action="store_true",
+        help="Route all LLM calls through the local llamacpp server only (no paid APIs)",
+    )
     parser.add_argument(
         "--primary-model", type=str, default=None, metavar="MODEL",
         help="Prepend MODEL to all role model lists (e.g. 'claude-sonnet-4-6')",
@@ -160,6 +163,9 @@ def main() -> None:
 
     if args.concurrency is not None:
         cfg.concurrency.default = args.concurrency
+
+    if args.free:
+        cfg.free_mode = True
 
     from know_expand.pipeline import run_pipeline
 
