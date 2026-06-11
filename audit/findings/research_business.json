@@ -1,0 +1,97 @@
+{
+ "topic": "business",
+ "summary": "HONEST ASSESSMENT: An automated \"paper \u2192 field guide\" engine sits on a spectrum from dead-on-arrival (generic consumer/prosumer report generation) to plausibly venture-scale (regulated evidence synthesis and enterprise training-content production). The generation capability itself is fully commoditized as of mid-2026: OpenAI gives 5 free deep-research runs/month to everyone, Google bundles Deep Research into its free tier and cut Ultra pricing from $250 to $100/month, and open-source pipelines (Stanford STORM, GPT-Researcher, Open Deep Research) reproduce long-form cited report generation for token cost. The 2024-2026 wrapper graveyard is unambiguous: Jasper's revenue collapsed from ~$120M to ~$35-55M, roughly half of 60+ AI app builders launched in 2025 are dead or pivoted, and average wrapper churn hit 65% in 90 days. Meanwhile content businesses on the OTHER side of the trade also died: Chegg fell 99% (homework content commoditized by free AI), Vista wrote Pluralsight's $3.5B equity to zero (tech-skills video library), and the Kindle flood of 10,000-40,000 AI books/month established that unaccountable one-shot AI long-form content has near-zero market price, with CNET/Sports Illustrated showing the reputational downside. What DID work commercially divides into two patterns: (1) artifact tools with workflow/format moats \u2014 Gamma ($100M ARR, profitable, AI presentations), Synthesia ($100M+ ARR, $4B valuation, AI training video for Bosch/Merck/SAP), Mintlify ($10M ARR, $500M valuation, git-integrated docs); and (2) trust/provenance platforms priced into expensive enterprise workflows \u2014 AlphaSense ($600M ARR, $7.5B valuation, $10-20k/seat) and the pharma medical-writing AI cohort (Yseop named to TIME Best Inventions 2025; Certara CoAuthor integrated with Veeva). Willingness to pay is sharply tiered: consumers/academics pay $10-50/month (Consensus $10, SciSpace $12, Elicit $12-79, median Elicit contract only $1,249/year); prosumers top out at $200/month (ChatGPT Pro, Perplexity Max \u2014 a ceiling frontier labs are actively eroding); but enterprises pay $10k-$100k+ when the deliverable replaces a costly, accountable human process. The two processes know-expand's architecture maps onto are: systematic literature reviews ($141k labor and 67 weeks per published review; medical writing market $5.5-6B growing ~11% CAGR; Elicit's own pivot to pharma SLR validates the wedge) and corporate technical training content ($141B technical-training segment; finished eLearning costs $7,600-$77,720 per hour, avg ~$42.7k, at 80-300:1 development ratios). know-expand's genuinely differentiated components \u2014 adversarial gap-finder loops, citation audit, verifiable 65/35 bibliography, provenance-tracked multi-source fetch, pedagogical alignment \u2014 are worthless to buyers who tolerate 78% citation accuracy (OpenAI Deep Research's measured rate) and decisive for buyers who cannot. Venture scale therefore requires selling verification and workflow integration, not documents.",
+ "key_facts": [
+  {
+   "fact": "ChatGPT pricing in 2026 spans Free/$8 Go/$20 Plus/$100 Pro/$200 Pro tiers; the $200 Pro tier includes 250 deep research runs/month, and a new $100 Pro tier (April 2026) offers the same models at half price \u2014 evidence the price ceiling for generic AI research output is ~$200/mo and being actively segmented downward",
+   "source_url": "https://techjacksolutions.com/ai-tools/chatgpt/chatgpt-pricing/"
+  },
+  {
+   "fact": "OpenAI pushed deep research to ALL tiers in April 2025 via a lightweight o4-mini version: Free users get 5 queries/month, Plus 25, Pro 250 \u2014 the core 'generate a long cited report' capability is now free at the margin",
+   "source_url": "https://techcrunch.com/2025/04/24/openai-rolls-out-a-lightweight-version-of-its-chatgpt-deep-research-tool/"
+  },
+  {
+   "fact": "Google cut AI Ultra entry pricing from $249.99 to $99.99/month at I/O 2026 and includes Deep Research in every tier including free (capped at 5 uses/month) \u2014 frontier labs are deflating, not protecting, deep-research pricing",
+   "source_url": "https://blog.google/products-and-platforms/products/google-one/google-ai-subscriptions/"
+  },
+  {
+   "fact": "Perplexity Max costs $200/month targeting analysts running dozens of deep-research sessions daily \u2014 confirms a prosumer ceiling near $200/mo for horizontal research tools",
+   "source_url": "https://felloai.com/perplexity-pricing/"
+  },
+  {
+   "fact": "Academic AI research tools cluster at $10-79/user/month: Elicit Plus $12, Pro $49, Team $79 with median contract just $1,249/year; Consensus Premium ~$10/mo; SciSpace Premium $12/mo \u2014 the academic prosumer segment has a structurally low revenue ceiling",
+   "source_url": "https://costbench.com/software/ai-research-tools/elicit/"
+  },
+  {
+   "fact": "Elicit has 400,000+ monthly researchers and raised a $22M Series A (Feb 2025) but strategically pivoted to enterprise Systematic Review products for pharma/biotech \u2014 the leading academic-tool player itself concluded prosumer pricing alone is insufficient",
+   "source_url": "https://elicit.com/blog/series-a/"
+  },
+  {
+   "fact": "Systematic reviews cost research institutions over $141,000 in labor per published review and take an average 67.3 weeks \u2014 the single clearest expensive-human-process target for an automated evidence-synthesis pipeline",
+   "source_url": "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9112080/"
+  },
+  {
+   "fact": "The global medical writing market was $5.47B (2024), ~$6.08B (2025), projected to $14.27B by 2033 at 11.24% CAGR, with 66%+ of pharma firms outsourcing regulatory/scientific writing",
+   "source_url": "https://www.marketdataforecast.com/market-reports/global-medical-writing-market"
+  },
+  {
+   "fact": "Pharma regulatory-writing AI has proven enterprise traction: Yseop was named to TIME Best Inventions 2025, scaled to hundreds of regulatory documents/month with 50%+ document-time reductions; Certara CoAuthor joined the Veeva AI Partner Program in Oct 2025",
+   "source_url": "https://yseop.com/blog/2025-the-year-pharma-crossed-the-ai-threshold/"
+  },
+  {
+   "fact": "The expert network market reached ~$3B in 2025 (GLG >$400M revenue, AlphaSights >$300M), and AlphaSense \u2014 which bought expert-call library Tegus for $930M \u2014 hit ~$600M ARR at a $7.5B valuation (June 2026) charging $10,000-$20,000 per seat annually: proof that research/intelligence deliverables command enterprise pricing when bundled with proprietary content and workflow",
+   "source_url": "https://sacra.com/c/alphasense/"
+  },
+  {
+   "fact": "Global corporate training is a ~$391-445B market in 2025, with Technical Training the largest segment at 34.2% (~$141.1B) growing 8.1% CAGR",
+   "source_url": "https://learningnews.com/news/training-industry/2025/training-market-391-billion"
+  },
+  {
+   "fact": "Custom eLearning content costs $7,600-$77,720 per finished hour (average ~$42,660 in 2026) at 80-300 hours of production per finished hour \u2014 the cost baseline an automated paper-to-courseware pipeline would undercut",
+   "source_url": "https://bluecarrot.io/blog/e-learning-content-development-cost-per-hour-explained/"
+  },
+  {
+   "fact": "AI-generated learning/artifact products with format or workflow moats succeeded: Synthesia crossed $100M ARR (Apr 2025) and reached $4B valuation (Jan 2026) selling AI training video to Bosch/Merck/SAP; Sana Labs was acquired by Workday (Nov 2025); Gamma profitably hit $100M ARR and $2.1B valuation generating presentations/sites; Mintlify hit $10M ARR (10x YoY) and a $500M valuation on git-integrated AI documentation",
+   "source_url": "https://techcrunch.com/2026/01/26/synthesia-hits-4b-valuation-lets-employees-cash-in/"
+  },
+  {
+   "fact": "The wrapper collapse is documented: Jasper fell from ~$120M (2023) peak revenue to roughly $35-55M in 2024 after ChatGPT commoditized its value prop; by April 2026 roughly half of 60+ AI app builders launched in 2025 had pivoted, been acqui-hired, or shut down; average AI wrapper churn is 65% within 90 days; survivors (Cursor, Perplexity, Harvey, ElevenLabs) all own proprietary data, infra, or deep workflow integration",
+   "source_url": "https://www.machinebrief.com/news/death-of-ai-wrapper-startups-wont-survive-2026"
+  },
+  {
+   "fact": "Content businesses on the receiving end of AI commoditization also died: Chegg stock fell ~99% from its $14.7B peak with Q4 2025 revenue down 49% YoY as free AI answered homework; Vista Equity wrote Pluralsight's equity to zero after a $3.5B buyout as competitors made tech-skills content free and AI automated the skills it taught",
+   "source_url": "https://www.sec.gov/Archives/edgar/data/0001364954/000136495425000112/a9901-pressreleasecheggtor.htm"
+  },
+  {
+   "fact": "Unaccountable one-shot AI long-form content has near-zero market value and reputational toxicity: Amazon faces 10,000-40,000 AI-generated ebooks per month (forcing a 3-books/day publishing cap and AI disclosure rules), and the CNET and Sports Illustrated AI-article scandals \u2014 error-ridden finance explainers, fake authors \u2014 damaged both brands, with CNET's AI scandal complicating its sale",
+   "source_url": "https://thenewpublishingstandard.com/2025/10/04/ai-generated-books-publishing-industry-impact/"
+  },
+  {
+   "fact": "Measured deep-research quality remains below professional-deliverable grade: citation accuracy ranges from 78% for OpenAI Deep Research to 94% for Claude with search, with documented statement hallucination (content deviating from cited source) and citation hallucination (fabricated references) \u2014 the trust gap is the only durable opening for a verification-first pipeline",
+   "source_url": "https://arxiv.org/pdf/2604.03173"
+  },
+  {
+   "fact": "Open-source removes any architecture moat: Stanford STORM (free, generates full-length cited Wikipedia-style reports via multi-perspective question asking), GPT-Researcher, and Open Deep Research replicate multi-agent report generation at token cost",
+   "source_url": "https://github.com/stanford-oval/storm"
+  },
+  {
+   "fact": "Google's free NotebookLM already generates study guides, briefing docs, quizzes, and audio overviews from uploaded papers across 200+ countries \u2014 the free incumbent occupying the consumer 'turn my document into learning material' slot",
+   "source_url": "https://edu.google.com/ai-notebooklm/"
+  },
+  {
+   "fact": "The global insights/market-research industry reached $142B (2023) with 83% of research organizations planning AI investment in 2025 \u2014 large adjacent budget pool, but ESOMAR data shows incumbents adopting AI internally rather than ceding deliverables to outsiders",
+   "source_url": "https://researchworld.com/articles/drivers-of-our-142bn-insights-industry"
+  }
+ ],
+ "implications": [
+  "DEAD ON ARRIVAL \u2014 consumer/prosumer 'turn any paper into a personal textbook' subscription at $10-50/month: this lane is occupied by free NotebookLM (study guides, audio overviews), 5 free deep-research runs/month from OpenAI and Google, and $10-12/month academic tools (Consensus, SciSpace). Elicit, with 400k monthly users and venture backing, still had to pivot to pharma enterprise \u2014 a solo pipeline cannot win a volume game against free.",
+  "DEAD ON ARRIVAL \u2014 'better deep research' as a horizontal product: know-expand's LangGraph orchestration, persona ensemble, and prompt architecture are replicable (STORM/GPT-Researcher do it free), and frontier labs are deflating the price of exactly this deliverable (Ultra cut from $250 to $100; lightweight DR pushed to free tiers). Any framing where the pitch is 'our reports are longer/deeper' loses to the platform within one model generation.",
+  "DEAD ON ARRIVAL \u2014 selling the generated field guides themselves as content (Kindle books, course marketplaces, report storefronts): the AI-book flood set the market price of unaccountable AI long-form near zero, and CNET/Sports Illustrated show the trust penalty. Pluralsight and Chegg prove even HUMAN-made technical content libraries are collapsing assets in the AI era.",
+  "MOST PLAUSIBLE VENTURE WEDGE \u2014 regulated evidence synthesis (pharma/medtech systematic literature reviews, HEOR, regulatory dossier support): SLRs cost ~$141k and 67 weeks each; the medical-writing market is $6B growing 11% CAGR; buyers already pay for AI here (Yseop, Certara CoAuthor, DistillerSR, Elicit SLR). know-expand's differentiated machinery \u2014 S8 citation audit, adversarial gap-finder/defender loops, provenance-tracked sources.py, deterministic 65/35 bibliography policy, [NEEDS_CITATION] discipline \u2014 is precisely the audit-trail capability this market pays for and that 78%-citation-accuracy generic agents cannot deliver. Cost of entry: GxP/SOC2 compliance, PRISMA-conformant output formats, and pharma distribution; the pipeline would be repositioned as 'reproducible, auditable evidence synthesis' rather than 'field guide generation'.",
+  "SECOND VIABLE WEDGE \u2014 enterprise technical-training content production ('your specs/RFCs/papers \u2192 onboarding curricula'): the $141B technical-training segment pays $7.6k-77k per finished eLearning hour at 80-300:1 dev ratios; Synthesia ($4B) and Sana (acquired by Workday) prove enterprises buy AI-produced learning artifacts. know-expand's pedagogical alignment stage (S6), prerequisite primers (S9), and interview-driven reader profiling (S1) map directly onto instructional-design labor. The moat must come from ingesting PRIVATE internal documents and LMS/SCORM workflow integration \u2014 public-paper expansion alone is replicable. Risks: soft L&D budgets (Pluralsight's collapse shows the downside) and slow sales cycles.",
+  "PRICING IMPLICATION \u2014 the unit of sale must be the workflow outcome, not the document: viable comps price per seat into expensive processes (AlphaSense $10-20k/seat/yr) or per production-replacement artifact (vs $42k/hour eLearning baseline, or vs $141k/SLR). A per-report price anchored against ChatGPT's $200/month all-you-can-eat is a losing anchor.",
+  "PRODUCT IMPLICATION \u2014 double down on what generic agents measurably lack: verification, provenance, and reproducibility. Publish citation-accuracy benchmarks of know-expand output vs OpenAI/Gemini deep research (DRBench-style); make the audit trail (every claim \u2192 fetched source snapshot) the demo. This is the only feature axis where the 2024-2026 evidence shows incumbent agents are structurally weak and certain buyers are structurally intolerant of failure.",
+  "STRATEGIC WARNING \u2014 the current architecture optimizes for pedagogical beauty (boss nodes, connector bridges, taxonomy review) which no identified enterprise buyer pays for directly; the paying segments buy either compliance-grade traceability (pharma) or cost-per-finished-hour reduction (L&D). Expect to cut or demote the gamified/pedagogical layers in any commercial pivot, and expect human-in-the-loop stages (S1 interview, S3 taxonomy review) to be repositioned as expert-review checkpoints \u2014 which enterprises view as a feature, not friction.",
+  "TIMING NOTE \u2014 Gartner expects 2026 to be a 'pragmatic reset' year where wary AI buyers demand proof over promises: a verification-first positioning is well-timed, but a 'we generate impressive documents' positioning is precisely what buyers have learned to distrust."
+ ]
+}

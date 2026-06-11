@@ -1,0 +1,252 @@
+{
+ "subsystem": "stages-early",
+ "issues": [
+  {
+   "layer": "objective",
+   "severity": "critical",
+   "title": "Mandatory human interview (S1) with broken bypass makes the default pipeline human-gated \u2014 incompatible with unattended/multi-user operation",
+   "detail": "Design principle 11 (README:649-655) and the CLI reference (README:188) promise S1 is skippable via --user-profile and 'skipped by default in autonomous mode' (README:88). In code, --user-profile is parsed (cli.py:85) but never read anywhere \u2014 grep over cli.py/pipeline.py shows args.user_profile is never referenced, and s1_assess.run() has no profile-injection path. So S1 always runs. In headless mode (use_web_ipc = not sys.stdin.isatty(), s1_assess.py:685), each question blocks on a 300s file-poll timeout (_WEB_TIMEOUT, s1_assess.py:38, 369-403); a cron/CI/batch run stalls ~40-75 minutes and then synthesizes a profile from empty answers. Similarly S3's web review blocks 600s then SILENTLY defaults to lumper (s3_graph.py:54, 78-101) \u2014 README:388 instead claims the pipeline 'emits pipeline_paused and exits cleanly', which it never does. For a product run concurrently by many users, the human gates must be an async pause/persist/notify/resume job model, not in-process polling that fabricates defaults on timeout.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s1_assess.py:38",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s1_assess.py:369-403",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s1_assess.py:685",
+    "/Users/cyan/ccr/know-expand/know_expand/cli.py:85",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s3_graph.py:54-104"
+   ]
+  },
+  {
+   "layer": "architecture",
+   "severity": "critical",
+   "title": "No cross-run caching and no cross-process rate-limit coordination \u2014 external API layer cannot scale past one run per host",
+   "detail": "All external data (Wikipedia, PyPI, arXiv, OpenAlex, Semantic Scholar) is cached only inside a run's state dir (e.g. audit/sources/sources_{domain_id}.json, s4_audit.py:226-258); re-running the same paper refetches everything. README:869 claims DiskCache ('SQLite-backed for deterministic API calls') is part of the stack \u2014 it is not in pyproject.toml dependencies and is never imported. Rate limiters are module-level globals (_ss_limiter in bibliography.py:65-90, _OPENALEX_LIMITER in sources.py:40-47) scoped to one process; each pipeline run is a separate subprocess (spawned by observe.py), so N concurrent runs each get their own 'serialized' limiter and collectively send N\u00d7 the per-IP budget to Semantic Scholar \u2014 guaranteed 429 cascades exactly when concurrency matters. SS unauthenticated limits are per-IP, so a multi-tenant deployment shares one budget across all users with no queue, broker, or shared cache to mediate it. This is the binding throughput ceiling for the SaaS goal, and nothing in the architecture addresses it.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/bibliography.py:62-90",
+    "/Users/cyan/ccr/know-expand/know_expand/sources.py:40-47",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s4_audit.py:226-258",
+    "/Users/cyan/ccr/know-expand/pyproject.toml:9-34"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "SS rate limit configured for an authenticated key but never conditioned on key presence",
+   "detail": "config.yaml:21-23 sets semantic_scholar max_rate 1/time_period 1 with the comment 'authenticated key: 1 req/sec'. _get_ss_limiter (bibliography.py:77-90) reads this unconditionally; nothing checks whether SS_API_KEY is actually set (it is optional per README:305). Unauthenticated SS allows roughly 100 req/5 min (~0.33 req/s; CLAUDE.md says 0.1 req/s) \u2014 so the default configuration overruns the unauthenticated limit 3-10\u00d7, and the elaborate cooldown circuit breaker (_ss_cooldown_until, 30s\u2192120s backoff) exists largely to absorb a self-inflicted overrun. Additionally _SS_API_KEY is read once at module import (bibliography.py:62), so a key injected later (e.g. via the web UI session env) inside the same process is ignored. The limiter should derive its rate from key presence and re-read the key per request.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/bibliography.py:62",
+    "/Users/cyan/ccr/know-expand/know_expand/bibliography.py:77-90",
+    "/Users/cyan/ccr/know-expand/config.yaml:20-29"
+   ]
+  },
+  {
+   "layer": "architecture",
+   "severity": "high",
+   "title": "S4 adversarial gap loop is a stateless re-roll: rounds share no memory, termination condition can essentially never fire, last round wins",
+   "detail": "_run_gap_loop (s4_audit.py:91-198) runs finder\u2192defender\u2192rebuttal up to 3 rounds, but each round's _GAP_FINDER_PROMPT is byte-identical (only domain/terms/anchors \u2014 no prior verdicts, no prior gaps). The stall check compares set equality of free-text gap_description strings across independent LLM generations (s4_audit.py:176-185), which will almost never match \u2014 so the loop runs max rounds (9 LLM calls/domain at deep) and then returns only the LAST round's rebuttal_result, discarding rounds 1-2 entirely. The extra rounds add cost without information gain. README:636 also claims 'Every round is persisted to disk before scoring \u2014 a crash at round 2 of 3 restarts from round 1' \u2014 no round artifacts are written anywhere in s4_audit.py; gap results exist only in memory until gap_analysis.md is written at stage end.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s4_audit.py:91-198",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s4_audit.py:176-185"
+   ]
+  },
+  {
+   "layer": "planning",
+   "severity": "high",
+   "title": "Phantom CLI/feature surface: six advertised flags do nothing; README documents subsystems that don't exist",
+   "detail": "Parsed but never used: --user-profile (cli.py:85), --stage (cli.py:84), --no-bibliography-fetch (cli.py:87, zero other references \u2014 README:190 advertises 'air-gapped mode'), --no-pdf (cli.py:76, never forwarded to run_pipeline at cli.py:165-175 whose no_pdf defaults False), --human (cli.py:75). --resume is forwarded to resume_stage (pipeline.py:110) which is never read \u2014 resume works only via stage_is_complete markers, so '--resume 4' is a no-op token. --renderer typst (README:182, 857) does not exist in cli.py at all. README further claims a Crossref tier (README:137, 525, 848 \u2014 'crossref' appears nowhere in know_expand/), DiskCache, and map_a/map_b dual map outputs (README:954-957 \u2014 S2 writes a single map_{chunk_id}.json, s2_extract.py:62). For a product, every one of these is a user-facing lie; the README is a roadmap masquerading as documentation and needs a hard reconciliation pass before any external user touches it.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/cli.py:75-87",
+    "/Users/cyan/ccr/know-expand/know_expand/cli.py:165-175",
+    "/Users/cyan/ccr/know-expand/know_expand/pipeline.py:101-111",
+    "/Users/cyan/ccr/know-expand/README.md:160-201"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "URL ingestion writes raw HTML straight into the pipeline; no content extraction, content-type check, size cap, or SSRF guard",
+   "detail": "s0_ingest.py:49-69: for http(s) inputs, resp.text (raw HTML including <script>, nav, boilerplate) is written to source.txt and word-split into 800-word chunks; spaCy noun-chunks the first 50k chars of markup as 'structural zones'. Every downstream stage (term extraction, interview concepts, taxonomy) then operates on tag soup. There is no content-type check (a URL to a PDF is decoded as text), no readability/Docling pass, no response size limit (memory exhaustion on large responses), no User-Agent (many sites 403), and \u2014 because the web UI accepts arbitrary URLs to start runs \u2014 an SSRF vector against internal networks in any hosted deployment. README:316 lists URL as a first-class input; in practice this path produces garbage for typical web pages.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s0_ingest.py:26-31",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s0_ingest.py:49-69"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "S2 LLM signal silently sees only ~37% of each chunk",
+   "detail": "Chunks are built with max_tokens=4000 (config.yaml:53, cl100k \u2248 16k chars for dense prose), but the Signal-B map prompt truncates to text[:cfg.chunking.llm_map_char_limit] = 6,000 chars (s2_extract.py:93, config.yaml:55). The conceptual-extraction signal \u2014 the only one that captures implicit domain concepts \u2014 is blind to roughly the latter 60% of every chunk, with no event or warning. This directly violates the project's own design principle 1 ('bounded execution\u2026 guarantees silent omission' README:578-582): the bound exists, but it silently truncates instead of sub-chunking. Either lower chunk max_tokens or split chunks for the map call.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s2_extract.py:93",
+    "/Users/cyan/ccr/know-expand/config.yaml:51-55"
+   ]
+  },
+  {
+   "layer": "planning",
+   "severity": "high",
+   "title": "Document's own references are extracted then thrown away; bibliography is built from generic domain-label keyword searches instead",
+   "detail": "S0 extracts the source PDF's reference strings to source_refs_raw.json (s0_ingest.py:80-88) and bibliography.py implements fetch_source_refs (line 319) to resolve them via SS \u2014 but it has zero callers (grep confirms only the definition). S4 even emits a 'source_refs_skipped / not_pdf' event for non-PDFs (s4_audit.py:378-383) implying PDFs use them; they never do. Instead, anchors and both bibliography buckets are fetched by searching SS with the bare domain LABEL (e.g. 'machine learning') sorted by citationCount (bibliography.py:285-310, 357-411), which returns field-generic mega-cited classics with no connection to the specific document. The single most relevant, already-in-hand citation pool \u2014 the paper's own bibliography \u2014 is discarded, while the gap analysis 'diffs' the graph against generic field papers. This undercuts design principle 4 (grounded citations) at its root: the pool is real but largely irrelevant.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/bibliography.py:319-354",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s0_ingest.py:80-88",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s4_audit.py:378-383",
+    "/Users/cyan/ccr/know-expand/know_expand/bibliography.py:285-310"
+   ]
+  },
+  {
+   "layer": "planning",
+   "severity": "medium",
+   "title": "S3 Phase 2 silently descoped: 'two-agent classification' is a keyword-overlap heuristic and classification_conflicts.json is always empty",
+   "detail": "README:394-396 and the state-layout docs describe two agents classifying terms against the locked taxonomy with divergences flowing to S4 as 'primary gap candidates'. In code, _classify_term (s3_graph.py:352-375) is pure keyword/token overlap; _CLASSIFIER_PROMPT (s3_graph.py:199-207) is dead text; conflicts is initialized to [] at s3_graph.py:378 and never appended, so classification_conflicts.json is always empty and S4's gap_candidates derivation (s4_audit.py:391-396, 419-423) is vacuous code. Worse, terms with zero keyword overlap are assigned to the currently least-populated domain (s3_graph.py:371-375) \u2014 arbitrary placement that quietly pollutes domains and downstream per-domain research. Either implement the documented LLM classification or document the heuristic and route no-match terms to an 'unassigned' bucket.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s3_graph.py:199-207",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s3_graph.py:352-378",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s4_audit.py:391-396"
+   ]
+  },
+  {
+   "layer": "objective",
+   "severity": "medium",
+   "title": "The 'non-negotiable' 65/35 split is a config knob applied to the wrong variable",
+   "detail": "The split is declared non-negotiable in CLAUDE.md and README:1019 yet lives in config.yaml:2 (foundational_fraction: 0.65) where any user can change it \u2014 the invariant is rhetorical, not enforced. More substantively: the ratio governs how many results are kept from two keyword searches whose relevance is the real quality bottleneck (see bibliography finding above), so tuning the ratio is second-order. A fixed ratio across all fields also ignores publication velocity \u2014 a 24-month frontier window for ML and for pure mathematics yield wildly different signal density (and _FIELD_BASELINES in bibliography.py:16-40 stops at 2023/2024, so in 2026 nearly all frontier papers fall through to the recency-factor fallback, making the MNCS machinery mostly dead weight). Defensible position: hard-code the EXISTENCE of the frontier bucket (README:677 already says this), make the ratio per-domain adaptive or at least honestly configurable, and delete or update the stale baselines table.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/config.yaml:1-11",
+    "/Users/cyan/ccr/know-expand/know_expand/bibliography.py:16-60",
+    "/Users/cyan/ccr/know-expand/know_expand/bibliography.py:357-411"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "Boilerplate filter uses substring matching and kills legitimate domain terms",
+   "detail": "compute_centrality rejects any term where any boilerplate token is a SUBSTRING of the name: `any(bp in name for bp in BOILERPLATE)` (centrality.py:21). 'zero-knowledge proof', 'proof assistant', 'hash table', 'lookup table', 'cross-section', 'figure of merit' are all silently dropped (return None \u2192 term never enters terms.json, s2_extract.py:450-451). For math/crypto/systems documents this deletes core vocabulary. Should be exact match or word-boundary match on the full term.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/centrality.py:19-22",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s2_extract.py:446-458"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "Systematic occurrence-count inflation in the S2 reduce phase",
+   "detail": "TermOccurrence.occurrence_count defaults to 1 (schemas.py:15). The reduce aggregation creates a fresh TermOccurrence and then ADDS every observed count (s2_extract.py:414-419: created with implicit count=1, then += t.occurrence_count including the first occurrence) \u2192 +1 per unique term. The alias-cluster merge repeats the pattern (s2_extract.py:436-441) \u2192 another +1 per cluster plus +1 per absorbed member. Net: every singleton term's count is inflated by +2, clusters by more. With core_effective_threshold=10 and supporting_effective_threshold=4 (config.yaml:13-18), this systematically promotes borderline noise into supporting/core tiers. Initialize with occurrence_count=0 or copy the first record's count.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/schemas.py:10-15",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s2_extract.py:409-441",
+    "/Users/cyan/ccr/know-expand/config.yaml:13-18"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "S3 violates the codebase's own documented anti-pattern: taxonomy force-approved after editor exit; OpenAlex validation blocks the event loop",
+   "detail": "Two issues in s3_graph.py: (1) The edit path re-reads taxonomy.json after the editor closes and then unconditionally sets data['status'] = 'approved' (s3_graph.py:147-150) \u2014 the exact anti-pattern README:935 calls out ('the user may have quit without saving... verify status: approved before proceeding'). A user who quits vi without saving gets the pristine lumper proposal approved under mode 'edited'. (2) _validate_openalex uses synchronous httpx.get inside the async stage (s3_graph.py:240-253) and is called in a serial loop over up to 16 domains \u00d7 10s timeout (s3_graph.py:301-307), blocking the event loop (and the event/emit heartbeat the dashboard polls) for up to ~2.5 minutes. Also note OpenAlex /concepts is deprecated (frozen) in favor of /topics \u2014 validation quality will decay.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s3_graph.py:140-150",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s3_graph.py:240-253",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s3_graph.py:297-307"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "S4 resume re-pays the full gap loop for already-completed domains",
+   "detail": "When the bibliography sentinel exists (bib_path non-empty, s4_audit.py:263-275), _process_domain skips the fetches but UNCONDITIONALLY re-runs the entire 3-round gap loop (up to 9 LLM calls) for that domain. Gap results are never persisted per domain \u2014 only aggregated into gap_analysis.md after ALL domains finish (s4_audit.py:437-443). A crash at domain 7 of 8 therefore re-runs the gap loop for domains 1-6 on resume, contradicting the idempotency story (README:733-752, principle 10) and multiplying cost. Persist a gaps_{domain_id}.json sentinel alongside the bibliography and short-circuit on it.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s4_audit.py:262-275",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s4_audit.py:437-443"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "Interview 'coverage' is satisfied by question text alone \u2014 a fully unanswered interview completes silently with a fabricated profile",
+   "detail": "_detect_covered_fields scans the concatenation of question AND answer text for keywords (s1_assess.py:258-273), so merely ASKING about math comfort marks math_comfort covered even when the web answer timed out and returned '' (s1_assess.py:403). After ~8 unanswered questions all fields read as covered, the agent may declare completion, and _synthesize_profile then infers an entire UserProfile from a transcript of empty answers (s1_assess.py:546-566) \u2014 no warning event distinguishes 'user answered' from 'user absent' (stage1_headless_no_answer fires only in the TTY branch, s1_assess.py:505-506). Downstream, every stage calibrates depth/math mode to a hallucinated reader. Coverage should require non-empty answers, and an all-timeouts interview should fall back to _DEFAULT_PROFILE with an explicit event.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s1_assess.py:238-273",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s1_assess.py:399-403",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s1_assess.py:546-566"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "low",
+   "title": "Source-fetch relevance gates are loose; unvetted third-party text is injected into S5 prompts",
+   "detail": "The Wikipedia gate accepts a title whose first word merely shares a 4-character prefix with the term (sources.py:160-167), and all S2 terms are lowercased (s2_extract.py:411), so acronym homonyms slip through ('cnn' \u2192 the news network; 'bert' \u2192 Sesame Street is blocked only if the extract doesn't contain 'bert', which it does). PyPI descriptions (arbitrary package READMEs, sources.py:188-227) and Wikipedia extracts are concatenated into S5 persona prompts with no sanitization \u2014 a prompt-injection surface once inputs come from untrusted users. The _is_searchable_term camelCase rejection (sources.py:99) is dead code since all terms are already lowercase by S4.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/sources.py:95-109",
+    "/Users/cyan/ccr/know-expand/know_expand/sources.py:150-179",
+    "/Users/cyan/ccr/know-expand/know_expand/sources.py:188-227"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "low",
+   "title": "Event names use stale stage numbering, fragmenting observability",
+   "detail": "S2 emits stage1_* events (s2_extract.py:288, 387-388, 406 \u2014 'stage1_map_start', 's1_concept_grounding_*'), S3 emits stage2_* (s3_graph.py:287, 335), S4 emits stage3_* and s3_* (s4_audit.py:183, 188, 402) while their stage_start/stage_complete events carry the NEW numeric stage ids (2, 3, 4). Any dashboard or log consumer keying on event names misattributes events to the wrong stage. A mechanical rename plus a naming convention test would close this.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s2_extract.py:286-319",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s3_graph.py:287",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s4_audit.py:183-193"
+   ]
+  }
+ ],
+ "production_gaps": [
+  "No multi-tenant story: per-run subprocess + file-polling IPC (qa_queue.jsonl, taxonomy_choice.json) + module-global rate limiters means concurrent users on one host multiply Semantic Scholar request rates per shared IP with no broker, queue, or shared cache. A shared HTTP cache (the DiskCache the README already claims) plus a single rate-limit-aware fetch service is the minimum before two users can run simultaneously.",
+  "No input hardening for hosted use: URL fetch has no SSRF protection, content-type check, size cap, or User-Agent (s0_ingest.py:26-31); Docling parse has no timeout, page cap, or memory bound \u2014 a large or adversarial PDF upload is a denial-of-service vector.",
+  "No OCR path: scan-only PDFs are rejected with an error (correctly), but partially scanned PDFs pass the guard (structural_zones>=5 OR chunks>=3) and silently lose all image-page content.",
+  "Human checkpoints (S1 interview, S3 taxonomy) need an async pause/exit/notify/resume job model. Current in-process polling with 300s/600s timeouts silently fabricates defaults (empty-answer profile, lumper taxonomy) \u2014 acceptable for a personal tool, indefensible for paying users.",
+  "S2\u2192S4 wall-clock at unauthenticated SS rates: per-academic-core-term grounding searches (s2_extract.py:287-319) + ~6-8 SS calls per domain in S4 put a single run at tens of minutes of pure rate-limit waiting without SS_API_KEY; there is no batching (SS supports batch endpoints) and no cross-run reuse of identical queries.",
+  "Zero test coverage for S0 ingestion, the S1 interview state machine, and the S2 reduce pipeline (tests/ covers centrality, sources, bibliography, union_find only) \u2014 the three stages with the most environment-dependent failure modes ship untested.",
+  "README/CLI reconciliation: six no-op flags, a nonexistent --renderer, and documented-but-absent subsystems (Crossref tier, DiskCache, map_a/map_b artifacts, per-round critique persistence, pipeline_paused exit) must be either implemented or deleted from docs before external users arrive."
+ ],
+ "strengths": [
+  "S0's degenerate-parse guard (s0_ingest.py:97-103) fails fast on scan-only PDFs with an actionable message instead of letting downstream stages silently degrade \u2014 exactly the right failure mode.",
+  "S2's three-signal design is genuinely complementary (deterministic spaCy, geometric KeyBERT/BGE-M3, conceptual LLM), with code-stripping before NLP signals, per-chunk .done map caching for cheap resume, and a thoughtful term-cleaning gauntlet (box-drawing rejection, JSON-fragment rejection, article+noun filtering).",
+  "The Semantic Scholar client is carefully engineered for a single process: 1-token serialized limiter, global 429 cooldown circuit breaker shared across coroutines, capped exponential backoff, DOI dedup, anchor-neighbor frontier expansion, and rich ss_* telemetry events for every request.",
+  "SS grounding demotion in S2 (academic core terms with zero SS hits demoted to supporting, s2_extract.py:321-342) is a cheap, effective hallucination guard on the term inventory.",
+  "sources.py is uniformly best-effort with exception containment, term-type-routed source selection, a relevance gate that catches the worst disambiguation mismatches, and a PyPI stub filter \u2014 failures degrade prompts, never crash the run.",
+  "The interview implementation anticipates real LLM misbehavior: embedded-option extraction from question text, hardcoded fallback options for the structured turns, coverage-override loop preventing premature completion, and dual TTY/web delivery."
+ ],
+ "summary": "The S0-S4 subsystem is a well-instrumented single-user research tool with genuinely good ideas (3-signal extraction, two-bucket bibliography, term-type-routed source fetching, SS circuit breaker), but it is nowhere near the production-grade multi-user product the README describes. The gap between stated intent and code is the dominant problem: six advertised CLI flags are no-ops (including --user-profile, the only documented way to skip the mandatory human interview), the documented Crossref/DiskCache/two-agent-classification/round-persistence features do not exist, and the document's own reference list \u2014 extracted in S0 \u2014 is silently discarded while bibliographies are built from generic domain-label keyword searches. Concurrency is the structural ceiling: per-process module-global rate limiters, no cross-run caching, file-polling human checkpoints that silently fabricate defaults on timeout, and an SS limiter configured for an authenticated key regardless of whether one exists. Within stages, several quiet correctness bugs (LLM map signal truncated to ~37% of each chunk, substring boilerplate filter killing terms like 'zero-knowledge proof', systematic +2 occurrence inflation, a stateless 'adversarial' loop that always runs max rounds and keeps only the last roll) erode exactly the extraction and audit quality the architecture exists to guarantee.",
+ "verdicts": [
+  {
+   "title": "Mandatory human interview (S1) with broken bypass makes the default pipeline human-gated \u2014 incompatible with unattended/multi-user operation",
+   "verdict": "confirmed",
+   "reasoning": "Every cited code fact verifies. (1) cli.py:85 parses --user-profile but args.user_profile is never read; run_pipeline() (pipeline.py:101-110) has no profile parameter and s1_assess.run() (s1_assess.py:674-741) only skips via the pipeline.json stage marker \u2014 there is no profile-injection path. _DEFAULT_PROFILE (s1_assess.py:40) is dead code, never referenced. README:188, README:~88, and design principle 11 (README:649-655) all promise an S1 bypass that does not exist. (2) Headless mode confirmed: use_web_ipc = not sys.stdin.isatty() (s1_assess.py:685); _ask_web (s1_assess.py:369-403) blocks up to _WEB_TIMEOUT=300s per question and returns \"\" on timeout; the coverage-override loop (455-472) forces ~10-15 turns, so an unattended run stalls ~50-75 min then LLM-synthesizes a profile from empty answers (line 731) and marks the stage complete. (3) S3 confirmed: _prompt_taxonomy routes to web IPC when no TTY (s3_graph.py:119-120), polls 600s (_TAXONOMY_WEB_TIMEOUT, line 54), and on timeout defaults to lumper (line 100). No code emits pipeline_paused (state.py only has display formatting for that event name), so README:388's \"emits pipeline_paused and exits cleanly\" is false. Mitigations searched: --auto-taxonomy works for S3 (claim doesn't dispute), but no working S1 bypass exists anywhere (web UI /api/run passes no profile; no tests cover --user-profile). Trivial nuances only: the S3 timeout emits stage3_review_complete (mode=lumper) so it is \"silent\" only in that a timeout is indistinguishable from an explicit choice, and the stall floor is ~50 min rather than 40. Severity is not inflated for the objective layer: the README itself advertises autonomous/unattended operation, and the advertised bypasses are broken or fictional."
+  },
+  {
+   "title": "No cross-run caching and no cross-process rate-limit coordination \u2014 external API layer cannot scale past one run per host",
+   "verdict": "partially_confirmed",
+   "reasoning": "Every code-level observation checks out: (1) _ss_limiter (bibliography.py:65-90) and _OPENALEX_LIMITER (sources.py:40-47) are module-level aiolimiter globals with zero cross-process coordination \u2014 no fcntl/filelock/redis anywhere in the repo; (2) external-source results are cached only per-run at audit/sources/sources_{domain_id}.json (s4_audit.py:226-258), and _spawn_pipeline (observe.py:2445) mints a fresh run_id per non-resume run, so re-running the same paper refetches all Wikipedia/PyPI/arXiv/OpenAlex/SS data; (3) README:869 lists DiskCache in the present-tense stack table (and README:884 rejects Redis because \"DiskCache is sufficient\"), yet diskcache is absent from pyproject.toml dependencies and never imported \u2014 a genuine doc/code mismatch; (4) the POST /api/run handler (observe.py:2688) spawns a pipeline subprocess without checking pipeline_running, so N concurrent runs with independent per-process SS limiters are mechanically possible and would collectively exceed the per-IP budget. However, the framing and severity are inflated. The \"SaaS goal\" the claim calls this a binding ceiling for does not exist: grep for saas/tenant/multi-user across all .md/.py/.yaml files returns zero hits, and the README's \"What not to use\" table explicitly rejects Redis/Ray/Celery as distributed overkill \u2014 single-host, single-run scope is a documented deliberate design choice. \"Guaranteed 429 cascades\" is also overstated: bibliography.py:145-200 implements a Retry-After-honoring circuit breaker (_ss_cooldown_until) that pauses all SS tasks in a process on 429, so concurrent runs degrade to retry-paced throughput rather than uncontrolled cascade. For the project as actually scoped (local single-user CLI with one active run in the web UI), per-run caching and per-process limiters are adequate; the real defects are a README documentation bug (DiskCache), wasteful refetching across re-runs of the same input, and a missing concurrent-spawn guard in /api/run \u2014 real issues, but not architecture-critical for any goal the repo states.",
+   "correction": "The mechanics are all true (per-process limiters, per-run-only caching, DiskCache documented at README:869 but never implemented, unguarded /api/run concurrent spawning), but the severity is wrong. There is no SaaS or multi-tenant goal anywhere in the repo \u2014 the README explicitly scopes the project to single-host local use and rejects distributed infrastructure by design, so \"binding throughput ceiling for the SaaS goal\" judges the architecture against a requirement it never claims. Additionally, \"guaranteed 429 cascades\" overstates the failure mode: a per-process circuit breaker (bibliography.py:145-200) honors Retry-After and pauses all SS tasks on 429, so concurrent runs degrade gracefully rather than cascading. Accurate severity: a minor documentation bug (DiskCache), a moderate efficiency gap (refetch on re-run), and a missing single-run guard in the web API \u2014 not a critical architecture flaw."
+  },
+  {
+   "title": "SS rate limit configured for an authenticated key but never conditioned on key presence",
+   "verdict": "partially_confirmed",
+   "reasoning": "The core claim is materially correct and verified against the code. (1) /Users/cyan/ccr/know-expand/config.yaml lines 20-23 set semantic_scholar max_rate=1/time_period=1 with the literal comment \"authenticated key: 1 req/sec\". (2) _get_ss_limiter at /Users/cyan/ccr/know-expand/know_expand/bibliography.py:77-90 consumes this unconditionally; a repo-wide grep confirms no code anywhere conditions the rate on SS_API_KEY presence \u2014 the key (bibliography.py:62, read at module import) is used only for the optional x-api-key header at lines 150 and 223. (3) README.md:305 and CLAUDE.md:147 document the key as optional and the unauthenticated rate as 0.1 req/s, so the default keyless config overruns the project's own documented unauth limit 10x. (4) The 429 circuit breaker (bibliography.py:145-208, 30s\u2192120s doubling backoff, global _ss_cooldown_until, 5 retries) exists as described and is what absorbs the resulting 429s; worse than the claim states, after retry exhaustion line 209 calls resp.raise_for_status() on the final 429, so the overrun can raise into a stage, not just slow it down. Severity \"high\" is defensible for default keyless runs. However, the \"Additionally\" sub-claim is refuted: the \"key injected later via the web UI session env inside the same process\" scenario cannot occur. observe.py has no key-setting endpoint (GET /api/keys only reads bool(os.environ.get(...)); there is no os.environ[...]= write anywhere in the file), and the pipeline always runs as a fresh subprocess (observe.py:2521-2528, env=os.environ.copy()) in which cli.py calls load_dotenv() (cli.py:7-8) before bibliography.py is imported (pipeline import deferred to cli.py:164). So the import-time read picks up the key correctly in every real execution path; it is a latent code-smell, not a live bug.",
+   "correction": "The rate-limit half of the claim is fully correct: the 1 req/s SS limiter is never conditioned on SS_API_KEY presence and overruns the documented unauthenticated limit (0.1 req/s per the repo's own README/CLAUDE.md) by 10x by default, with the 30s-120s cooldown breaker absorbing the self-inflicted 429s \u2014 and after 5 failed retries bibliography.py:209 raise_for_status() actually raises, so impact can exceed mere slowdown. The stale-key half is wrong in practice: there is no web UI mechanism that injects SS_API_KEY into a running process (observe.py's /api/keys is read-only and never writes os.environ), and the pipeline is always a freshly spawned subprocess that runs load_dotenv() before bibliography.py is imported, so the module-import-time read of _SS_API_KEY picks up the key in every actual execution path. The recommended fix should be limited to deriving the limiter rate from key presence; per-request key re-reading addresses a scenario that does not exist in this architecture."
+  },
+  {
+   "title": "S4 adversarial gap loop is a stateless re-roll: rounds share no memory, termination condition can essentially never fire, last round wins",
+   "verdict": "confirmed",
+   "reasoning": "Every material sub-claim checks out against the code. (1) Stateless rounds: in _run_gap_loop (know_expand/stages/s4_audit.py:91-198), terms_str and anchor_str are computed once before the loop (lines 99-100) and the _GAP_FINDER_PROMPT format args (lines 112-117) are all loop-invariant \u2014 no prior gaps, defender arguments, or verdicts are injected, so each round's finder prompt is byte-identical. (2) Dead stall check: line 176 builds the gap-ID set from free-text gap_description strings and line 181 requires exact set equality across independent LLM generations; the router call path (agents/base.py call \u2192 _do_call_with_thinking) sets no temperature, so exact-match across independent samples is vanishingly unlikely. (3) Max cost: config.yaml adversarial_rounds.deep=3, 3 calls/round = 9 LLM calls/domain at deep. (4) Last round wins: rebuttal_result is overwritten each iteration and only the final one is returned (line 198); rounds 1-2 are discarded, so extra rounds add cost with no information gain. (5) README:636 (\"Every round is persisted to disk before scoring\") and README:850 (\"round files prevent crash rework\" for S4/S5) are false for S4: s4_audit.py writes only the sources cache, anchors, bibliography, and the stage-end gap_analysis.md/corrections.md \u2014 no per-round artifacts (repo grep confirms round files exist only in s5_research.py:845). The resume path (s4_audit.py:262-275) even re-runs the full gap loop when the bibliography sentinel exists, confirming gap results are never persisted per-domain. No mitigating code found anywhere; emit() events carry counts only and are not read for resume. One minor overbreadth: the title says \"termination condition can essentially never fire,\" but a second exit (no_gaps, lines 127-131/178-180) can fire if the rebuttal dismisses all gaps \u2014 however the claim body correctly scopes the dead-code argument to the stall check, and when real gaps persist the loop does run to max rounds. Severity \"high\" is defensible for an architecture finding: ~48 wasted calls per 8-domain deep run, non-functional convergence logic, final output determined by a single uncorrelated round, and documentation misstating crash-safety.",
+   "correction": "Only a minor title-level overbreadth: the loop has a second termination condition (no_gaps \u2014 finder returns zero gaps, or rebuttal marks all gaps not_a_gap/ambiguous) that can genuinely fire; it is only the stall check (s4_audit.py:176-185) that is effectively dead code, exactly as the claim body states."
+  },
+  {
+   "title": "Phantom CLI/feature surface: six advertised flags do nothing; README documents subsystems that don't exist",
+   "verdict": "confirmed",
+   "reasoning": "Every sub-claim verified against the code. (1) cli.py parses --human (75), --no-pdf (76), --stage (84), --user-profile (85), --no-bibliography-fetch (87); repo-wide grep shows args.human/args.stage/args.user_profile/args.no_bibliography_fetch consumed nowhere. (2) The run_pipeline() call at cli.py:166-175 omits no_pdf, and pipeline.py:109 defaults it False \u2014 the downstream s10_assemble plumbing exists but is unreachable from the CLI. This is worse than claimed: observe.py:2509-2514 spawns the CLI with --no-pdf when the dashboard checkbox (checked by default, observe.py:804) is set, so the web UI's skip-PDF option is silently broken too. (3) resume_stage is accepted at pipeline.py:110 but never read in the function body (111-155); resume works solely via pipeline.json stage markers, making the --resume stage number a no-op token as claimed. (4) --renderer/typst (README:181, 857) does not exist in cli.py, code, or pyproject.toml. (5) Crossref appears in README at 137/190/438/524/598/606/813/848 but nowhere in know_expand/*.py; bibliography.py uses only api.semanticscholar.org (config.yaml:24 has an unused rate_limits.crossref stanza \u2014 dead config, not mitigation). (6) DiskCache (README:869, 884) absent from code and dependencies. (7) README:954-957 documents map_a_/map_b_ dual outputs; s2_extract.py:62 writes a single map_{chunk_id}.json. Severity 'high' at the planning/documentation layer is justified: half the documented CLI surface is inert and one gap breaks a default-on web UI option. Only cosmetic imprecision: Crossref citation is README:524, not 525."
+  },
+  {
+   "title": "URL ingestion writes raw HTML straight into the pipeline; no content extraction, content-type check, size cap, or SSRF guard",
+   "verdict": "confirmed",
+   "reasoning": "Every checkable sub-claim is accurate. (1) s0_ingest.py:26-31 `_fetch_url` returns raw `resp.text` with no User-Agent, no content-type check, and no size cap; httpx buffers the full body. (2) Lines 49-69: raw HTML is written to source.txt, word-split into 800-word chunks (config.yaml word_size: 800), and spaCy noun-chunks the first 50,000 chars of markup (config.yaml spacy_char_limit: 50000) into structural_zones. Docling is only used for local .pdf files; the URL branch gets no content extraction, and no readability/BeautifulSoup/trafilatura/html2text exists anywhere in the package or pyproject.toml. (3) A PDF URL is charset-decoded as text (mojibake) since resp.text is used unconditionally. (4) observe.py _spawn_pipeline (line 2445) passes the web UI's `input` param unvalidated to the CLI subprocess \u2014 no scheme allowlist or private-IP blocking, so the SSRF mechanism exists exactly as described. (5) README's S0 section (~line 316) does list URL as a first-class input. The repo even documents in sources.py:24 that missing User-Agent causes Wikipedia 403s, yet s0 sends none. Downstream stages (S2 extraction reads chunks; interview uses extracted terms) therefore operate on tag soup by construction. Severity 'high' is defensible for the execution-quality core.",
+   "correction": "One nuance: observe.py:2763 binds the dashboard to 127.0.0.1 only, so the SSRF vector is not exposed in the default configuration \u2014 it requires a deliberately hosted/proxied deployment, which the claim itself conditions on (\"in any hosted deployment\"). The POST /api/run endpoint also lacks CSRF protection, so the localhost bind is not a complete mitigation. This caps the default-config security blast radius but does not refute any stated fact."
+  },
+  {
+   "title": "S2 LLM signal silently sees only ~37% of each chunk",
+   "verdict": "partially_confirmed",
+   "reasoning": "The cited code is real but the quantified execution impact rests on an unreachable code path. CONFIRMED: (1) /Users/cyan/ccr/know-expand/know_expand/stages/s2_extract.py:93 slices the Signal-B map input to text[:cfg.chunking.llm_map_char_limit] with no truncation event or warning (chunk_map_start emits text_len but no truncation flag); (2) config.yaml:53-55 sets max_tokens: 4000 and llm_map_char_limit: 6000; (3) Signals A (spaCy, line 72) and C (KeyBERT, line 84) run on the full code-stripped chunk text \u2014 only the LLM signal is truncated, and its prompt is indeed the only one asked for implicit concepts (\"Go beyond literal text\"); (4) README design principle 1 says exactly what is quoted. REFUTED: the premise that chunks actually reach ~16k chars. The only path that uses max_tokens=4000 is the PDF branch (s0_ingest.py:90-94), and it cannot execute: HybridChunker(tokenizer=\"cl100k_base\", max_tokens=4000) deterministically raises OSError at construction \u2014 installed docling-core 2.77.0 routes string tokenizers through HuggingFaceTokenizer.from_pretrained/AutoTokenizer, and \"cl100k_base\" is not a HuggingFace model (verified by direct construction in the project venv and huggingface_hub.repo_exists('cl100k_base')==False with working network; tokenizer config unchanged since the earliest commits; zero test coverage of the chunker; no runs/ data exists). The reachable ingestion paths (URL and plain-text) chunk at word_size=800 words \u2248 4,600-5,500 chars of prose, below the 6,000-char limit, so truncation essentially never fires in any run that completes S0. Therefore \"silently sees only ~37% of each chunk\" / \"blind to the latter 60% of every chunk\" at LAYER execution / SEVERITY high is wrong today: it is a latent design hazard that activates only after the (separate, unreported) S0 tokenizer bug is fixed. The recommended remediation (sub-chunk or emit a truncation event) is still sound for the intended design.",
+   "correction": "s2_extract.py:93 does silently truncate the LLM map input to 6,000 chars, but no chunk that large is ever produced by the executable code: the PDF path that would create ~16k-char chunks crashes at S0 (HybridChunker cannot load tokenizer \"cl100k_base\" \u2014 docling-core 2.77.0 treats string tokenizers as HuggingFace model ids), and the working URL/plain-text paths chunk at 800 words (~4.6-5.5k chars), under the limit. The finding is a latent design-level hazard (plus a missing truncation event), not a high-severity execution bug affecting \"every chunk\"; the more urgent bug is the broken cl100k_base tokenizer wiring in s0_ingest.py:90-94 / config.yaml:49."
+  }
+ ]
+}

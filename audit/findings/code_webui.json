@@ -1,0 +1,224 @@
+{
+ "subsystem": "webui",
+ "issues": [
+  {
+   "layer": "objective",
+   "severity": "critical",
+   "title": "Dashboard is architected as a single-user localhost operator console, which is incompatible with the stated SaaS/self-hosted multi-user goal",
+   "detail": "Every structural decision in observe.py assumes exactly one operator on one machine watching one run: bind to 127.0.0.1 (line 2763), a single global 'active' run resolved by mtime, no authentication, no per-user state, and file-based IPC. README line 20/174 and CLAUDE.md frame `serve` as a personal localhost tool. None of the API endpoints carry a run_id or user identity. This is not a hardening gap that can be patched at the edges; the core data model (one global active state_dir for all clients) must be redesigned around per-run / per-tenant addressing before this can host concurrent users. The objective ('many users run concurrently') and the artifact's design premise are in direct conflict.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2615",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2763",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2021"
+   ]
+  },
+  {
+   "layer": "architecture",
+   "severity": "critical",
+   "title": "Single global 'active state dir' makes concurrent runs/users structurally impossible",
+   "detail": "Both do_GET and do_POST compute `state_dir = _find_active_state_dir(runs_dir)` (lines 2615, 2679), and _find_active_state_dir (lines 2021-2040) returns the single most-recently-modified live run. No endpoint (/api/status, /api/events, /api/stage, /api/section, /api/qa, /api/stop) accepts a run_id, so the dashboard can only ever reflect one run and every client sees the same one. Two pipelines running at once collide on 'which is active' by mtime, so a second user's poll silently re-targets the first user's run \u2014 answers, stop commands, and stage-clears land on the wrong run. The UI has a 'run drawer' implying multi-run, but the backend cannot honor it. This must become run-scoped routing (e.g. /api/run/{id}/status) before multi-user is viable.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2021",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2615",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2679"
+   ]
+  },
+  {
+   "layer": "architecture",
+   "severity": "high",
+   "title": "Single-threaded http.server + 2s full-file polling does not scale to multiple clients",
+   "detail": "The server is plain `http.server.HTTPServer` (line 2763), not ThreadingHTTPServer \u2014 all requests are serialized. The client polls every 2s (line 1464) hitting /api/status and /api/events, and /api/events returns the ENTIRE events.jsonl every call (_load_events, line 2387). Worse, _load_state and several _load_stage_artifacts branches (S5/S6/S8/S9, e.g. lines 2226-2247, 2338-2348) each re-read and re-parse the whole events.jsonl on every poll. events.jsonl grows unbounded during a run, so per-poll cost is O(file size) and a long run plus a few open tabs will saturate the single thread; one slow handler (large events file or markdown render) blocks the QA poll for every client. The ETag short-circuit (line 2599) still builds the full payload before comparing, so it saves bandwidth but not the read/parse/serialize cost. This needs SSE/websocket push with incremental tailing and a concurrent server.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2763",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2387",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:1464",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2226"
+   ]
+  },
+  {
+   "layer": "architecture",
+   "severity": "medium",
+   "title": "~2000-line HTML/CSS/JS embedded as a Python string in a 2768-line single file is unmaintainable",
+   "detail": "observe.py mixes the entire frontend (template `_PAGE`) and the HTTP server in one file, with CLAUDE.md encoding the brittle invariant 'Python code is always below the HTML template string'. The JS cannot be linted, type-checked, unit-tested, or bundled; there is no template engine, no escaping helper, and no separation of concerns. For a hosted product this should be a real frontend (or at least templated static assets) served by a framework, so the dashboard can be tested and the XSS sinks below can be addressed centrally.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:1",
+    "/Users/cyan/ccr/know-expand/CLAUDE.md"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "critical",
+   "title": "No authentication or CSRF protection on any endpoint, including destructive POSTs",
+   "detail": "There is no auth check anywhere in do_GET/do_POST. Anyone able to reach the port can spawn pipelines (/api/run, line 2688), kill process groups (/api/stop, line 2697), wipe stage markers (/api/stage/:id/clear, line 2720), inject interview answers, and enumerate/read the filesystem. The only safeguard is the 127.0.0.1 bind. There is also no CSRF defense: POSTs accept application/json with no token and no Origin/Referer validation, so any web page the operator visits can issue cross-origin POSTs to localhost:7842 (and DNS-rebinding defeats the localhost assumption entirely). For a hosted or even self-hosted-on-a-LAN deployment this is a full remote-control + RCE-adjacent surface (it can launch subprocesses and read arbitrary files). Auth (session/token), CSRF tokens, and Origin checks are mandatory before exposure.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2678",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2688",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2697"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "Arbitrary filesystem enumeration via /api/files?dir=",
+   "detail": "_list_files (lines 2414-2442) takes the `dir` query param, runs Path(dir).expanduser().resolve() with no allowlist/jail, and returns every entry's name, type, absolute path, and size. `/api/files?dir=/` or `?dir=/Users` discloses the entire directory tree of the host (I verified dir=/etc resolves to /private/etc and would list it). On a shared/hosted box this leaks other tenants' run directories, home dirs, and the layout an attacker needs to target the .md-read traversal below. Must be confined to runs_dir.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2414",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2653"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "Path traversal in /api/section reads arbitrary .md files outside the run dir",
+   "detail": "do_GET builds `path = state_dir/'sections'/f'section_{sid}.md'` where sid comes straight from the URL with only split('?') and strip('/') (lines 2636-2637). BaseHTTPRequestHandler does NOT normalize `..` in self.path, so a request like /api/section/../../../../Users/victim/secret resolves (verified) outside the run directory to read any file ending in .md anywhere the server user can read. The `section_` prefix only consumes one `..` level and the `.md` suffix is the only constraint \u2014 still an arbitrary-markdown-file read and a filesystem-structure oracle. Combined with /api/files this is a practical exfiltration path. sid must be validated against the sections dir with a realpath containment check.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2635",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2637"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "Stored XSS: unescaped term names and unsanitized markdown HTML rendered via innerHTML",
+   "detail": "Multiple innerHTML sinks render source/LLM-derived strings without escaping. Term names from the ingested document are injected raw: `<span class=\"term-chip\">${t.name}...` (line 1129). The section view renders Python-Markdown output directly: `view.innerHTML = d.html` (line 1290), and _render_section (line 2400) calls markdown.markdown(...) with no sanitizer (python-markdown passes raw HTML/`<script>`/`onerror` through by default). Since the source document (PDF/URL/text) is attacker-controllable in a hosted product, a crafted document executes script in the dashboard origin \u2014 which, given there is no auth/CSRF, can then drive /api/run, /api/stop, and the file-read endpoints. Other innerHTML sites (domain labels, summary previews at lines 1150/1178/1221/1270) share the issue. Needs output escaping plus HTML sanitization (e.g. bleach) of rendered markdown.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:1129",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:1290",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2400"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "/api/run accepts an arbitrary input path with no validation, becoming a file-read-to-output primitive",
+   "detail": "do_POST /api/run passes the client-supplied `input` field straight into _spawn_pipeline (line 2689), which forwards it as the document path to the CLI (line 2497/2510) with no allowlist or sandbox. A user can point the pipeline at any file on the host (config, other tenants' docs, secrets) and the pipeline will ingest it and surface its content in viewable sections/PDF \u2014 an exfiltration channel on a shared host. There is also no per-user/run authorization tying the input to the requester. (Note: args are passed as a Popen list, not shell=True, so there is no shell-injection, but the arbitrary-path read remains.) Input paths must be confined to an uploads area per user.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2688",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2497",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2510"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "Documented 'set API keys via web UI' feature does not exist; key/tenant isolation is absent",
+   "detail": "README line 296 and CLAUDE.md both state keys can be 'Set in .env or via the web UI (session only \u2014 not persisted to disk).' There is no POST /api/keys; /api/keys is GET-only and returns booleans (lines 2659-2672). So the documented capability is missing (intent-vs-code mismatch). Separately, _spawn_pipeline passes env=os.environ.copy() (line 2526), so every spawned run inherits the single server process's keys \u2014 there is no per-user/per-run key scoping. If the web-UI key feature were added as documented, posting plaintext keys to an unauthenticated, CSRF-less, non-HTTPS localhost endpoint would itself be a vulnerability. The good news: the current /api/keys never returns key values, only presence booleans.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/README.md:296",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2659",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2526"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "PID-file process control is vulnerable to PID reuse and stale files",
+   "detail": "Process management hangs entirely on a `pipeline_pid` text file. /api/stop does os.killpg(os.getpgid(pid), SIGTERM) on a PID read from that file (line 2705); if the original process exited and the OS recycled the PID, this signals an unrelated process group. _pipeline_is_running uses os.kill(pid,0) (line 2015) with the same reuse false-positive, and a stale pid file (process died without unlink) makes _find_active_state_dir prefer a dead run as 'live'. There is no generation token / start-time cookie to disambiguate, and no reconciliation of orphaned pipelines on server restart. A production design needs a supervised process registry, not a bare PID file.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2705",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2008"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "No concurrency cap or queue on /api/run; unbounded heavy subprocess spawning",
+   "detail": "/api/run spawns a pipeline on every POST (line 2689) with no check for an already-running run, no per-user limit, and no global cap. Each pipeline is expensive (many LLM calls, pandoc, two xelatex passes). Repeated clicks or scripted POSTs spawn unlimited concurrent pipelines, exhausting CPU/memory/API quota. Combined with the lack of auth, this is a trivial resource-exhaustion DoS. Hosting requires an admission queue and per-tenant concurrency limits.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2688",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2445"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "File-based JSONL IPC has no locking; SIGCHLD/preexec_fn hack locks design to single-threaded POSIX",
+   "detail": "Interview answers are appended with a plain open('a').write and no lock (_post_answer, line 2579), and taxonomy/qa state are read/written as bare files. This is safe only because the server is single-threaded and single-user; under any concurrency (or if the pipeline reads mid-write) records interleave or tear. Separately, the global signal.signal(SIGCHLD, SIG_IGN) (line 2587) plus the per-spawn preexec_fn reset (line 2527) is a fragile POSIX-fork-only mechanism: preexec_fn is not thread-safe and unsupported off fork platforms, so adopting a threaded/async server (needed for scale) would break the child-reaping workaround. The IPC layer should move to a real queue/DB with atomic writes.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2579",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2587",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2527"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "low",
+   "title": "Unbounded POST body read enables trivial memory-exhaustion DoS",
+   "detail": "do_POST reads the entire request body into memory with self.rfile.read(int(Content-Length)) (lines 2681-2682) and no size limit. An attacker (no auth required) can send a multi-GB Content-Length on /api/qa/answer or /api/run and exhaust server memory; on a single-threaded server this also blocks all other clients during the read. Needs a max-body limit and streaming/early rejection.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2681"
+   ]
+  }
+ ],
+ "strengths": [
+  "/api/keys (lines 2659-2672) returns only presence booleans, never key values \u2014 correct minimal disclosure for the secrets-status surface.",
+  "Pipelines are spawned with start_new_session=True (line 2523) so a server restart or Ctrl-C does not kill in-flight runs \u2014 a sensible isolation choice for a long-running operator tool.",
+  "ETag/304 conditional responses (_json_response, lines 2596-2608) reduce redundant payload transfer to polling clients.",
+  "Defensive try/except around every artifact load (e.g. _load_state, _load_stage_artifacts) means one corrupt JSON file degrades gracefully instead of 500-ing the whole dashboard.",
+  "Default 127.0.0.1 bind (line 2763) is the correct safe default for the current personal-tool scope, even though it is the only thing standing between the app and the unauthenticated attack surface."
+ ],
+ "production_gaps": [
+  "No authentication/authorization, sessions, or user accounts \u2014 anyone reaching the port has full control.",
+  "No CSRF tokens or Origin/Referer validation on state-changing POSTs; vulnerable to cross-site POST and DNS-rebinding against the localhost bind.",
+  "No run-scoped or tenant-scoped routing \u2014 a single global 'active' run is shared by all clients; concurrent runs/users collide.",
+  "No HTTPS/TLS; any deployment beyond localhost transmits everything (and any future key posts) in cleartext.",
+  "No input-path or directory sandboxing \u2014 /api/files enumerates the whole filesystem and /api/run ingests arbitrary host paths; /api/section traverses to arbitrary .md files.",
+  "No output escaping / HTML sanitization \u2014 source-document and LLM content is rendered via innerHTML and raw markdown, allowing stored XSS.",
+  "No concurrency control: single-threaded server, no request size limits, no run admission queue or per-user resource caps \u2014 trivial DoS.",
+  "No real-time transport (SSE/websocket); 2s full-file polling re-reads unbounded events.jsonl per client per cycle.",
+  "No robust process supervision \u2014 PID-file-only control with PID-reuse hazards, stale-file false positives, and no orphan reconciliation on restart.",
+  "No audit logging or rate limiting (log_message is suppressed, line 2611) \u2014 no record of who launched/stopped runs or read files.",
+  "Frontend is an inline Python string with no build/test/lint pipeline \u2014 cannot be safely evolved or security-reviewed in isolation.",
+  "Documented 'set keys via web UI (session only)' feature is unimplemented (README line 296) \u2014 intent-vs-code mismatch to resolve."
+ ],
+ "summary": "observe.py is a competent single-user, localhost operator console accidentally being measured against a multi-tenant hosted product, and the gap is structural rather than cosmetic. Its core data model \u2014 one global 'active' run resolved by mtime, served by a single-threaded http.server with no auth, no CSRF, file-based IPC, and a 2s full-file polling loop \u2014 cannot support concurrent users without a ground-up redesign around run-scoped, authenticated routing. Security is the most acute layer: zero authn/authz on destructive endpoints, arbitrary filesystem enumeration (/api/files), .md path traversal (/api/section), arbitrary-input ingestion (/api/run), and stored XSS via unsanitized term names and markdown are all reachable today and gated only by the 127.0.0.1 bind. To become a hosted UI it needs auth + CSRF + TLS, per-run/per-tenant isolation, path/input sandboxing, output sanitization, a concurrent server with SSE/websocket push and incremental log tailing, supervised process management replacing the PID file, and the frontend extracted from the Python string into a testable codebase.",
+ "verdicts": [
+  {
+   "title": "Dashboard is architected as a single-user localhost operator console, which is incompatible with the stated SaaS/self-hosted multi-user goal",
+   "verdict": "confirmed",
+   "reasoning": "Every code-level assertion checks out at the exact cited lines. /Users/cyan/ccr/know-expand/know_expand/observe.py:2763 hardcodes HTTPServer((\"127.0.0.1\", port)) with no --host flag in cli.py (and it is the single-threaded HTTPServer, not ThreadingHTTPServer, which further enforces one-client operation). observe.py:2021 _find_active_state_dir resolves one global active run by pipeline_pid liveness then mtime. observe.py:2615 (do_GET) and 2679 (do_POST) both resolve this single global state_dir per request; no API endpoint carries a run_id (/api/stage/:id is a stage ID, /api/section/:id a domain ID) and no endpoint carries user identity \u2014 grep finds zero auth code (no Authorization/Bearer/cookie/token/session checks anywhere in observe.py). IPC is entirely file-based in the one global state_dir (qa_queue.jsonl, qa_answers.jsonl, taxonomy_choice.json, pipeline_pid). POST /api/run spawns pipelines using the server's own env keys and POST /api/stop SIGTERMs whichever run mtime-resolution deems active, so two concurrent users would observably hijack/kill each other's runs \u2014 confirming this is structural, not an edge-hardening gap. README line 20 and the CLI reference (~line 174) plus cli.py:70 all frame serve as a localhost personal dashboard, as the auditor stated. Refutation attempts found no mitigating code anywhere in the repo: no multi-tenant, auth, or per-run addressing exists. Severity 'critical' is fair relative to a multi-user hosting objective, since the core data model (one global mtime-resolved state_dir for all clients) would need redesign, not patching.",
+   "correction": "One premise caveat: the SaaS/multi-user goal is NOT stated anywhere in the repo itself \u2014 README.md and CLAUDE.md exclusively describe a single-operator localhost tool (repo-wide grep for saas/multi-user/multi-tenant/concurrent-users finds nothing). The 'stated objective' must originate from the audit workflow's external objective layer, not the artifact. If that external objective exists as described, the conflict is real; the artifact-side architectural characterization is fully accurate regardless."
+  },
+  {
+   "title": "Single global 'active state dir' makes concurrent runs/users structurally impossible",
+   "verdict": "partially_confirmed",
+   "reasoning": "The mechanical claim is fully accurate and verified line-by-line: do_GET (observe.py:2615) and do_POST (observe.py:2679) both resolve a single global state_dir via _find_active_state_dir (observe.py:2021-2040), which returns the one most-recently-modified live run; no API endpoint accepts a run_id (the :id in /api/stage and /api/section are stage/domain ids); grep confirms no run-scoped routing exists anywhere else. The collision scenario is also real: _spawn_pipeline (2445-2530) has no already-running guard, so two concurrent runs are spawnable, after which /api/stop, /api/qa/answer, and /api/stage/:id/clear all target whichever live run wins the mtime sort. However, two material elements of the claim are wrong: (1) the \"run drawer\" (lines 738-830) is a single-run control panel (input/depth/resume/Q&A/taxonomy) with no run list or switcher \u2014 it does not \"imply multi-run,\" so there is no frontend/backend mismatch; (2) \"critical\" severity is inflated \u2014 the server binds to 127.0.0.1 only (line 2763), and neither README.md nor CLAUDE.md claims multi-user or concurrent-run support, so this is a deliberate single-active-run design with a medium-severity latent footgun (no spawn guard), not a critical defect against a stated requirement.",
+   "correction": "The code behavior is exactly as described and run-scoped routing would indeed be a prerequisite for multi-user. But the \"run drawer\" is a single-run launch/interview panel, not a multi-run UI the backend fails to honor; and severity should be medium, not critical: the dashboard is a localhost-only (127.0.0.1) single-user tool with no documented multi-user or concurrent-run requirement. The actionable bug today is narrower \u2014 _spawn_pipeline lacks a guard against spawning a second pipeline while one is live, which lets a single user create the mtime-arbitration collision."
+  },
+  {
+   "title": "No authentication or CSRF protection on any endpoint, including destructive POSTs",
+   "verdict": "confirmed",
+   "reasoning": "I read the full Handler class in /Users/cyan/ccr/know-expand/know_expand/observe.py (do_GET 2614-2676, do_POST 2678-2761) and grepped the whole file for any auth/CSRF/origin/token/cookie machinery. The claim is materially correct on every load-bearing point:\n\n1. No authentication anywhere. The grep for auth/token/csrf/origin/referer/cookie/bearer/hmac returned only unrelated hits (model_auth_skip events, OAuth provider badges, ~/.gemini/oauth_creds.json path). Neither do_GET nor do_POST inspects any credential, header, or session.\n\n2. No CSRF defense. do_POST (line 2678) parses the request body as JSON and dispatches solely on self.path. There is no Origin/Referer check and no CSRF token. A cross-origin simple-request JSON POST is accepted.\n\n3. Destructive endpoints behave exactly as cited: /api/run (2688) -> _spawn_pipeline -> subprocess.Popen(start_new_session=True) with attacker-controlled input/depth/resume params; /api/stop (2697) -> os.killpg(os.getpgid(pid), SIGTERM); /api/stage/:id/clear (2720) wipes stage markers in pipeline.json; /api/qa/answer and /api/taxonomy/choice inject interview/taxonomy answers.\n\n4. Arbitrary filesystem enumeration is real and if anything understated: GET /api/files?dir= -> _list_files (line 2414) does Path(dir_param).expanduser().resolve() with NO confinement to runs_dir, so any host directory can be listed (names + sizes).\n\nThe only safeguard is the hardcoded 127.0.0.1 bind (line 2763), which the auditor explicitly acknowledged; there is no --host flag to override it. That does constrain the 'LAN/hosted' framing somewhat, but the CSRF vector survives a localhost bind: any page the operator visits can POST application/json to localhost:7842/api/run or /api/stop with no Origin check (and DNS-rebinding defeats the localhost assumption). The README's Docker Compose deployment section shows the dashboard is meant to be served, making exposure realistic. The cited line numbers (2678/2688/2697) match the actual code.",
+   "correction": "Minor terminology nuance, not a refutation: the auditor calls the surface 'RCE-adjacent,' which is accurate \u2014 it is NOT classic command-injection RCE because _spawn_pipeline passes argv as a list with no shell=True, so there is no arbitrary-command execution. The actual primitives are: arbitrary local subprocess spawn with attacker-chosen input_path, process-group kill, stage-marker wipe, answer injection, and unconfined directory enumeration/read. The /api/files arbitrary-read is stronger than the claim implies (no path jail whatsoever). The sole mitigating factor is the hardcoded 127.0.0.1 bind with no host-override flag, which the auditor already credited; it blocks direct LAN reach but not CSRF or DNS-rebinding. Severity remains high/critical for any exposed-or-CSRF-reachable deployment."
+  },
+  {
+   "title": "Single-threaded http.server + 2s full-file polling does not scale to multiple clients",
+   "verdict": "confirmed",
+   "reasoning": "Every factual assertion verified against /Users/cyan/ccr/know-expand/know_expand/observe.py. Line 2763 is plain http.server.HTTPServer (single-threaded, serialized requests). Line 1464 is setInterval(poll, 2000), and each cycle actually hits FOUR endpoints (/api/status, /api/events, /api/qa, /api/taxonomy) plus /api/stage/:id every 5th poll \u2014 the claim understates request volume. _load_events (line 2387) reads and parses the entire events.jsonl per call with no tailing. _load_state (lines 2080-2099) re-parses the full events.jsonl on every /api/status once taxonomy.json exists. _load_stage_artifacts re-parses it again in the S5 (2226-2247), S6 (2286-2305), S8 (2338-2348), and S9 (2353+) branches. The ETag check (line 2599) compares If-None-Match only AFTER json.dumps builds the full payload (line 2597), so it saves bandwidth, not read/parse/serialize cost \u2014 and during an active run the events ETag changes nearly every poll, so full payloads are re-sent every 2s per tab. emit() in state.py appends unboundedly with no rotation; LLM-call and SS request events produce thousands of lines per deep run. Repo-wide search found zero mitigation: no ThreadingHTTPServer/ThreadingMixIn, no mtime caching, no lru_cache, no SSE/websocket. _render_section (line 2400) also does synchronous markdown rendering inside the single-threaded handler, making the \"one slow handler blocks the QA poll\" mechanism structurally real. The only soft spot is the saturation prediction: events lines are small (~100-300 bytes), so typical runs produce low-MB files where 1-2 tabs stay responsive; true saturation requires a long deep run (10+ MB) plus multiple tabs. Severity 'high' is at the upper bound for a localhost single-operator dashboard, but is defensible because the degradation directly hits the latency-sensitive QA interview poll (the only human-in-the-loop path, S1/S3) and per-poll cost provably grows O(file size) with no cap."
+  },
+  {
+   "title": "Arbitrary filesystem enumeration via /api/files?dir=",
+   "verdict": "confirmed",
+   "reasoning": "Every technical assertion in the claim is verified against the actual code at /Users/cyan/ccr/know-expand/know_expand/observe.py:\n\n1. _list_files (lines 2414-2442) does exactly what is claimed: line 2417 runs `target = Path(dir_param).expanduser().resolve()` inside a try/except. There is NO allowlist, NO confinement to runs_dir, NO is_relative_to/jail check anywhere in the function. It iterates target.iterdir() and, for each non-dotfile entry, appends {name, type, path (str(p) = absolute path), size} (lines 2432-2437). It also returns the resolved cwd and parent (line 2442). This matches the claim's description verbatim \u2014 name, type, absolute path, and size are all disclosed.\n\n2. The route handler (lines 2653-2657) passes the raw `dir` query param straight into _list_files with no validation: `qs.get(\"dir\", [\".\"])[0]` -> `_list_files(dir_param)`.\n\n3. I empirically reproduced the auditor's resolution claim: dir=/ -> /, dir=/Users -> /Users, dir=/etc -> /private/etc, dir=~ -> /Users/cyan, all is_dir=True and listable. So `/api/files?dir=/` or `?dir=/Users` does enumerate arbitrary host directories, and dir=/etc resolving to /private/etc is exactly as stated.\n\nI searched the entire file for mitigating code (allowlist, jail, is_relative_to, runs_dir confinement, auth/token) and found none guarding this path. The only mitigating factor is that the server binds to 127.0.0.1 (line 2763), not 0.0.0.0, so it is not directly network-exposed by default. That tempers \u2014 but does not eliminate \u2014 the risk: the project is documented and tooled as a hostable dashboard that would normally sit behind nginx on a shared/hosted box (the auditor's stated threat model), and a localhost service is still reachable via reverse-proxy fronting, SSRF, or browser-driven CSRF/DNS-rebinding. The localhost bind is a deployment-level mitigation, not a code-level fix, and does not address the underlying defect.\n\nThe code-level vulnerability \u2014 unconfined, user-controlled filesystem enumeration that should be confined to runs_dir \u2014 is real, present, and exactly as described, including its value as reconnaissance for the companion .md traversal. The auditor's required remediation (confine to runs_dir) is correct and absent from the code.",
+   "correction": "The only nuance: 'high' severity is slightly generous for the DEFAULT single-user case because the HTTP server binds to 127.0.0.1 (observe.py:2763), not 0.0.0.0, so it is not remotely reachable out-of-the-box without an additional vector (reverse proxy, SSRF, or CSRF/DNS-rebinding from a browser). This is a deployment mitigation only; the code defect (no runs_dir jail in _list_files) is fully real and unmitigated, and on the proxied/multi-tenant deployment the claim assumes, the high rating is appropriate."
+  },
+  {
+   "title": "Path traversal in /api/section reads arbitrary .md files outside the run dir",
+   "verdict": "refuted",
+   "reasoning": "The cited code is quoted accurately: at /Users/cyan/ccr/know-expand/know_expand/observe.py:2636-2638 the handler does `sid = self.path[len(\"/api/section/\"):].split(\"?\")[0].strip(\"/\")` then `path = state_dir / \"sections\" / f\"section_{sid}.md\"` and passes it unmodified to `_render_section` (lines 2400-2409), which calls `path.exists()` and `path.read_text()`. There is no realpath/containment check and `.resolve()` is never called. The `BaseHTTPRequestHandler`-doesn't-normalize-`..` observation is also true.\n\nHowever, the core exploitability claim is FALSE because the auditor reasons about path traversal lexically (like os.path.normpath) instead of how the OS filesystem actually resolves paths. The `section_` prefix is f-string-concatenated to the FIRST component of sid, so any traversal payload produces a first extra component of literally `section_..` (e.g. for the auditor's own example /api/section/../../../../Users/victim/secret the path becomes .../sections/section_../../../../Users/victim/secret.md). The kernel resolves paths left-to-right against REAL directories: to apply a `..` it must first enter the preceding directory. A directory literally named `section_..` does not exist on disk, so the very first lookup returns ENOENT and `.exists()`/`open()` fail before any `..` is ever applied. I empirically verified this: every traversal variant I tried (`../`, `x/../`, the auditor's exact `../../../../Users/victim/secret`, double-slash to strip leading separators, 8x `..`) returns exists=False / FileNotFoundError. The auditor's claim that the \"`section_` prefix only consumes one `..` level\" is the specific error \u2014 `section_..` is a single non-existent directory name, not `section_` followed by a separate `..`.\n\nThe only way to escape would be for sid to begin with a path separator (making the first component `section_` followed by a fresh `/../`), but the handler's `.strip(\"/\")` removes leading slashes, and even an embedded slash still yields `section_<first>` as a literal component that must exist on disk. S10 (s10_assemble.py:438,450) only ever writes `section_{domain_id}.md` FILES into the sections dir, never `section_*` subdirectories, so no real `section_<X>` directory exists to chain `..` through. There is therefore no arbitrary-.md-read and no filesystem-structure oracle via this endpoint. Severity high is unjustified; the practical exploitability is nil for the documented/normal deployment.\n\nCaveat for honesty: this relies on POSIX-style on-disk resolution; the `section_` prefix is what saves it, not any deliberate validation, and a future change that created `section_*` directories or removed the prefix would reopen the issue. Adding an explicit realpath containment check would still be defensible hardening \u2014 but as written and deployed, the claimed vulnerability does not function.",
+   "correction": "The endpoint cannot read arbitrary .md files outside the run dir. Because the run-dir path component is built as `section_{sid}` via f-string, every traversal payload yields a first extra path component of literally `section_..` (or `section_<x>`), which is a directory that does not exist on disk. OS-level path resolution (used by Path.exists()/read_text(), the only resolution in the real code \u2014 `.resolve()` is never called) requires each `..` to be applied against a real existing directory, so the lookup fails with ENOENT before any `..` escapes the sections dir. I verified the auditor's own example path /api/section/../../../../Users/victim/secret produces .../sections/section_../../../../Users/victim/secret.md and returns FileNotFoundError. S10 only writes `section_*.md` files (never `section_*` directories) into the sections dir, so there is no real directory to chain traversal through. The auditor's verdict appears to be based on lexical normpath reasoning rather than actual filesystem behavior. An explicit realpath containment check remains reasonable defense-in-depth, but no arbitrary-file read or path-traversal exists as the code currently stands."
+  },
+  {
+   "title": "Stored XSS: unescaped term names and unsanitized markdown HTML rendered via innerHTML",
+   "verdict": "partially_confirmed",
+   "reasoning": "All technical sinks are verified accurate. Line 1129 injects term names (from terms.json, extracted from the source document) raw into innerHTML with no escaping. Line 1290 sets view.innerHTML = d.html from the server. Line 2400 _render_section calls markdown.markdown() with no sanitizer; I empirically confirmed python-markdown passes <script> and onerror= through verbatim (markdown>=3.6 is a declared dependency, so the path is live). There is no JS-side escape helper anywhere; textContent is used only for static stage names. The other cited sinks (domain labels 1145/1204/1225, gap descriptions 1165, summary previews) likewise inject LLM/source-derived strings raw. There is no auth, no CSRF token, and no CSP, and the /api/run, /api/stop, and /api/files endpoints are reachable same-origin. So the vulnerability class (stored DOM XSS via unescaped term names + unsanitized markdown HTML) is real and reproducible.\n\nHowever, the claim's severity rests on a 'hosted product' / remote-attacker premise that the code refutes: the server binds to 127.0.0.1 only (line 2763), with no --host flag and no 0.0.0.0 bind anywhere. This is a single-user local observability tool (CLAUDE.md: 'web UI at http://localhost:7842'). A remote/network attacker cannot reach the dashboard, and same-origin policy stops external sites from reading localhost responses. The realistic exploit is a local stored XSS requiring the victim to run serve, ingest an attacker-supplied document, and open the affected pane \u2014 at which point the payload runs same-origin and can drive the unauthenticated endpoints (genuine local file-read/pipeline-control impact). That is a real bug worth fixing, but materially narrower than the claimed remote hosted-product compromise, so 'high' is somewhat inflated for the as-shipped tool.",
+   "correction": "The XSS sinks and lack of escaping/sanitization are correct and empirically verified, and the recommended fix (output escaping + markdown sanitization, e.g. bleach/nh3) is sound. But the 'high' severity is inflated by a 'hosted product / remote attacker' framing the code does not support: the dashboard binds to 127.0.0.1 only (observe.py:2763) with no host-override flag, so it is a single-user local tool, not a network-exposed service. A remote attacker cannot reach it. The realistic threat is a local stored XSS that requires the victim to run serve, process an attacker-supplied document, and view the Extract/section pane; once triggered it does run same-origin and can call the unauthenticated /api/run, /api/stop, and /api/files endpoints (real local file-read/control impact). For the as-shipped local deployment this is closer to medium severity."
+  },
+  {
+   "title": "/api/run accepts an arbitrary input path with no validation, becoming a file-read-to-output primitive",
+   "verdict": "partially_confirmed",
+   "reasoning": "The code-level mechanism is exactly as described. do_POST /api/run (observe.py:2688-2689) forwards the raw client JSON into _spawn_pipeline, which reads params.get(\"input\") (line 2497) and places it unvalidated into the Popen args list as the document path (line 2510). S0 ingest (s0_ingest.py:71-72 does Path(input_path); line 125 does source_path.read_text(); line 77 docling-converts PDFs) reads any existing local file and writes its contents into source.txt/chunks, which are surfaced via /api/section/:id and the PDF output. There is NO allowlist, sandbox, uploads-confinement, authentication, or per-user authorization anywhere in observe.py or the codebase (grep for upload/allowlist/sandbox/auth/tenant returns nothing). The claim's note that args are a Popen list (no shell injection) is also correct. So the literal data-flow assertions are all true.\n\nHowever, the SEVERITY (high) and the threat model are materially inflated/misframed. The entire claim rests on \"exfiltration channel on a shared host,\" \"other tenants' docs,\" and \"no per-user authorization tying the input to the requester.\" But: (1) the server binds to 127.0.0.1 ONLY (observe.py:2763), so it is not reachable by other users or hosts \u2014 there is no shared-host/multi-tenant attack surface. (2) The system has no concept of users, tenants, or requesters at all; \"no per-user authorization\" describes a non-existent boundary, not a missing control. The README consistently frames serve as a single-user localhost:7842 dashboard. (3) The \"arbitrary file read\" reduces to: the single local operator can make the pipeline ingest a file they could already read directly with cat \u2014 no privilege escalation, no crossing of a trust boundary. It would only become a genuine vuln under an unmentioned CSRF/drive-by scenario (a malicious page POSTing to localhost), and even then results stay local, making real exfiltration non-trivial. The mechanism is confirmed; the high severity and \"shared host / tenant exfiltration\" framing are not supported by the actual loopback-bound, no-auth, single-user design.",
+   "correction": "The cited code does pass the client-supplied input path unvalidated into the CLI/ingest, and there is no allowlist/sandbox/auth \u2014 that part is accurate. But the severity should be low (not high) and the threat model is wrong: the server binds to 127.0.0.1 only (observe.py:2763), so there is no shared-host or multi-tenant exposure and no per-user boundary to violate. The system has no users/tenants by design; the operator reading an arbitrary local file via the pipeline gains nothing they could not already do by reading the file directly. It is only a meaningful issue under an unmentioned CSRF/drive-by vector (malicious web page POSTing to localhost:7842), for which hardening would be input-path confinement plus a CSRF token / Origin check \u2014 not \"uploads area per user.\""
+  }
+ ]
+}

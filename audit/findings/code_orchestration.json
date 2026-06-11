@@ -1,0 +1,222 @@
+{
+ "subsystem": "orchestration",
+ "summary": "The orchestration layer is a well-instrumented single-operator local tool, not a production orchestrator. LangGraph is a decorative linear wrapper (no checkpointer, no conditional edges, no interrupts, state carries 6 constants), real state lives in pipeline.json + sentinel files, and the resume story is fragile: the canonical store is written non-atomically with multi-writer races, several documented CLI flags (--resume, --no-pdf, --stage) are dead or silently dropped, and web resume silently downgrades run depth. There is no run-failure handling at all \u2014 an unhandled stage exception kills the process with stderr piped to DEVNULL and no terminal event \u2014 and the entire web control plane assumes exactly one active run discovered by directory mtime scan, which is structurally incompatible with the stated multi-user production goal.",
+ "strengths": [
+  "The emit() event system (know_expand/state.py:157-364) is genuinely good: every event lands in events.jsonl as timestamped JSONL, is routed to leveled log files, and gets a curated human progress line \u2014 a real audit trail and the dashboard's single source of truth.",
+  "Filesystem-canonical state is the right instinct: pipeline.json stage markers plus per-domain .done sentinels (state.py:111-150, used consistently in all 11 stages, e.g. s4_audit.py:267, s5_research.py:669) give whole-stage and partial sub-stage idempotency without a database.",
+  "All 11 stages uniformly implement the stage_is_complete() skip check \u2014 the resume convention is followed everywhere, not just in some stages.",
+  "Real subprocess hygiene: the SIGCHLD SIG_IGN / preexec_fn SIG_DFL pairing (observe.py:2516-2528) and process-group SIGTERM on stop (observe.py:2705) show hard-won POSIX correctness.",
+  "probe_models() at startup (pipeline.py:150-151) fails fast on missing keys/binaries before burning LLM calls.",
+  "atomic_write() exists (state.py:376-380) and leaf utilities (union_find.py, centrality.py, config dataclasses) are small, typed, and unit-tested."
+ ],
+ "issues": [
+  {
+   "layer": "architecture",
+   "severity": "critical",
+   "title": "Single-active-run control plane: orchestration is structurally incompatible with concurrent multi-user operation",
+   "detail": "Every web API operation resolves \"the\" run via _find_active_state_dir(), an mtime-sorted directory scan (observe.py:2021-2040, used at 2456, 2615, 2679, 2700). POST /api/run spawns a subprocess unconditionally \u2014 no guard against an already-running pipeline, no queue, no concurrency limit (observe.py:2688-2695). Resume reuses whichever run happens to be 'active' by mtime (observe.py:2451-2459). Human-in-the-loop IPC is loose files in one state dir (qa_queue.jsonl, taxonomy_choice.json). state.py's module globals (_run_id, _event_fh, fixed 'know_expand' logger, state.py:26-29, 78-84) hard-bind one run per process \u2014 fine for process-per-run, but there is no orchestrator above the processes: no run registry, no run addressing in any endpoint, no tenancy, no auth. Two users (or two clicks) produce two subprocesses overwriting the same pipeline_pid (observe.py:2529), and /api/stop kills only one. Supporting many concurrent users requires a job system, not patches to this layer.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2021-2040",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2688-2695",
+    "/Users/cyan/ccr/know-expand/know_expand/state.py:26-29"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "critical",
+   "title": "Unhandled stage exceptions kill the run silently: no run_failed event, web-spawned stderr discarded",
+   "detail": "Neither pipeline.py:155 (compiled.ainvoke) nor cli.py:166-175 (asyncio.run) wraps execution in try/except. A stage-level exception (Docling parse failure in S0, pandoc failure in S10, the RuntimeError from quota_exhausted at agents/base.py:821 escaping a stage) propagates to process exit with a traceback on stderr. But _spawn_pipeline pipes stderr to DEVNULL (observe.py:2524-2525), and unhandled exceptions never pass through emit() or the logger, so errors.log and events.jsonl contain nothing. The dashboard infers death only from the pid probe. Result: a web-launched run that crashes leaves zero diagnostics anywhere. Only SIGTERM gets a terminal event (run_stopped, cli.py:14-19); crash and Ctrl-C (SIGINT unhandled) get none. The events vocabulary has no run_failed/run_complete terminal state at all (grep confirms run_failed appears nowhere).",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/pipeline.py:155",
+    "/Users/cyan/ccr/know-expand/know_expand/cli.py:166-175",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2524-2525"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "pipeline.json \u2014 the sole resume mechanism \u2014 is written non-atomically with unsynchronized multi-writer races",
+   "detail": "save_pipeline_json uses p.write_text() (state.py:134-136) even though atomic_write() exists 240 lines below in the same file (state.py:376-380). mark_stage_complete is an unlocked read-modify-write (state.py:139-145). Concurrent writers exist: the pipeline process writes markers while the web server's POST /api/stage/:id/clear does its own read-modify-write of the same file (observe.py:2720-2729), and the dashboard reads it every 2s poll. A SIGTERM arriving mid-write (the handler raises SystemExit at an arbitrary bytecode, cli.py:16-19) or a crash can truncate pipeline.json \u2014 corrupting the only resume store at exactly the moment resume matters; load_pipeline_json (state.py:127-131) would then raise on every subsequent start and status call.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/state.py:134-145",
+    "/Users/cyan/ccr/know-expand/know_expand/state.py:376-380",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2720-2729"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "Dead and broken CLI surface: --resume is a no-op, --no-pdf is silently dropped, four more flags do nothing",
+   "detail": "(1) --resume STAGE: cli.py:174 passes resume_stage to run_pipeline, which accepts it (pipeline.py:110) and never references it \u2014 the parameter is dead. Worse, README:22-24 and 186 present 'know-expand --resume 4' as the canonical recovery command, but without --run-id it generates a fresh UUID (cli.py:125) and starts from scratch in a new directory. Actual resume = --run-id + the per-stage skip checks; --resume itself changes nothing. (2) --no-pdf: parsed (cli.py:76) but never forwarded \u2014 the run_pipeline call at cli.py:166-175 omits no_pdf, so it defaults False. The web UI dutifully passes --no-pdf (observe.py:2513-2514) and it is dropped on the floor; PDF always builds. (3) --stage, --user-profile, --no-bibliography-fetch, --human (cli.py:75-87): parsed, documented in README:187+, referenced nowhere in the codebase (grep confirms). Six documented flags, zero or broken implementations.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/cli.py:74-107",
+    "/Users/cyan/ccr/know-expand/know_expand/cli.py:166-175",
+    "/Users/cyan/ccr/know-expand/know_expand/pipeline.py:101-155"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "Web-UI resume silently downgrades a deep run to standard depth",
+   "detail": "observe.py JS hardcodes depth='standard' and noPdf=true on resume, with the comment 'the pipeline already has them baked into state' (observe.py:~1709-1713). That is false: depth is never persisted \u2014 run_pipeline writes only run_id and input_path into pipeline.json (pipeline.py:128-131), and depth re-enters PipelineState from the CLI --depth flag on every invocation (cli.py:170, pipeline.py:138). So resuming a crashed --depth deep run re-executes all remaining stages (S5 research caps, bibliography totals, prompt sizing) at standard depth with no warning, producing a document that silently mixes depths. The forced no_pdf=true on resume only fails to break PDF output because of the separate cli.py bug that drops --no-pdf entirely \u2014 two bugs cancelling.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:1709-1713",
+    "/Users/cyan/ccr/know-expand/know_expand/pipeline.py:128-140"
+   ]
+  },
+  {
+   "layer": "architecture",
+   "severity": "high",
+   "title": "LangGraph is a decorative facade: linear chain, no checkpointer, no interrupts, state that carries nothing",
+   "detail": "build_graph (pipeline.py:22-98) is a strictly linear 11-node chain of identical pass-through wrappers; compile() takes no checkpointer (pipeline.py:154); there are no conditional edges, no Send fan-out, no interrupt() for the two human-in-the-loop stages (S1/S3 instead busy-poll IPC files inside stage code). PipelineState (state.py:98-104) holds six values fixed at startup; domain_ids is read from pipeline.json (pipeline.py:139) but nothing ever writes domain_ids there (grep confirms no writer), so it is always []. All real state flows through the filesystem. Skip-on-resume lives inside each stage's run() rather than in graph routing, so the 'graph' re-enters every node on every run and correctness depends on each stage author remembering the check. The dependency delivers none of LangGraph's value (durability, branching, streaming, HITL) while README:853 claims 'fan-out/fan-in via Send API' \u2014 false. Either use the checkpointer/interrupt machinery or replace the graph with a 15-line for-loop; the current middle ground misleads about durability.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/pipeline.py:22-98",
+    "/Users/cyan/ccr/know-expand/know_expand/pipeline.py:154",
+    "/Users/cyan/ccr/know-expand/know_expand/state.py:98-104"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "Centrality boilerplate filter uses substring matching and silently discards legitimate core terms",
+   "detail": "compute_centrality rejects any term whose lowercased form *contains* a boilerplate string (centrality.py:20-22: `any(bp in name for bp in BOILERPLATE)`). Verified empirically: 'hash table', 'lookup table', 'zero-knowledge proof', 'proof of stake', and 'configure' all return None (dropped). For a paper on cryptography or data structures, the document's central terms are silently erased before extraction, degrading every downstream stage (graph, audit, research) with no event emitted. tests/test_centrality.py:48-49 even enshrines this ('Terms containing boilerplate substrings are excluded') \u2014 the bug is codified as intent. The filter should match whole tokens (or exact term equality), not substrings.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/centrality.py:20-22",
+    "/Users/cyan/ccr/know-expand/tests/test_centrality.py:48-49"
+   ]
+  },
+  {
+   "layer": "planning",
+   "severity": "high",
+   "title": "README documents an orchestrator that does not exist \u2014 aspirational claims presented as implemented",
+   "detail": "Beyond --resume/--stage (above), README states as fact: 'Each domain task in S5 is wrapped with asyncio.timeout(2700)... emits a clean domain_timeout event' (README:752) \u2014 asyncio.timeout and domain_timeout appear nowhere in the code; 'pipeline.json carries model_consistency: mixed' (README:729) \u2014 model_consistency appears nowhere; 'pipeline emits pipeline_paused and exits cleanly' for taxonomy review (README:207, 388) \u2014 pipeline_paused has a formatter case (state.py:287) but no emitter anywhere; 'fan-out/fan-in via Send API' (README:853) \u2014 no Send usage. Meanwhile CLAUDE.md plans --batch-mode before basic failure handling, run-level terminal states, or working CLI resume exist. The roadmap is documenting features ahead of (or instead of) building them, which makes the docs actively dangerous as an operations manual.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/README.md:752",
+    "/Users/cyan/ccr/know-expand/README.md:729",
+    "/Users/cyan/ccr/know-expand/README.md:207"
+   ]
+  },
+  {
+   "layer": "architecture",
+   "severity": "medium",
+   "title": "Run/stage lifecycle has exactly one state ('complete') and liveness detection is pid-probe with reuse hazards",
+   "detail": "mark_stage_complete writes only {status: 'complete'} (state.py:139-145); there is no 'running', 'failed', or started_at, so a crash mid-stage is indistinguishable from never-started, and the UI cannot show which stage died. Liveness is os.kill(pid, 0) against pipeline_pid (observe.py:2008-2018), but pipeline_pid is never removed on normal exit (only /api/stop unlinks it, observe.py:2710) \u2014 after pid reuse the dashboard reports a phantom 'running' run and /api/stop will killpg an unrelated process group (observe.py:2705). A production system needs a run-level state machine persisted in the state store, not pid probing.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/state.py:139-145",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2008-2018",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py:2697-2712"
+   ]
+  },
+  {
+   "layer": "architecture",
+   "severity": "medium",
+   "title": "Config layer mixes typed dataclasses with raw dicts and loads from CWD-relative paths with no validation",
+   "detail": "Config (config.py:97-113) gives most sections dataclasses but leaves timeouts, adversarial_rounds, and rate-limit-adjacent knobs as raw dicts \u2014 the exact getattr-vs-.get() footgun that already produced the geminicli timeout bug CLAUDE.md warns about; the structural cause is unfixed, the warning is just documentation. load_config defaults to Path('config.yaml')/Path('models.yaml') relative to CWD (config.py:116-118), so the CLI only works when launched from the repo root (the web server inherits its own cwd for spawned runs). Missing sections raise bare KeyError (config.py:128-137) and unknown YAML keys raise opaque dataclass TypeErrors \u2014 no schema validation, no error messages naming the file. A TimeoutsConfig dataclass plus pydantic-style validation would eliminate the class of bug.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/config.py:97-146"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "Event-name drift: stage 10 emits s7_* events, stage 7 emits s5_* events \u2014 three inconsistent naming schemes",
+   "detail": "After the stage renumbering, event names were never migrated: s10_assemble.py emits s7_bibliography_merged/s7_pdf_start/s7_complete (s10_assemble.py:426-613) and s7_synthesize.py emits s5_structural_start/s5_critique_round (s7_synthesize.py:323-427), while pipeline.json keys stages by integers 0-10 and the LangGraph nodes use names ('ingest'...'assemble'). state.py's 160-line match statement (state.py:196-359) and the dashboard are coupled to the legacy names, so any rename is a three-file change. For an event log that is the system's primary observability surface and audit trail, events that lie about which stage produced them is real operational debt.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s10_assemble.py:426-613",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s7_synthesize.py:323-427",
+    "/Users/cyan/ccr/know-expand/know_expand/state.py:196-359"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "know-expand --status pollutes runs/ with empty run directories on every invocation",
+   "detail": "cli.py creates run_dir/state, output, logs (cli.py:125-132) before the --status branch is checked (cli.py:134). Every status call without --run-id therefore mints a fresh UUID directory tree containing only logs, then reads status from a different (latest real) run's state dir. Harmless once, but it litters the runs directory, skews the mtime-based _find_latest_state_dir/_find_active_state_dir scans that everything else depends on, and signals that directory creation is not gated on actually starting a run.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/cli.py:124-141"
+   ]
+  },
+  {
+   "layer": "planning",
+   "severity": "medium",
+   "title": "Zero test coverage for the orchestration layer itself",
+   "detail": "tests/ covers leaf utilities (test_centrality, test_config, test_union_find) and stages, but there is no test_state.py, test_pipeline.py, test_cli.py, or test_observe.py. The resume mechanism (mark_stage_complete/stage_is_complete round-trip, corrupted-pipeline.json handling), CLI flag plumbing (which would have caught the dead --resume/--no-pdf flags), and the spawn/stop/resume server logic are all untested \u2014 yet these are the components whose failure loses hours of paid LLM work. The 182-test suite gives confidence in exactly the wrong places relative to risk.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/tests"
+   ]
+  },
+  {
+   "layer": "objective",
+   "severity": "medium",
+   "title": "The codebase's embedded objective is a single-operator local tool; the multi-user production goal requires admitting a rewrite boundary",
+   "detail": "Everything in this layer \u2014 free-tier quota juggling with global _PROBED_UNAVAILABLE process state, OAuth-cached gemini CLI subprocesses, file-based HITL IPC, a no-auth localhost dashboard, mtime-scanned run discovery, 'human interaction only at S1 and S3' \u2014 coherently serves one researcher on one machine, and serves them fairly well. Nothing is incoherent about that goal; the incoherence appears only if this orchestration layer is claimed to be on a path to multi-tenant SaaS. The honest objective decision is: either scope the product as self-hosted single-tenant (one deployment per user \u2014 viable with modest hardening), or accept that multi-user operation means replacing this layer with a job-queue/worker architecture and keeping only the stages. Incremental patching of observe.py/cli.py toward multi-tenancy is the one path that fails.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py",
+    "/Users/cyan/ccr/know-expand/know_expand/cli.py",
+    "/Users/cyan/ccr/know-expand/CLAUDE.md"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "low",
+   "title": "SIGTERM handler exits 0 and SIGINT is unhandled",
+   "detail": "The SIGTERM handler (cli.py:14-19) calls sys.exit(0) \u2014 exit code 0 on an externally-killed run means any supervisor (systemd, k8s, a future queue worker) sees success and will not retry; convention is 128+15 or at least non-zero. Ctrl-C (SIGINT) is unhandled, so terminal-launched runs killed interactively emit no run_stopped event at all, leaving events.jsonl without a terminal record. Also the handler does not clean up pipeline_pid, feeding the phantom-running issue above.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/cli.py:14-19"
+   ]
+  }
+ ],
+ "production_gaps": [
+  "Durable execution: no step checkpointing or replay \u2014 resume granularity is whole-stage via hand-rolled pipeline.json markers (plus ad-hoc per-domain sentinels in S4/S5); a Temporal/LangGraph-Platform-style orchestrator would persist each step's inputs/outputs and resume mid-stage deterministically.",
+  "Run lifecycle state machine: no PENDING/RUNNING/FAILED/SUCCEEDED/CANCELLED states, no run_failed terminal event, no exit-code propagation; failure is inferred from pid disappearance with stderr discarded (observe.py:2524-2525).",
+  "Job queue and admission control: POST /api/run spawns unconditionally \u2014 no queue, no per-user or global concurrency limits, no backpressure, no priority; two clicks equals two unsupervised subprocesses.",
+  "Run registry: runs are discovered by mtime-sorting the runs/ directory (observe.py:2021-2040); no database, no run addressing in the API (every endpoint operates on 'the' active run), so the control plane cannot manage N runs.",
+  "Leases/idempotency guards: nothing prevents two processes from executing against the same state_dir simultaneously (resume while alive), and pipeline.json writes are non-atomic read-modify-write with multiple writers.",
+  "Orchestrator-level timeouts, heartbeats, and retry policies: retries exist only inside the LLM router; there is no stage or domain timeout (the README's asyncio.timeout(2700) claim is unimplemented), no heartbeat, no stuck-run detection.",
+  "Horizontal scale: state, logs, and human-in-the-loop IPC are all local files (qa_queue.jsonl, taxonomy_choice.json, pipeline_pid); module-global logging/emit state binds one run per process; config paths are CWD-relative \u2014 none of it survives a second host or a load balancer without an externalized state store and message-based HITL signaling.",
+  "Tenancy and auth: the dashboard has no authentication, /api/run executes with arbitrary user-supplied input paths, /api/files browses the host filesystem, and API keys live in the server process env \u2014 acceptable on localhost, disqualifying for anything multi-user.",
+  "Crash forensics: spawned runs discard stderr; a production system needs stderr capture, structured failure events, and an error budget on the run record."
+ ],
+ "verdicts": [
+  {
+   "title": "Single-active-run control plane: orchestration is structurally incompatible with concurrent multi-user operation",
+   "verdict": "partially_confirmed",
+   "reasoning": "The structural claims are accurate and verified against the code. _find_active_state_dir (observe.py:2021-2040) is an mtime-sorted scan preferring a live run, and it is the sole run-resolution mechanism for every endpoint (used at 2456, 2615, 2679, 2700 exactly as cited). POST /api/run (2688-2695) spawns unconditionally \u2014 _spawn_pipeline (2445-2530) never checks _pipeline_is_running, and a repo-wide grep finds no lock, queue, or already-running guard anywhere; the only guard is client-side JS (button disable at line 1716), bypassed by a second tab/user or direct POST. Resume (2451-2459) reuses whichever run is 'active' by mtime. No endpoint accepts a run id, the handler has no auth, IPC is loose files in one state dir, and state.py:26-29/78-84 module globals plus the fixed 'know_expand' logger bind one run per process. /api/stop kills only the mtime-first live run per call with no way to address a specific run. However, two details keep this from full confirmation: (1) the 'two clicks overwrite the same pipeline_pid' mechanism is wrong for the fresh-run case \u2014 each fresh /api/run generates a new UUID run dir (2464-2465), so the same-file clobber at 2529 occurs only in resume scenarios (two resumes, or resume-while-running, which overwrites the live run's pid and orphans it); the broader consequence (two unguarded subprocesses, stop kills one) still holds. (2) Severity 'critical' is inflated: the server binds 127.0.0.1 only (line 2763) and the project is documented everywhere as a single-operator localhost tool with human-in-the-loop stages \u2014 concurrent multi-user operation is not a stated requirement, so 'no auth/no tenancy' is the design point rather than a defect. The architecture assessment (multi-user needs a job system, not patches) is technically true; within the tool's actual scope the real defects are double-click races and the resume-while-running PID clobber, which merit high/medium rather than critical.",
+   "correction": "All cited code behaves as claimed except: (a) two fresh /api/run clicks write pipeline_pid into two different UUID run dirs \u2014 the same-file overwrite at observe.py:2529 happens only in resume paths (notably resume-while-running, which clobbers the live run's pid); (b) severity is overstated \u2014 the dashboard binds 127.0.0.1 only and the project is explicitly a single-operator localhost tool, so multi-user incompatibility is a design boundary, not a critical defect. The concrete in-scope bugs (unguarded concurrent spawns from multiple tabs, resume clobbering a live run's pid, /api/stop unable to address a specific run) are real but high/medium severity."
+  },
+  {
+   "title": "Unhandled stage exceptions kill the run silently: no run_failed event, web-spawned stderr discarded",
+   "verdict": "confirmed",
+   "reasoning": "Every load-bearing element of the claim verifies against the code. pipeline.py:155 (`await compiled.ainvoke(state)`) and cli.py:166-175 (`asyncio.run(run_pipeline(...))`) have no try/except, and the LangGraph node wrappers (pipeline.py:29-71) catch nothing, so a stage exception propagates to process exit with a traceback on stderr only. observe.py:2521-2528 (`_spawn_pipeline`) pipes both stdout and stderr to subprocess.DEVNULL, discarding that traceback for web-launched runs. There is no sys.excepthook anywhere in the package, and state.py's errors.log handler only captures logger calls \u2014 unhandled exceptions never reach it. A repo-wide grep confirms `run_failed` and `run_complete` appear nowhere; the only terminal event is `run_stopped` from the SIGTERM handler (cli.py:14-19), and KeyboardInterrupt/SIGINT is handled only in observe.py's tail/serve commands, not the pipeline path. agents/base.py:821 is exactly the uncaught `raise RuntimeError(\"All models exhausted...\")` after emitting quota_exhausted. The dashboard infers death solely via the pid probe in `_pipeline_is_running` (observe.py:2008-2015, os.kill(pid, 0)). Severity 'critical' is defensible for an observability-centric tool: a crashed web run leaves no diagnostics in events.jsonl, errors.log, or anywhere else.",
+   "correction": "Two illustrative details are slightly off, without changing the verdict: (1) a pandoc failure in S10 does NOT crash the run \u2014 s10_assemble.py:582-615 catches it, emits `s7_pdf_error`, and logs to errors.log via _logger.error (the Docling/S0 and quota-RuntimeError examples do hold; s0_ingest.py has no exception handling at all); (2) for the quota-exhaustion path specifically, events.jsonl is not entirely empty \u2014 the `quota_exhausted` event is emitted before the RuntimeError is raised \u2014 though no terminal run-level failure marker exists in any path."
+  },
+  {
+   "title": "pipeline.json \u2014 the sole resume mechanism \u2014 is written non-atomically with unsynchronized multi-writer races",
+   "verdict": "partially_confirmed",
+   "reasoning": "Every code citation checks out. state.py:134-136 save_pipeline_json uses Path.write_text (truncate-then-write, non-atomic); state.py:376-380 atomic_write (tmp + os.replace) exists in the same file and is used for s1/s5/s6/s7/s10 artifacts but never for pipeline.json; state.py:139-145 mark_stage_complete is an unlocked read-modify-write, and a repo-wide grep finds no file locking anywhere. The multi-writer race is real and user-reachable: observe.py:2720-2729 (/api/stage/:id/clear) performs its own non-atomic RMW from the web server process, and the UI does NOT hide the clear button while the pipeline runs (observe.py:924-927 gates only on stage status), so clicking it mid-run races the pipeline's marker writes \u2014 lost update (dropped completion marker or undone clear). The SIGTERM truncation mechanism is also real: cli.py:16-19 raises SystemExit from the handler, the web Stop button sends SIGTERM to the process group (observe.py:2705), and write_text truncates before writing, so an interrupt or crash mid-write leaves invalid JSON. load_pipeline_json (state.py:127-131) does bare json.loads with no error handling, so a corrupt file crashes pipeline startup (pipeline.py:122), --status (cli.py:23, which picks the latest run dir by existence only at cli.py:38), and stage_is_complete; the web server's guarded reads all swallow the error (observe.py:2050-2056, 2484-2489, 2502-2505) so there is no in-product repair path \u2014 Resume spawns a subprocess that dies instantly. Severity 'high' is defensible (sole resume store for hours-long paid LLM runs; trivial fix exists in-file), though the per-write corruption window is microseconds-scale. The one material overstatement: 'raise on every subsequent start' is false for fresh runs \u2014 cli.py:125-127 generates a new run_id and fresh state_dir per run, so a corrupt pipeline.json only breaks resume of that specific run and default --status while it is the latest run, not all future starts.",
+   "correction": "The core claim is accurate (non-atomic writes, no locking, real user-reachable multi-writer race, SIGTERM/crash truncation possible, no recovery path), but the blast radius is narrower than stated: a corrupted pipeline.json does NOT make load_pipeline_json raise on every subsequent start. Fresh runs create a new run_id and state dir (cli.py:125-127) and are unaffected. Only (a) resume of the corrupted run (web UI Resume passes that run's --run-id; pipeline.py:122 then raises) and (b) `know-expand --status` without --run-id while the corrupted run is the most recently modified (cli.py:36-39 selects it by file existence only) crash. The corrupted run is unresumable until the file is manually deleted/repaired, but the tool as a whole keeps working for new runs."
+  },
+  {
+   "title": "Dead and broken CLI surface: --resume is a no-op, --no-pdf is silently dropped, four more flags do nothing",
+   "verdict": "confirmed",
+   "reasoning": "Every material assertion verifies. (1) --resume: cli.py:174 forwards resume_stage to run_pipeline (pipeline.py:110), which never references it \u2014 repo-wide grep finds only the call site and the parameter declaration, so it is dead. Without --run-id, cli.py:125 (run_id = args.run_id or new_run_id()) creates a fresh run directory with an empty pipeline.json, so README:24's canonical 'know-expand --resume 4' silently starts the whole pipeline over in a new directory. Actual resume is --run-id plus the per-stage stage_is_complete() guards (state.py:148, called at the top of every stage), exactly as the claim states; the web UI resume works only because observe.py:2510 passes --run-id. (2) --no-pdf: parsed at cli.py:76 but the run_pipeline call at cli.py:166-175 omits it, so it defaults False and the PDF always builds; downstream plumbing (pipeline.py:109/153, s10_assemble.py:555-556) is functional but unreachable from the CLI. observe.py:2513-2514 appends --no-pdf to the spawned subprocess, and observe.py:1713 hardcodes noPdf=true on every web resume \u2014 all dropped, making the impact slightly worse than claimed. (3) --human, --stage, --user-profile, --no-bibliography-fetch are parsed (cli.py:75-87) and referenced nowhere (zero grep hits for args.human/args.stage/args.user_profile/args.no_bibliography_fetch; run_pipeline has no matching parameters); README:187-190 documents --stage/--user-profile/--no-bibliography-fetch as functional. Sole imprecision: --human is parsed-and-dead but not actually listed in the README flag reference; offsetting this, README:181 documents a --renderer flag that is not parsed at all, so the doc/CLI mismatch is broader than claimed. Severity 'high' is justified: the documented recovery command for an expensive multi-hour LLM pipeline silently re-runs everything from scratch, and no mitigating code exists anywhere in the repo."
+  },
+  {
+   "title": "Web-UI resume silently downgrades a deep run to standard depth",
+   "verdict": "confirmed",
+   "reasoning": "Every element of the claim checks out against the code. (1) observe.py:1709-1713 hardcodes depth='standard', autoTax=true, noPdf=true when isResume, with exactly the quoted comment; the server handler (observe.py:2507-2514) forwards the POSTed depth straight into the spawned CLI as `--depth standard`. (2) The comment's premise is false: pipeline.py:128-131 persists only run_id and input_path into pipeline.json; a repo-wide search finds no persistence of depth anywhere; state[\"depth\"] is rebuilt from the CLI --depth flag on every invocation (cli.py:80/170, pipeline.py:138), and graph.compile() uses no LangGraph checkpointer, so nothing is \"baked into state\". The resume_stage parameter (pipeline.py:110) is dead code; resume is purely stage markers. (3) Depth materially drives remaining stages: bibliography.py:363 (cfg.bibliography.depth_totals[depth]), s4_audit.py:273/319 (adversarial rounds), s5_research.py:964+ (research caps per domain), s7_synthesize.py:303. The mixed-depth outcome is even stronger than claimed: S5 has per-domain sentinel skips (s5_research.py:664-673), so a deep run crashing mid-S5 and resumed via web UI produces some deep domains and some standard domains in one document, with no warning or event. (4) The two-bugs-cancelling detail is verified: cli.py:76 defines --no-pdf but the run_pipeline call at cli.py:166-175 omits no_pdf=args.no_pdf, so the flag is a no-op and the forced no_pdf=true on resume has no effect. No mitigating code exists anywhere. Severity high is appropriate: CLAUDE.md documents the web UI Resume button as a primary resume mechanism, and the bug silently degrades the core output quality. Bonus confirmation of the same pattern: autoTax forced true on resume would also skip human S3 taxonomy review if resuming before S3.",
+   "correction": ""
+  },
+  {
+   "title": "LangGraph is a decorative facade: linear chain, no checkpointer, no interrupts, state that carries nothing",
+   "verdict": "confirmed",
+   "reasoning": "Every checkable assertion holds. pipeline.py:29-96 is a strictly linear 11-node chain of identical pass-through wrappers (each just awaits sX.run and returns state unchanged); edges are 11 plain add_edge calls with no conditional edges and no Send. pipeline.py:154 is `compiled = graph.compile()` with no checkpointer; grep finds no checkpointer or interrupt() anywhere in the repo. S1 busy-polls qa_answers.jsonl every 0.5s (s1_assess.py:386) and S3 polls taxonomy_choice.json every 1.0s (s3_graph.py:81) instead of using LangGraph interrupts. PipelineState (state.py:98-104) holds six startup-fixed values; domain_ids is read from pipeline.json at pipeline.py:139 but no code ever writes a domain_ids key to pipeline.json (only run_id, input_path, stages), so the read always yields []. Skip-on-resume is implemented independently inside all 11 stages' run() via stage_is_complete() (s0:36, s1:678, s2:367, s3:273, s4:371, s5:949, s6:343, s7:274, s8:202, s9:172, s10:403), so the graph re-enters every node and correctness depends on per-stage convention. README:853 verbatim claims 'fan-out/fan-in via Send API' but Send is never imported; actual fan-out is asyncio.gather/create_task (s5_research.py:438/778/990, s4_audit.py:285). README:568 ('LangGraph writes the completion checkpoint') is also false. Two minor nuances that do not change the verdict: (1) s3_graph.py:409 does write state[\"domain_ids\"] in-memory mid-run, but grep shows zero readers of it \u2014 downstream stages re-derive domains from graph.json on disk, so the write is dead; (2) agents/lc_adapter.py:203-209 uses LangGraph meaningfully (ReAct StateGraph + ToolNode + conditional edges for S6/S9), so 'the dependency delivers none of LangGraph's value' is overbroad for the package as a whole \u2014 but the pipeline-orchestration claim (the subject of README:853's row) is accurate, and the for-loop replacement suggestion remains valid for build_graph independently of lc_adapter.",
+   "correction": "Two minor refinements: (1) PipelineState is not entirely write-free \u2014 s3_graph.py:409 writes state[\"domain_ids\"] mid-run, but nothing ever reads it, so it is dead code rather than functioning graph state. (2) The LangGraph dependency is not 100% decorative across the repo: agents/lc_adapter.py builds real ReAct graphs with conditional edges and ToolNode for S6/S9. The decorative-facade characterization applies specifically to the top-level pipeline graph in pipeline.py, which is where the claim's evidence points."
+  },
+  {
+   "title": "Centrality boilerplate filter uses substring matching and silently discards legitimate core terms",
+   "verdict": "confirmed",
+   "reasoning": "Empirically verified: compute_centrality (know_expand/centrality.py:20-22) uses substring containment (`any(bp in name for bp in BOILERPLATE)`), and all five claimed terms ('hash table', 'lookup table', 'zero-knowledge proof', 'proof of stake', 'configure') return None, plus collateral like 'intersection', 'cross-section', 'tablet', 'figure-eight knot', 'pumping lemma'. The drop is on the live extraction path: s2_extract.py:447-451 does `if tier is None: continue` with no event emitted, so the term never reaches terms.json \u2014 the sole input for S1 core-term interview, S3 graph, S4 audit, and S5 research. No mitigating or recovery code exists anywhere in the repo. Notably, the per-chunk filters in the same stage (s2_extract.py:76,80) use exact membership (`t not in BOILERPLATE`), so the substring semantics in the centrality pass contradict the codebase's own earlier filter \u2014 evidence the behavior is a bug, not design. tests/test_centrality.py:48-50 (test_boilerplate_partial_match) does codify the substring behavior as intent ('Terms containing boilerplate substrings are excluded'). Severity 'high' is justified: for crypto/data-structure/math documents the central terms are silently erased before extraction, degrading every downstream stage with zero observability. Only trivial inaccuracy: the test assert is at line 50, not 48-49 (the comment is at 49) \u2014 immaterial."
+  }
+ ]
+}

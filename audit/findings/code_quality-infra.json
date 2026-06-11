@@ -1,0 +1,174 @@
+{
+ "subsystem": "quality-infra",
+ "summary": "The test suite (183 tests, all passing in ~19s) is real but badly skewed: it deeply covers pure string helpers and a few mocked stage flows while leaving the delivery-critical surfaces \u2014 observe.py (2,768 lines, 16 endpoints), pipeline wiring, CLI/SIGTERM, resume semantics, the PDF build, and most of the router fallback matrix \u2014 at zero coverage, and one stage test silently makes live HTTP calls to Wikipedia/PyPI/arXiv/OpenAlex. Delivery infrastructure is essentially absent for the stated production goal: the checked-in docker-compose.yml is a dead artifact from the doc-expand era (services the README itself rejects, `build: .` with no Dockerfile), the wheel is not actually installable because config.yaml/models.yaml are CWD-relative and not packaged, there is no CI, no release process, and \u2014 most importantly for a product whose deliverable is generated text \u2014 no output-quality eval harness of any kind.",
+ "strengths": [
+  "183 tests pass deterministically in 19s with no external test runner config needed (pytest settings in pyproject.toml, asyncio_mode=auto); LLM calls in stage tests are properly mocked via AsyncMock routers so no test depends on API keys.",
+  "Several tests encode real, specific past regressions rather than padding: tests/test_base.py:242-290 pins the geminicli _PROBED_UNAVAILABLE key-mismatch fix (commit fd18d6e), the _instructor_mode matrix (test_base.py:361-394) pins the Mistral/Groq/Gemini JSON-mode workarounds, and test_base.py:101-112 covers Anthropic cache_control blocks in _msg_chars.",
+  "Stage tests consistently verify the two invariants that matter for resume: skip-when-complete idempotency (s4_audit, s5_research, s7_synthesize, s8_verify, s10_assemble each have one) and per-domain failure isolation (tests/test_s3_integration.py:272-336, tests/test_s4_research.py:178).",
+  "tests/test_bibliography.py uses pytest-httpx (httpx_mock) correctly for hermetic Semantic Scholar API tests \u2014 the right pattern exists in the repo, it just isn't applied everywhere.",
+  "uv.lock is checked in (reproducible dev environment), the console entry point (know-expand = know_expand.cli:main) works, .gitignore correctly excludes .env and runs/, and the project LICENSE is MIT with an all-permissive dependency tree (docling/spacy/litellm/instructor/langgraph MIT, sentence-transformers Apache-2.0, pypdf/httpx BSD) \u2014 no copyleft contamination."
+ ],
+ "issues": [
+  {
+   "layer": "execution",
+   "severity": "critical",
+   "title": "Package is not actually pip-installable: config files are CWD-relative and not shipped in the wheel",
+   "detail": "know_expand/config.py:116-121 defaults load_config() to Path(\"config.yaml\") / Path(\"models.yaml\") resolved against the current working directory, and know_expand/cli.py:159 calls load_config() with no arguments. config.yaml and models.yaml live at the repo root, outside the know_expand package, so the hatchling wheel (pyproject.toml:1-3) will not include them. Result: `pip install know-expand && know-expand paper.pdf` fails with FileNotFoundError from any directory except a repo checkout. Compounding this, LlamaCppConfig hardcodes a private LAN IP as the library default (know_expand/config.py:70: base_url=\"http://192.168.1.117:8080\") \u2014 a personal-machine artifact baked into shipped defaults. For a product 'many users run', the entry point only works for the author.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/config.py",
+    "/Users/cyan/ccr/know-expand/know_expand/cli.py",
+    "/Users/cyan/ccr/know-expand/pyproject.toml"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "critical",
+   "title": "docker-compose.yml is a dead artifact from the doc-expand era; README documents a different, also-nonexistent deployment",
+   "detail": "docker-compose.yml:1-35 defines grobid, anystyle, and phoenix services \u2014 zero references to any of them exist in know_expand/ or config.yaml (verified by grep), and README.md:889 explicitly lists 'Phoenix/Langfuse as Docker service' as a rejected alternative. The compose network is still named doc_expand (docker-compose.yml:7, pre-rename), the app service uses `build: .` but there is no Dockerfile anywhere in the repo, and the volumes (./state, ./output, docker-compose.yml:47-49) do not match the actual runs/{run_id}/state|logs|output layout. Meanwhile README.md:774-809 shows a *different* compose file (app + ollama profile) that is not the one checked in and equally cannot work without a Dockerfile. The entire documented Deployment section is fiction; `docker compose up` fails immediately. README.md:765 also instructs `cp .env.example .env` but no .env.example exists in the repo.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/docker-compose.yml",
+    "/Users/cyan/ccr/know-expand/README.md"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "Test suite is not hermetic: s4_audit integration tests make live HTTP calls to OpenAlex/Wikipedia/PyPI/arXiv",
+   "detail": "tests/test_s3_integration.py:186-189 and 309-314 patch fetch_anchors/fetch_bibliography/fetch_anchor_neighbors/make_router but NOT fetch_sources_for_terms, which s4_audit.run() invokes unconditionally (know_expand/stages/s4_audit.py:232,251). Every test run issues real network requests for the fixture terms 'Alpha'/'Beta'/'Gamma'. The suite only passes offline because sources.py swallows every exception into debug logs (know_expand/sources.py:292-294, 346-348) \u2014 i.e., the network dependency is masked, not absent. Smoking gun: the observed RuntimeWarning during the run ('AsyncLimiter instance is being re-used across loops' at know_expand/sources.py:314) proves _fetch_openalex_works executed inside the 'fully mocked' test. That warning also exposes a latent production bug: the module-level cached _OPENALEX_LIMITER (sources.py:40-46) is reused across event loops, which aiolimiter documents as undefined behavior \u2014 relevant the moment multiple runs share a process.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/tests/test_s3_integration.py",
+    "/Users/cyan/ccr/know-expand/know_expand/sources.py",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s4_audit.py"
+   ]
+  },
+  {
+   "layer": "planning",
+   "severity": "high",
+   "title": "No CI/CD, no lint, no type-check, no coverage measurement \u2014 quality gates do not exist",
+   "detail": "There is no .github/ directory (verified), no workflow files, no Makefile/tox/nox, and the dev extra (pyproject.toml:39-44) contains only pytest, pytest-asyncio, and pytest-httpx \u2014 no ruff, no mypy, no pytest-cov, despite .gitignore:211 listing .ruff_cache/ (tooling was apparently used ad hoc and never committed as config). Nothing runs the 183 tests automatically; the commit message claiming '182 tests' (3df1514) is already stale (183 collected), which is exactly the drift CI would catch. For a multi-user product, every merge to main is currently unverified.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/pyproject.toml",
+    "/Users/cyan/ccr/know-expand/.gitignore"
+   ]
+  },
+  {
+   "layer": "objective",
+   "severity": "high",
+   "title": "The product's actual deliverable \u2014 generated long-form text and a PDF \u2014 has zero quality evaluation",
+   "detail": "The value of know-expand is the quality of LLM-generated research prose, citations, and the assembled PDF. None of that is evaluated anywhere: there is no eval harness, no golden input document with expected-output regression, no rubric/LLM-judge scoring, no citation-accuracy benchmark, and no fixtures directory (verified by find). All LLM interactions in tests are canned Pydantic objects (e.g. tests/test_s4_research.py:38-63), so prompt changes \u2014 the highest-churn, highest-risk surface, e.g. the 1,017-line s5_research.py \u2014 can silently degrade output with no signal. Even the deterministic end of delivery is untested: the pandoc + double-xelatex path (a 'non-negotiable' invariant per CLAUDE.md) is only exercised via its skip branch (tests/test_s7_assemble.py:165 test_s7_pdf_skip_when_pandoc_unavailable); no test ever produces a PDF. A judgment that 'the build is green' currently says nothing about whether the product output got better or worse.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/tests/test_s4_research.py",
+    "/Users/cyan/ccr/know-expand/tests/test_s7_assemble.py",
+    "/Users/cyan/ccr/know-expand/know_expand/stages/s5_research.py"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "Coverage is heavily skewed: 38% of all tests target two string helpers while observe.py, pipeline.py, cli.py, and 6 of 11 stages have zero tests",
+   "detail": "tests/test_s10_pdf.py contains 70 of the 183 tests (38%), all for _fix_bare_math and _sanitize_bib_entry \u2014 two pure string functions in s10_assemble. Meanwhile: observe.py (2,768 lines \u2014 24% of the codebase \u2014 16 HTTP endpoints, the qa/taxonomy IPC protocol, SIGCHLD handling, subprocess spawning) has zero tests; pipeline.py (LangGraph wiring), cli.py (including the SIGTERM-emits-run_stopped invariant listed in CLAUDE.md's 'Important constraints'), and state.py's emit() are untested; stages s0_ingest, s1_assess (interview IPC), s2_extract, s3_graph (taxonomy review IPC), s6_align, and s9_prereq have no tests at all. The router fallback matrix documented in CLAUDE.md has 5 rows but tests cover only 3 \u2014 the Retry-After exact-sleep path, the headerless 429 exponential backoff (2s/4s/8s), and the 3-consecutive-failures permanent skip (know_expand/agents/base.py:726-930, notably duplicated in two near-identical copies) are all untested. The two human-in-the-loop IPC protocols and the resume mechanism \u2014 the features most likely to break under concurrent multi-user load \u2014 are precisely the untested ones.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/tests/test_s10_pdf.py",
+    "/Users/cyan/ccr/know-expand/know_expand/observe.py",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "Undeclared direct runtime dependencies: PyYAML and langchain-core",
+   "detail": "know_expand/config.py:4 does `import yaml` and know_expand/agents/lc_adapter.py:17-26 imports langchain_core directly, but pyproject.toml:9-34 declares neither PyYAML nor langchain-core. Both currently resolve only transitively (via litellm/docling and langgraph respectively). A routine upstream dependency refactor would break a fresh install of this package with ImportError at startup \u2014 config loading is the first thing cli.py does. This is exactly the class of breakage a lockfile does not protect end users from, since pip consumers install from pyproject metadata, not uv.lock.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/pyproject.toml",
+    "/Users/cyan/ccr/know-expand/know_expand/config.py",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/lc_adapter.py"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "Every stage test file is named for the pre-rename stage numbering \u2014 systematic off-by-rename drift",
+   "detail": "After the stage renumbering (audit inserted at S4, etc.), no test file was renamed: tests/test_s3_integration.py tests s4_audit (its own docstring at line 2 still says 'Stage 3 (Anchored Audit)' while line 218-219 asserts stages['4']), test_s4_research.py tests s5_research, test_s5_synthesize.py tests s7_synthesize, test_s6_verify.py tests s8_verify, and test_s7_assemble.py/test_s10_pdf.py test s10_assemble. Function names compound it (test_s3_run_writes_outputs..., test_s4_writes_section..., test_s6_detects_needs_citation for s8_verify). Anyone triaging a failure in 'test_s6_verify' will open s6_align.py first. Pure rename debt, but it makes the suite actively misleading and CI failure output unreadable.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/tests/test_s3_integration.py",
+    "/Users/cyan/ccr/know-expand/tests/test_s4_research.py",
+    "/Users/cyan/ccr/know-expand/tests/test_s5_synthesize.py",
+    "/Users/cyan/ccr/know-expand/tests/test_s6_verify.py",
+    "/Users/cyan/ccr/know-expand/tests/test_s7_assemble.py"
+   ]
+  },
+  {
+   "layer": "planning",
+   "severity": "medium",
+   "title": "No release/versioning machinery: 0.1.0 forever, no tags, no changelog, bare project metadata",
+   "detail": "pyproject.toml:7 pins version=\"0.1.0\" across all 64 commits; the repo has zero git tags (verified), no CHANGELOG, and know_expand/__init__.py carries no __version__. The [project] table omits license, readme, classifiers, urls, and description even though a LICENSE file (MIT) and a 59KB README exist \u2014 so a published wheel would surface as anonymous metadata on PyPI. System-level runtime requirements are also undeclared and unenforced: spacy's en_core_web_sm (a hard constraint per CLAUDE.md) appears nowhere in pyproject or uv.lock, and pandoc/xelatex/node(npx for geminicli) have no preflight documentation beyond prose. A new user's first run fails on a missing spaCy model with no install-time hint.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/pyproject.toml",
+    "/Users/cyan/ccr/know-expand/LICENSE"
+   ]
+  },
+  {
+   "layer": "architecture",
+   "severity": "medium",
+   "title": "Delivery infrastructure assumes a single developer machine, contradicting the multi-user production goal",
+   "detail": "Everything in the delivery layer is single-tenant: config resolution from CWD (config.py:116-121), runs/ rooted in the repo directory, the serve process is documented (README.md:828) as the sole observability surface with no auth/health-check/container story, and the cheapest model tier (geminicli) depends on a personal OAuth token at ~/.gemini/oauth_creds.json driving the free gemini-cli quota \u2014 per-developer-machine state that cannot be shipped to concurrent users and is at best ToS-grey for a hosted product (per-user personal quota repurposed as product capacity). There is no horizontal story at all: no image, no process supervisor, no queue, no per-tenant isolation of runs/. For SaaS or even serious self-hosting, the delivery architecture has to be designed, not patched.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/config.py",
+    "/Users/cyan/ccr/know-expand/README.md",
+    "/Users/cyan/ccr/know-expand/docker-compose.yml"
+   ]
+  }
+ ],
+ "production_gaps": [
+  "No Dockerfile and no working container path \u2014 the checked-in docker-compose.yml cannot start (references a Dockerfile that does not exist and services from the abandoned doc-expand architecture); README's Deployment section describes a compose file that is not in the repo.",
+  "No CI pipeline of any kind (.github/ absent): tests, lint, type-check, and packaging are never verified automatically; no coverage measurement exists so the severe coverage skew is invisible.",
+  "No output-quality eval harness: no golden documents, no citation-accuracy or hallucination regression checks, no LLM-judge or rubric scoring \u2014 prompt changes ship blind even though generated text is the entire product.",
+  "Wheel is broken for end users: config.yaml/models.yaml are not packaged and are resolved relative to CWD, so the installed console script only works from a repo checkout; PyYAML and langchain-core are undeclared dependencies.",
+  "System dependencies unmanaged: spaCy en_core_web_sm, pandoc, xelatex, and node/npx (for geminicli) are required at runtime but appear in no dependency metadata, preflight check at install time, or container image.",
+  "Tests issue live third-party HTTP requests (OpenAlex/Wikipedia/PyPI/arXiv) from the 'mocked' s4_audit integration tests \u2014 flaky offline/air-gapped and rude to upstream APIs under CI parallelism; no network-isolation marker or socket-blocking fixture.",
+  "No release process: version frozen at 0.1.0, zero git tags, no CHANGELOG, no PyPI metadata (license/classifiers/urls/readme undeclared); referenced .env.example file does not exist.",
+  "No load or concurrency testing for the serve process and its file-based IPC (qa_queue.jsonl, taxonomy_choice.json, pipeline_pid) despite the goal of many concurrent users; observe.py's 16 endpoints have zero tests of any kind."
+ ],
+ "verdicts": [
+  {
+   "title": "Package is not actually pip-installable: config files are CWD-relative and not shipped in the wheel",
+   "verdict": "confirmed",
+   "reasoning": "Every factual assertion was verified by reading the code and reproduced empirically. (1) know_expand/config.py:116-118 defaults load_config() to CWD-relative Path(\"config.yaml\")/Path(\"models.yaml\") and reads them with no fallback; cli.py:159 calls load_config() with no args. (2) config.yaml and models.yaml live at the repo root, outside the know_expand package. (3) Built the wheel with `uv build --wheel` under the hatchling backend (pyproject.toml has no [tool.hatch.build], force-include, or MANIFEST.in): the wheel contains 31 files and zero yaml files. (4) Reproduced the exact failure: importing load_config() and calling it from /tmp raises FileNotFoundError: 'config.yaml'. (5) config.py:70 hardcodes base_url=\"http://192.168.1.117:8080\" (a private LAN IP), duplicated in config.yaml:67. No mitigating code exists anywhere: no __file__-relative resolution, no importlib.resources, no env-var override, and observe.py's _spawn_pipeline passes no cwd= to Popen, so even the web-UI spawn path inherits the CWD dependency. The only soft spots are framing, not substance: pip install itself succeeds (execution fails from any CWD other than the repo root \u2014 including repo subdirectories, marginally worse than claimed), the llamacpp IP degrades silently via probe_models() health-check rather than crashing, and the package appears unpublished with a README documenting only the repo-checkout uv workflow, which tempers today's real-world impact. None of these refute the claim's core: an installed wheel's entry point cannot run outside a repo checkout root.",
+   "correction": ""
+  },
+  {
+   "title": "docker-compose.yml is a dead artifact from the doc-expand era; README documents a different, also-nonexistent deployment",
+   "verdict": "confirmed",
+   "reasoning": "Every factual assertion verified against the repo. (1) docker-compose.yml defines grobid (line 2), anystyle (line 14), and phoenix (line 26); case-insensitive grep for these names across know_expand/, config.yaml, models.yaml, pyproject.toml, and tests/ returns zero matches, and grep for their ports (8070/4567/6006) also returns zero matches \u2014 the code never references these services. (2) README.md:889 explicitly rejects 'Phoenix/Langfuse as Docker service' as an alternative, contradicting the checked-in compose. (3) The compose network is still named doc_expand (lines 7, 53), a pre-rename leftover; git log shows the file was last touched in early commit afb69c8 and never updated through the doc-expand \u2192 know-expand rename. (4) The app service uses `build: .` (line 38) but `find` confirms no Dockerfile or .dockerignore anywhere in the repo, so `docker compose up` fails at build. (5) Volumes ./state and ./output (lines 47-49) do not match the actual runs/{run_id}/state|logs|output layout. (6) README.md:776-800 shows a different compose file (app + ollama profile, ./runs and ./input volumes) that is not the checked-in one and also depends on the nonexistent Dockerfile. (7) README.md:765 instructs `cp .env.example .env` but no .env.example exists anywhere in the repo. No mitigating code or files found. Minor caveat: 'critical' severity is arguably a notch high since the primary uv-based run path is unaffected \u2014 this is dead deployment config plus a fictional Deployment doc section, not a defect in executing pipeline code \u2014 but the claim's substance is materially correct in every verifiable detail."
+  },
+  {
+   "title": "Test suite is not hermetic: s4_audit integration tests make live HTTP calls to OpenAlex/Wikipedia/PyPI/arXiv",
+   "verdict": "confirmed",
+   "reasoning": "Attempted refutation failed; the claim verified at every load-bearing point, both structurally and empirically. (1) tests/test_s3_integration.py:185-190 and 309-314 patch only fetch_anchors/fetch_bibliography/fetch_anchor_neighbors/make_router; fetch_sources_for_terms is never patched, and there is no conftest.py or network-blocking plugin (no pytest-socket/respx/responses anywhere in the repo). (2) s4_audit.run() builds a real httpx.AsyncClient (s4_audit.py:410) and _process_domain lazily imports (line 232) and awaits fetch_sources_for_terms (line 251); the test fixtures guarantee the guards pass (fresh tmpdir so no sources cache; nodes have core/supporting centrality). (3) Ran the suite: 3 passed, and the test-run debug logs contain live HTTP responses from en.wikipedia.org \u2014 \"wikipedia search failed for 'Alpha': Client error '403 Forbidden' for url 'https://en.wikipedia.org/w/api.php?action=opensearch&search=Alpha...'\" (same for Beta/Gamma) \u2014 real network requests issued and their failures swallowed to debug logs exactly at the cited lines (sources.py 183-184, 292-294, 346-348), which is why the suite passes regardless of connectivity: masked, not absent. (4) The cited RuntimeWarning reproduced verbatim at know_expand/sources.py:314 during test_s3_domain_failure_does_not_abort_other_domains, proving _fetch_openalex_works ran inside the \"mocked\" test and that the module-cached _OPENALEX_LIMITER (sources.py:40-47) created in one test's event loop was reused in another loop. (5) The latent-bug portion is corroborated in-repo: bibliography.py:70 reset_ss_limiter() exists for the identical cross-loop problem with the SS limiter and is called at s4_audit.run() start (line 376), but no reset exists for _OPENALEX_LIMITER. Severity \"high\" is defensible: every suite run hits public third-party APIs, and total breakage of the sources feature would be invisible to tests.",
+   "correction": "Three immaterial overstatements: \"invokes unconditionally\" \u2014 the call is actually guarded by `if not sources_cache.exists()` and a non-empty terms list (plus try/except), though both guards always pass under the test fixtures so the effect in tests is as claimed; the title's \"PyPI/arXiv\" \u2014 with no terms.json in the fixtures all terms default to term_type \"academic\", so only Wikipedia and OpenAlex endpoints are actually hit by these tests (PyPI/arXiv paths are reachable in general but not exercised here); and \"every test run\" \u2014 test_s3_skips_completed_stage individually makes no network calls (early return), though every run of the file as a whole does."
+  },
+  {
+   "title": "No CI/CD, no lint, no type-check, no coverage measurement \u2014 quality gates do not exist",
+   "verdict": "confirmed",
+   "reasoning": "Every checkable assertion holds. /Users/cyan/ccr/know-expand has no .github/ directory, no workflow files, and no Makefile/tox.ini/noxfile.py/.pre-commit-config.yaml/justfile, nor any alternative CI config (CircleCI, Jenkins, Azure, Drone, Buildkite, Bitbucket). pyproject.toml lines 39-44 contain exactly pytest, pytest-asyncio, pytest-httpx; grep for ruff/mypy/pytest-cov/coverage across pyproject.toml and uv.lock returns zero matches, so lint/type-check/coverage tooling is absent even as locked dependencies. .gitignore line 211 is `.ruff_cache/` as cited. The drift example is real: commit 3df1514's message says \"182 passing tests\" while `pytest --collect-only` reports 183 collected. No mitigating automation exists anywhere: .git/hooks has only samples, .claude/settings.local.json contains no hooks, and docker-compose.yml defines runtime services (grobid/anystyle/phoenix), not test or lint runners. Two immaterial caveats: (1) the aside that ruff \"was apparently used ad hoc\" is probably wrong \u2014 the .ruff_cache/ entry, its \"# Ruff stuff:\" comment, .pypirc, and tempCodeRunnerFile.py are verbatim from the stock GitHub Python .gitignore template, i.e. boilerplate rather than evidence of prior ruff use; (2) \"multi-user product\" overstates a single-developer local CLI/dashboard, so the high severity is contextually aggressive though the factual gap (zero quality gates) is total. Neither caveat undermines the material claim."
+  },
+  {
+   "title": "The product's actual deliverable \u2014 generated long-form text and a PDF \u2014 has zero quality evaluation",
+   "verdict": "confirmed",
+   "reasoning": "Every checkable fact in the claim is accurate. (1) /Users/cyan/ccr/know-expand/tests/test_s4_research.py:38-63 contains exactly the cited canned Pydantic factories (_make_domain_summary returning DomainSummary, _make_critique_accept returning CritiqueResult); all tests in the file patch make_router with AsyncMock, so no LLM interaction is ever exercised. (2) /Users/cyan/ccr/know-expand/tests/test_s7_assemble.py:165 is test_s7_pdf_skip_when_pandoc_unavailable, which patches shutil.which to None; the only other PDF test uses no_pdf=True. Both assert expanded.pdf does NOT exist. No test in the repo invokes pandoc or xelatex and no test ever produces a PDF, so the 'two xelatex passes' invariant from CLAUDE.md is exercised only via skip branches. (3) s5_research.py is exactly 1,017 lines. (4) find/grep confirm there is no fixtures/, evals/, or benchmarks/ directory, no golden input documents, no rubric/LLM-judge scoring code, no eval dependencies (deepeval/ragas/promptfoo absent; langsmith is only a transitive lock-file dependency, never imported), and no CI workflows at all. Even test_s3_integration.py mocks both Semantic Scholar and router.call. Mitigations were searched for and do not refute: the pipeline has runtime self-checks (S5 adversarial critic loop; S8 structural citation audit plus LLM contradiction classifier in s8_verify.py), but those are per-run product features whose LLM parts are themselves mocked in tests \u2014 they provide zero regression signal when prompts change. Severity 'high' is proportionate for a product whose entire deliverable is LLM-generated prose plus a PDF. Two marginal overstatements, neither material: the title's 'zero quality evaluation' ignores the runtime S8 structural citation audit (which IS unit-tested, in test_s6_verify.py, but only checks citation keys exist in the bibliography \u2014 not prose quality or citation accuracy); and 'even the deterministic end of delivery is untested' overlooks test_s10_pdf.py, which thoroughly unit-tests two deterministic PDF-path helpers (_fix_bare_math, _sanitize_bib_entry) \u2014 though the actual pandoc+xelatex build path indeed never runs in any test.",
+   "correction": "Two minor nuances, not refutations: (a) the deterministic helpers feeding the PDF path (_fix_bare_math, _sanitize_bib_entry in s10_assemble.py) are extensively unit-tested in tests/test_s10_pdf.py \u2014 it is specifically the pandoc + double-xelatex invocation that is never executed by any test; (b) the pipeline contains runtime quality mechanisms (S5 critic loop, S8 citation audit), but these are per-run features, not a dev-time eval/regression harness, and their LLM components are mocked in tests."
+  },
+  {
+   "title": "Coverage is heavily skewed: 38% of all tests target two string helpers while observe.py, pipeline.py, cli.py, and 6 of 11 stages have zero tests",
+   "verdict": "partially_confirmed",
+   "reasoning": "The core claim is materially correct and verified against the repo. (1) tests/ contains exactly 183 test functions; tests/test_s10_pdf.py has exactly 70 (38.3%), and its only project import is `from know_expand.stages.s10_assemble import _fix_bare_math, _sanitize_bib_entry` \u2014 both pure string functions. (2) observe.py is 2,768 of 11,412 package lines (24.3%) and no test imports it. (3) No test imports know_expand.pipeline or know_expand.cli; the SIGTERM-emits-run_stopped invariant is untested; tests import only new_run_id/setup_logging from state.py and never assert on emit() output or events.jsonl. (4) Test filenames are off-by-one from stage modules (test_s3_integration.py actually tests s4_audit, test_s7_assemble.py tests s10_assemble, etc.); the tested stage modules are s4/s5/s7/s8/s10, leaving exactly s0_ingest, s1_assess, s2_extract, s3_graph, s6_align, s9_prereq with zero stage-level tests \u2014 including both human-in-the-loop IPC protocols. (5) test_base.py covers only 3 of the 5 CLAUDE.md router fallback rows (auth-error skip, geminicli skip, all-exhausted raise); zero tests reference retry-after, _BURST_BACKOFF ([2,4,8] at base.py:376), or _fail_counts, so the Retry-After sleep, exponential backoff, and 3-consecutive-failure skip paths are untested. (6) The duplication is real: call() (base.py:735-821) and call_with_tools() (base.py:824-956) contain near-identical ~60-line error-handling blocks. However, two sub-claims are wrong, hence partial: the endpoint count and the resume-mechanism assertion (see correction). Severity 'high' for an execution-layer audit is defensible given the untested 2,768-line server and IPC protocols.",
+   "correction": "Two details are overstated. First, observe.py has 13 API endpoints (8 GET handlers at observe.py:2625-2672, 5 POST at 2688-2748), or 14 counting the root HTML page \u2014 not 16. Second, the resume mechanism is NOT entirely untested: CLAUDE.md defines resume as pipeline.json stage markers, and the marker-based skip is directly tested in five places (test_s3_integration.py::test_s3_skips_completed_stage plus test_s4/s5/s6/s7 *_idempotent_when_complete tests). What lacks coverage is the web-UI Resume button path and pipeline.py-level orchestration, not the core stage-skip mechanism. Additionally, a minor mitigation: while s2_extract has no stage-level tests, its core algorithms (union_find.py, centrality.py) have 14 dedicated tests."
+  },
+  {
+   "title": "Undeclared direct runtime dependencies: PyYAML and langchain-core",
+   "verdict": "partially_confirmed",
+   "reasoning": "The raw facts are accurate: pyproject.toml (deps lines 9-34) declares neither pyyaml nor langchain-core; know_expand/config.py:4 does a bare `import yaml` (used via yaml.safe_load at lines 120-121) and cli.py:10 imports know_expand.config at module level, so PyYAML truly is an undeclared direct dependency on the startup path; lc_adapter.py:17-26 does import langchain_core at module top. No other dependency declaration exists (no requirements.txt, no tool.uv deps). However, the impact analysis is substantially overstated. (1) lc_adapter.py is dead code: a repo-wide grep finds zero imports/references to it in cli.py, pipeline.py, any stage, the empty agents/__init__.py, or any test file \u2014 its langchain_core imports are never executed, so they cannot cause ImportError at startup or runtime. (2) langchain-core is required by langgraph's own package metadata (confirmed in uv.lock: langgraph, langgraph-checkpoint, langgraph-prebuilt all list it), and langgraph IS declared, so pip consumers get langchain-core regardless. (3) The pyyaml chain is misattributed: litellm does NOT depend on pyyaml; it arrives via seven independent transitive providers (docling-core, huggingface-hub, transformers, omegaconf, rapidocr, accelerate, langchain-core), so the 'routine upstream refactor breaks fresh install' scenario requires all of these to drop PyYAML at once \u2014 implausible. The packaging hygiene defect is real and the pyyaml fix is warranted, but severity is low/medium, not high.",
+   "correction": "PyYAML is genuinely an undeclared direct dependency on the startup path and should be added to pyproject.toml, but it resolves through seven independent transitive providers (docling-core, huggingface-hub, transformers, omegaconf, rapidocr, accelerate, langchain-core), not litellm, making the breakage scenario remote. The langchain-core half of the finding has no runtime impact at all: lc_adapter.py is never imported anywhere in the codebase (dead code), and langchain-core is pulled in by the declared langgraph dependency's own metadata anyway. Correct severity is low-to-medium packaging hygiene, not high."
+  }
+ ]
+}

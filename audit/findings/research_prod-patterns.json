@@ -1,0 +1,88 @@
+{
+ "topic": "prod-patterns",
+ "summary": "Current (June 2026) best practice for productionizing 1-3 hour multi-agent LangGraph pipelines converges on five layers: (1) durable execution \u2014 either LangGraph Platform (managed queues, Postgres checkpointing, background runs, webhooks, HITL interrupts at $39/mo + $0.001/node) or a durable-execution engine (Temporal for scale, DBOS/Hatchet for minimal-footprint Postgres-backed durability; the 2026 consensus is that most teams should start with the lightweight option and only adopt Temporal when they hit real scale); (2) interrupt-based human-in-the-loop with a Postgres checkpointer so paused runs survive process death, with idempotency required for any pre-interrupt side effects; (3) per-run/per-tenant cost metering via a proxy pattern (LiteLLM virtual keys with budgets and tag-based attribution is the de facto standard); (4) observability via Langfuse (MIT, self-hostable, ~1/3 the cost of LangSmith at volume) emitting OpenTelemetry GenAI semantic-convention attributes (still Development status \u2014 pin versions); (5) cost reduction via batch APIs \u2014 Anthropic and OpenAI both give a flat 50% discount with a 24h ceiling, and batch + prompt-caching discounts stack. Evals for long-form generated documents are now standard practice: versioned LLM-as-judge rubrics (with a human reference document to fight score saturation on long surveys) plus RAGAS/DeepEval faithfulness and citation-accuracy metrics in CI. A minimal production architecture for know-expand: keep the LangGraph pipeline self-hosted; swap pipeline.json-only resume for a real SQLite/Postgres checkpointer; replace file-based Q&A IPC with interrupt()/Command(resume=); route all LLM calls through a LiteLLM proxy with one virtual key per run for $-per-run accounting and hard budget caps; self-host Langfuse and map the existing emit()/events.jsonl to OTel gen_ai spans; ship --batch-mode on the Anthropic Batches API with 1-hour prompt-cache TTL and the planned s5_batch_poll event; add a DeepEval citation-faithfulness eval gate over S8 outputs. No Temporal Cloud or LangGraph Cloud spend is justified at single-user scale, but the architecture should keep stage boundaries activity-shaped so a later move to Hatchet/DBOS/Temporal is mechanical.",
+ "key_facts": [
+  {
+   "fact": "LangGraph Platform Plus tier: $39/month including 100k node executions, then $0.001 per node executed plus standby charges of $0.0007/min (dev) and $0.0036/min (prod). Provides hosted execution, built-in Postgres checkpointing, task queues, LangGraph Studio debugging, streaming, and webhooks. Developer tier is free with 5k traces/month.",
+   "source_url": "https://www.zenml.io/blog/langgraph-pricing"
+  },
+  {
+   "fact": "LangGraph Platform's stated value proposition is out-of-the-box persistence, memory, double-texting handling, human-in-the-loop, cron scheduling, webhooks, background runs with polling/streaming/webhook monitoring, and support for long-running tasks \u2014 exactly the glue code know-expand currently hand-rolls in observe.py.",
+   "source_url": "https://blog.langchain.com/why-langgraph-platform/"
+  },
+  {
+   "fact": "LangGraph's interrupt() pauses graph execution and saves state via the checkpointer; Command(resume=...) resumes it. PostgresSaver persists checkpoints across restarts and long pauses (MemorySaver is dev-only; SqliteSaver suits single-process deployments). The thread_id is the persistent cursor for resuming. Critical caveat: any logic before interrupt() (paid API calls, writes) must be idempotent because it re-runs on resume.",
+   "source_url": "https://docs.langchain.com/oss/python/langgraph/interrupts"
+  },
+  {
+   "fact": "Temporal pattern for LLM apps: workflows are the deterministic orchestration layer, LLM calls and tool executions run as Activities with automatic retries and recovery. Replay 2026 added Serverless Workers, Standalone Activities, Workflow Streams, and Google ADK / OpenAI Agents SDK integrations.",
+   "source_url": "https://temporal.io/blog/replay-2026-product-announcements"
+  },
+  {
+   "fact": "Temporal Cloud pricing (2026): $50 per million Actions pay-as-you-go; Essentials plan from $100/month (1M actions, 99.9% SLA), Business from $500/month. Self-hosting is free but requires operating the Temporal server cluster.",
+   "source_url": "https://docs.temporal.io/cloud/pricing"
+  },
+  {
+   "fact": "DBOS provides durable execution as an in-process Python library backed only by Postgres \u2014 no separate orchestrator, history cluster, or queue daemon. The 2026 consensus: most backend services can ship durable execution with DBOS and move to Temporal only if they hit real scale walls; DBOS fits when side effects land in your own Postgres and throughput is a few thousand state transitions/sec.",
+   "source_url": "https://www.dbos.dev/blog/postgres-is-all-you-need-for-durable-execution"
+  },
+  {
+   "fact": "Hatchet is an open-source orchestration engine whose durable tasks are positioned as a drop-in replacement for Temporal/DBOS workflows; teams choose it over Celery for native asyncio support \u2014 a significant Celery gap given long-lived LLM API calls. 2026 industry practice is to replace Celery entirely for multi-step workflows with Temporal or Hatchet.",
+   "source_url": "https://github.com/hatchet-dev/hatchet"
+  },
+  {
+   "fact": "Anthropic Message Batches API: 50% off input and output tokens on all models; a batch is limited to 100,000 requests or 256 MB; most batches finish under 1 hour with a hard 24-hour expiry ('expired' results are not billed); results downloadable for 29 days; no completion callback \u2014 you poll batch status (30s intervals are standard practice); max_tokens:0 cache pre-warming is unsupported in batches; docs recommend the 1-hour prompt-cache duration (not 5-min ephemeral) for shared context across batched requests; not ZDR-eligible.",
+   "source_url": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+  },
+  {
+   "fact": "OpenAI Batch API: flat 50% discount on all models, 24h completion window (not configurable), up to 50,000 requests per batch file, 2,000 batches/hour creation limit. Prompt caching and batch discounts stack \u2014 cached input on GPT-5.4 drops to $0.625/M, 75% off the standard $2.50 rate.",
+   "source_url": "https://developers.openai.com/api/docs/guides/batch"
+  },
+  {
+   "fact": "OpenTelemetry GenAI semantic conventions remain in Development status as of May 2026 with no stabilization timeline. Key attributes: gen_ai.usage.input_tokens, gen_ai.usage.output_tokens, gen_ai.usage.cache_read.input_tokens (included within input_tokens), plus the gen_ai.client.token.usage metric. OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental controls version transitions \u2014 pin conventions because attribute names may still change.",
+   "source_url": "https://opentelemetry.io/docs/specs/semconv/gen-ai/"
+  },
+  {
+   "fact": "Langfuse is MIT-licensed with first-class self-hosting (Docker Compose in ~30 min); LangSmith self-hosting requires an Enterprise license. At 1M traces/month: Langfuse Cloud ~$919 vs LangSmith ~$2,500+; self-hosted Langfuse ~$150/month infra. Langfuse auto-computes per-call cost from model + token counts including cached-token usage types, with custom model pricing for self-hosted models.",
+   "source_url": "https://langfuse.com/faq/all/langsmith-alternative"
+  },
+  {
+   "fact": "LangSmith pricing: free Developer tier 5k traces/month, Plus at $39/seat/month with 10k base traces, overage $2.50/1k traces (14-day retention) or $5/1k (400-day). Best fit only for all-in LangChain/LangGraph shops wanting managed SaaS.",
+   "source_url": "https://www.langchain.com/pricing"
+  },
+  {
+   "fact": "LiteLLM proxy is the de facto per-tenant metering layer: virtual keys are independently revocable with their own budgets (multiple budget windows, model-specific budgets), RPM/TPM limits, and allowed-model restrictions; spend is automatically tracked in Postgres for keys/users/teams across 100+ LLMs; tags attached to keys give per-customer/per-feature cost attribution with enforced tag budgets.",
+   "source_url": "https://docs.litellm.ai/docs/proxy/virtual_keys"
+  },
+  {
+   "fact": "Multi-tenant LLM cost-governance best practice: attach tenant/user/task identifiers to every LLM request at creation time, route everything through a single proxy that normalizes and logs, set daily per-tenant spend caps with automated rate-limit tightening, and alert on per-tenant spend vs a 7-day rolling baseline. Streaming responses require incremental token accounting.",
+   "source_url": "https://www.softwareseni.com/token-attribution-and-cost-governance-for-multi-tenant-llm-products-in-production/"
+  },
+  {
+   "fact": "LLM-as-judge is the default 2026 eval method (~85% agreement with human reviewers, higher than human-human agreement), but rubric-only setups exhibit leniency and score saturation specifically on long-text survey generation; the fix is giving the judge a human-written reference document on the same topic alongside the generated text (SurveyEval). Datasets, rubrics, and judge models are versioned as strictly as code.",
+   "source_url": "https://arxiv.org/pdf/2512.02763"
+  },
+  {
+   "fact": "The three production-ready RAG/citation eval frameworks in 2026 are RAGAS, DeepEval, and Promptfoo. RAGAS faithfulness and DeepEval FaithfulnessEval are both production-grade (DeepEval has better claim decomposition in 2026 builds; RAGAS more battle-tested); DeepEval adds a citation-accuracy metric and pytest/CI integration, making it the choice for CI gates while RAGAS suits notebook/data-pipeline workflows.",
+   "source_url": "https://atlan.com/know/llm-evaluation-frameworks-compared/"
+  },
+  {
+   "fact": "The 2026 production reference architecture for durable LLM agents combines a durable-execution primitive with the LangGraph checkpointer model, a replay-safety contract, idempotency keys derived from workflow + step IDs for non-idempotent tool/LLM calls, and resumable SSE for streaming to UIs.",
+   "source_url": "https://appscale.blog/en/blog/durable-execution-llm-agents-temporal-langgraph-checkpointing-2026"
+  },
+  {
+   "fact": "A worked example of running Anthropic's Message Batches API inside Temporal exists (submit batch as an activity, poll as a heartbeating activity, fetch results as a third activity) \u2014 the standard pattern for marrying 24h-window batch jobs with durable orchestration.",
+   "source_url": "https://stevekinney.com/writing/anthropic-batch-api-with-temporal"
+  }
+ ],
+ "implications": [
+  "Resume mechanism: pipeline.json stage markers are coarse (stage-level, not node-level) and lose all intra-stage work on crash. Adopt a LangGraph checkpointer \u2014 SqliteSaver is sufficient for the current single-process CLI (runs/{run_id}/state/checkpoint.db), PostgresSaver only if/when multi-instance. Keep pipeline.json markers as the human-readable fallback, but make the checkpointer the real resume path. Stage boundaries in pipeline.py are already activity-shaped, so a later lift to DBOS/Hatchet/Temporal is mechanical \u2014 do not buy Temporal Cloud ($100+/mo) or LangGraph Cloud at single-user scale.",
+  "Human-in-the-loop: the qa_queue.jsonl / qa_answers.jsonl / taxonomy_review.json file IPC should become interrupt() + Command(resume=...) on the checkpointer. This makes S1 interview and S3 taxonomy review survive process death (today a crash mid-interview loses the session), works identically for TTY and web, and removes the qa_complete sentinel-file race. Hard requirement from the docs: code before interrupt() re-runs on resume, so the S1 question-generation LLM call must be idempotent or cached \u2014 derive an idempotency key from run_id + stage + turn number.",
+  "Cost metering: replace ad-hoc accounting with a LiteLLM proxy instance and one virtual key per run. know-expand already speaks litellm SDK, so this is a base_url + api_key change in agents/base.py. A per-run key gives exact $-per-run attribution for the $1-150 range, a hard budget cap (kill a runaway deep run at e.g. $200), and per-provider rate limits that could eventually replace the hand-rolled per-provider semaphores. QuotaAwareRouter's fallback chain stays \u2014 the proxy complements, not replaces, it.",
+  "Observability: self-host Langfuse (Docker Compose) rather than LangSmith \u2014 LangSmith self-hosting is Enterprise-only and know-expand is not all-in on LangChain abstractions. Map emit() events to OTel gen_ai spans: llm_call_done already carries cache_read_tok, which maps directly to gen_ai.usage.cache_read.input_tokens. Because GenAI semconv is still Development status, pin the convention version and keep events.jsonl as the source of truth; treat Langfuse/OTel as a projection.",
+  "--batch-mode (planned, not yet implemented): the Anthropic Batches API design is confirmed viable \u2014 50% off, 8 domains x 4 personas is far under the 100k-request/256MB limit, most batches finish <1h so the 1-3h wall-clock estimate is conservative. Three concrete requirements from the docs: (1) poll on ~30s intervals and emit the planned s5_batch_poll event each cycle; (2) switch the S5 shared-context cache_control from 5-minute ephemeral to the 1-hour cache duration, since ephemeral entries expire during batch processing; (3) handle the 'expired' result type (unbilled) by resubmitting those requests synchronously. Note batch mode is not ZDR-eligible if that ever matters.",
+  "Eval gate: add a DeepEval-based CI job over assembled outputs \u2014 citation-accuracy and faithfulness metrics against the cached audit/sources/*.json and CSL-JSON bibliography are a natural extension of S8 verify (which already does citation audit but with no regression baseline). For whole-document quality, run an LLM-as-judge with a versioned rubric AND a human-written reference survey on the same topic, because rubric-only judging demonstrably saturates on long-form survey text. This pairs well with batch APIs: judge runs are latency-insensitive, so run them at 50% off.",
+  "Dashboard scope: observe.py's ~2700-line hand-rolled server duplicates what LangGraph Platform sells (background runs, polling endpoints, webhooks, double-texting, HITL). At $39/mo Platform is the cheapest managed exit if know-expand ever needs multi-user hosting, but for now the higher-leverage move is shrinking observe.py's custom IPC surface (interrupts + checkpointer replace 4 of the 7 IPC files) rather than replacing it.",
+  "Multi-tenancy (future): when runs are offered to other users, the proxy pattern is already in place from the LiteLLM step \u2014 add tenant tags on virtual keys, daily per-tenant spend caps, and an alert on spend vs 7-day rolling baseline. No architectural rework needed if request-time tenant/run attribution is built in now."
+ ]
+}

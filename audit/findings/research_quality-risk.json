@@ -1,0 +1,95 @@
+{
+ "topic": "quality-risk",
+ "summary": "Research across four areas (measured citation error rates, production faithfulness machinery, legal/reputational exposure, copyright of single-source derivatives) converges on one conclusion: 'check citation key exists in bibliography' is roughly level 1 of a 6-level verification ladder, and the gap between it and a defensible 'verified' claim is where all the documented failures live.\n\n(1) MEASURED ERROR RATES. Plain LLMs asked for references remain unreliable: a 2025 Deakin University audit of GPT-4o literature reviews found 19.9% of 176 citations fully fabricated and 56% fabricated-or-erroneous, with fabrication spiking to ~30% on less-studied topics; Gemini fabrication fell from ~100% (2023) to ~12% (recent), showing improvement but not safety. A large-scale bibliometric audit found ~146,900 AI-generated fake citations in the 2025 scientific literature itself. Commercial deep-research products do better but are far from clean: citation accuracy spans 78% (OpenAI Deep Research) to 94% (Claude with search) under the FACT framework; Perplexity's DRACO benchmark (Feb 2026) shows the best system at only ~64.6% citation quality and ~67.9% factual accuracy \u2014 citation quality and factuality are the weakest axes. An April 2026 study (urlhealth, arXiv 2604.03173) measured 3\u201313% of cited URLs as outright hallucinated and 5\u201318% non-resolving across 10 systems and 220k+ URLs, with deep-research agents worse than search-augmented chat \u2014 but self-correction tooling cut bad citations 6\u201379\u00d7 to under 1%, proving link/existence validation is cheap and automatable. The failure taxonomy matters: existence failures (reference doesn't exist), resolution failures (link rot), and faithfulness failures (real source doesn't support the claim) are distinct, and the third survives all bibliography-level checks.\n\n(2) PRODUCTION FAITHFULNESS MACHINERY. The state of practice is layered: (a) retrieval-grounded generation so references come from real indexes (Semantic Scholar/OpenAlex-grounded tools achieve >90% citation accuracy vs <60% for free-generation LLMs); (b) claim-level attribution at generation time \u2014 Anthropic's Citations API (GA on API and Vertex since early 2025) returns character-level pointers from each output claim to source passages; (c) post-hoc verification via atomic-claim decomposition + NLI/LLM entailment against retrieved evidence \u2014 the FActScore/SAFE/VeriScore family, sped up by VeriFastScore; production detectors like Vectara's HHEM score grounded-summarization consistency; (d) reference-resolution tooling (urlhealth) and citation-context classification (Scite's supports/mentions/contradicts model). Research (Wallat et al. 2024/25) adds a caution: 'correctness is not faithfulness' \u2014 a real, even relevant citation can still be decorative if the model never used it; current best practice verifies entailment, not provenance.\n\n(3) LEGAL/REPUTATIONAL EXPOSURE. Selling error-laden 'research-grade' AI documents has already produced concrete losses: Deloitte Australia refunded the final installment of a A$440k (~US$290k) government report after a researcher found fabricated academic references and a fake court quote (Oct 2025), then faced a second incident on a ~C$1.6M Newfoundland report (Nov 2025); the White House MAHA report (May 2025) was caught with at least 7 nonexistent studies and 'oaicite' markers, requiring public correction; Damien Charlotin's tracker logged 1,200+ court decisions involving AI-hallucinated citations by early 2026 (>1,597 by June 2026), with \u2265$145k in US sanctions in Q1 2026 alone. On the regulatory side, the FTC's Operation AI Comply (DoNotPay: $193k settlement plus consumer notices for overclaiming an AI legal product's capabilities) establishes that marketing an AI product as 'verified'/'research-grade' without substantiation is itself an actionable deceptive claim, independent of any individual error.\n\n(4) COPYRIGHT OF SINGLE-SOURCE DERIVATIVES. A knowledge expansion generated from one source paper is presumptively a derivative work of that paper. The US Copyright Office's May 2025 report says transformativeness is 'a matter of degree' and uses that compete with or substitute for the original are disfavored; Thomson Reuters v. Ross (Feb 2025, first AI fair-use ruling) rejected fair use where the AI product served a substitutional commercial market; Wainwright Securities v. Wall Street Transcript (2d Cir. 1977) is direct precedent that systematic abstracts/summaries of analytical reports infringe. Mitigating factors for a pedagogical expansion: it serves learners rather than replacing the paper for its research audience, most expansion content is newly synthesized from third-party sources rather than reproduced, and many inputs are openly licensed (CC BY) \u2014 but arXiv's default non-exclusive license does NOT permit derivatives, and CC BY-NC-ND inputs bar commercial derivatives outright, so license-aware input gating is required. Anthropic's $1.5B Bartz settlement and publisher/STM disclosure taxonomies signal a hardening environment: disclose AI generation, respect source licenses, avoid verbatim reproduction.\n\nCONCLUSION \u2014 QUALITY BAR AND THE GAP. The verification ladder is: L1 citation key resolves in bibliography (pure referential integrity); L2 reference exists in the world with matching metadata (DOI/SS ID, authors, year, title); L3 link/DOI resolves (urlhealth-class checks); L4 claim\u2013source topical relevance; L5 claim-level entailment \u2014 each cited sentence decomposed into atomic claims and verified as supported by the actual source text/abstract via NLI or LLM-judge, with unsupported claims repaired, removed, or visibly flagged in the deliverable; L6 calibration + sampled human audit + provenance/AI-use disclosure. A paid 'verified knowledge expansion' product needs, at minimum: 100% L2/L3 (fully automatable, near-zero cost \u2014 the urlhealth result shows <1% residual is achievable), >95% L5 support rate measured by an independent entailment pass with the residual visibly flagged (matching the >90% bar of source-grounded tools and clearly beating the ~65% DRACO ceiling of general deep-research products), per-document verification reports the buyer can audit, AI-use disclosure, and substantiation records for the word 'verified' (FTC exposure). 'Citation key exists in bibliography' is L1: it catches typos and dangling keys, and catches exactly zero of the failure modes documented above \u2014 every fabricated Deloitte reference, every MAHA phantom study, and every unsupported-claim citation would pass it. The honest distance is four full ladder levels, though a Semantic Scholar-grounded bibliography (as know-expand already has) structurally buys L2 for SS-sourced entries, leaving claim-level entailment (L5) as the real engineering frontier.",
+ "key_facts": [
+  {
+   "fact": "Deakin University audit of GPT-4o-generated literature reviews: 19.9% of 176 citations completely fabricated, 56% fabricated or containing errors; fabrication near 30% for less-studied topics vs 6% for well-studied ones.",
+   "source_url": "https://studyfinds.org/chatgpts-hallucination-problem-fabricated-references/"
+  },
+  {
+   "fact": "Large-scale audit of 111M references in 2.5M papers identified ~146,900 AI-generated fake citations in the 2025 scientific literature, sharply rising from mid-2024 \u2014 fake citations are now flooding published science, not just chatbot output.",
+   "source_url": "https://phys.org/news/2026-05-ai-generated-fake-citations-scientific.html"
+  },
+  {
+   "fact": "Gemini citation fabrication rate fell from ~100% (2023) to 22.8% (2024) to ~12% in recent studies; no major chatbot is fully accurate at bibliographic retrieval (8-chatbot comparison).",
+   "source_url": "https://arxiv.org/pdf/2505.18059"
+  },
+  {
+   "fact": "FACT framework: citation accuracy of commercial deep-research/search products ranges from 78% (OpenAI Deep Research) to 94% (Claude with search); OpenAI's own Deep Research system card concedes hallucinated facts and weak confidence calibration.",
+   "source_url": "https://cdn.openai.com/deep-research-system-card.pdf"
+  },
+  {
+   "fact": "Perplexity's DRACO benchmark (100 real-user deep-research tasks, expert rubrics, Feb 2026): best system achieves only ~64.6% citation quality and ~67.9% factual accuracy \u2014 the two weakest performance axes for deep-research agents.",
+   "source_url": "https://arxiv.org/abs/2602.11685"
+  },
+  {
+   "fact": "urlhealth study (Apr 2026, 10 systems, 220k+ cited URLs): 3\u201313% of citation URLs are fabricated and 5\u201318% non-resolving; deep-research agents hallucinate more than search-augmented chat; automated self-correction reduced problematic citations 6\u201379\u00d7 to under 1%, proving existence/resolution checks are cheap and automatable.",
+   "source_url": "https://arxiv.org/pdf/2604.03173"
+  },
+  {
+   "fact": "Production faithfulness machinery is layered: claim decomposition + NLI entailment (FActScore, SAFE, VeriScore; VeriFastScore for speed), grounded-generation citation APIs (Anthropic Citations API with character-level source pointers, GA on API and Vertex), and hallucination detectors like Vectara HHEM for grounded summarization.",
+   "source_url": "https://arxiv.org/abs/2406.19276"
+  },
+  {
+   "fact": "Anthropic Citations API (Jan 2025) breaks responses into text blocks annotated with exact cited passages, document index, and character/page indices \u2014 claim-level attribution at generation time rather than post-hoc.",
+   "source_url": "https://claude.com/blog/introducing-citations-api"
+  },
+  {
+   "fact": "'Correctness is not faithfulness' (Wallat et al.): a citation can point to a real source that genuinely supports the claim yet still be unfaithful if the model never causally used it \u2014 entailment checks are the practical ceiling of current verification; provenance remains research-grade.",
+   "source_url": "https://www.alphaxiv.org/overview/2412.18004v1"
+  },
+  {
+   "fact": "Source-grounded academic tools (Elicit, Consensus, Scite-class, retrieval against Semantic Scholar/OpenAlex) achieve >90% citation accuracy vs under 60% for general LLMs generating references freely; Scite additionally classifies citation contexts as supporting/mentioning/contrasting.",
+   "source_url": "https://thedrive.ai/blog/elicit-vs-consensus-ai-research-tools"
+  },
+  {
+   "fact": "Deloitte Australia refunded the final installment of a A$440k (~US$290k) government assurance report after fabricated academic references and a fake federal-court quote were found (Oct 2025); a second Deloitte incident involved AI-fabricated research in a ~C$1.6M Newfoundland & Labrador report (Nov 2025).",
+   "source_url": "https://fortune.com/2025/10/07/deloitte-ai-australia-government-report-hallucinations-technology-290000-refund/"
+  },
+  {
+   "fact": "The White House MAHA report (May 2025) cited at least 7 nonexistent studies, with 'oaicite' OpenAI markers in 37 footnotes; named researchers publicly confirmed they never wrote the cited papers, forcing public correction.",
+   "source_url": "https://www.politifact.com/article/2025/may/30/MAHA-report-AI-fake-citations/"
+  },
+  {
+   "fact": "Damien Charlotin's worldwide tracker recorded 1,227 court decisions involving AI-hallucinated citations by early 2026 and >1,597 by June 2026, growing ~5-6 cases/day; US courts imposed at least $145,000 in sanctions in Q1 2026 alone.",
+   "source_url": "https://blog.platinumids.com/blog/ai-hallucination-crisis-courts-2026"
+  },
+  {
+   "fact": "FTC Operation AI Comply: DoNotPay paid $193k and was barred from unsubstantiated AI-capability claims for marketing an undertested 'robot lawyer' \u2014 overclaiming 'verified'/'research-grade' quality is independently actionable as a deceptive practice even absent specific harm.",
+   "source_url": "https://www.ftc.gov/news-events/news/press-releases/2024/09/ftc-announces-crackdown-deceptive-ai-claims-schemes"
+  },
+  {
+   "fact": "US Copyright Office May 2025 report: transformativeness of AI use is 'a matter of degree'; outputs that compete with or substitute for the original work are 'at best, modestly transformative', and substantially-similar outputs implicate reproduction and derivative-work rights.",
+   "source_url": "https://www.skadden.com/insights/publications/2025/05/copyright-office-report"
+  },
+  {
+   "fact": "Thomson Reuters v. Ross Intelligence (Feb 2025): first AI fair-use ruling rejected fair use because the AI product served a commercial, substitutional market for the copied analytical content (Westlaw headnotes); on appeal to the Third Circuit.",
+   "source_url": "https://www.dwt.com/blogs/artificial-intelligence-law-advisor/2025/02/reuters-ross-court-ruling-ai-copyright-fair-use"
+  },
+  {
+   "fact": "Wainwright Securities v. Wall Street Transcript (2d Cir. 1977): systematic published abstracts of analytical research reports were held infringing, not fair use \u2014 direct pre-AI precedent that summaries/expansions of a single analytical work can be infringing derivatives when they appropriate its original analysis and reduce its market value.",
+   "source_url": "https://en.wikipedia.org/wiki/Wainwright_Securities_Inc._v._Wall_Street_Transcript_Corp."
+  },
+  {
+   "fact": "Bartz v. Anthropic settled for $1.5B (~$3,000 \u00d7 ~500k pirated works), the largest US copyright recovery ever; Alsup ruled training on lawfully acquired books fair use but piracy not \u2014 provenance of source documents matters as much as the use.",
+   "source_url": "https://authorsguild.org/advocacy/artificial-intelligence/what-authors-need-to-know-about-the-anthropic-settlement/"
+  },
+  {
+   "fact": "Publisher environment hardening: STM taxonomy of nine generative-AI use cases drives disclosure requirements (text generation must be disclosed); arXiv stopped accepting unvetted CS review articles in Nov 2025 due to AI-generated paper spam.",
+   "source_url": "https://www.thesify.ai/blog/ai-policies-academic-publishing-2025"
+  },
+  {
+   "fact": "DeepTRACE (2025) audits deep-research systems for one-sided/overconfident answers and unsupported citations, formalizing the audit dimensions a 'verified' product would be measured against.",
+   "source_url": "https://arxiv.org/pdf/2509.04499"
+  }
+ ],
+ "implications": [
+  "know-expand's current S8 'verify' bar (citation key exists in bibliography, [NEEDS_CITATION] logged-not-fatal) is level 1 of a 6-level ladder: it would pass every fabricated Deloitte reference, every MAHA phantom study, and every real-but-irrelevant citation. The market-measured gap is large \u2014 even best-in-class deep-research products score only ~65% citation quality (DRACO), and the failures that destroy reputations are claim-support failures, which L1 cannot see.",
+  "know-expand already has a structural advantage that should be exploited and advertised honestly: the S4 bibliography is retrieval-grounded (Semantic Scholar, 65/35 split), so references exist by construction (L2) \u2014 the dominant open risk is the model citing a real bibliography entry for a claim it doesn't support. That is precisely what the >90%-accuracy source-grounded tools fix and what L1 checking misses entirely.",
+  "Concrete S8 upgrade path, in cost order: (a) resolve every DOI/URL/SS ID and validate metadata (urlhealth-style; near-free, demonstrated to push residual bad citations under 1%); (b) claim-level entailment \u2014 decompose each cited sentence into atomic claims and check support against the stored SS abstracts (already fetched in bibliography.py) and the audit/sources cache, FActScore/VeriScore-style, using a cheap model (gemini-2.5-flash per project routing rules); (c) for claims citing the source paper itself, use Anthropic's Citations API in S5/S6 to get character-level grounding at generation time instead of post-hoc cleanup; (d) emit a machine-readable per-run verification report (claims checked / supported / flagged) under runs/{run_id}/output/ so the deliverable is auditable.",
+  "A paid tier cannot ship [NEEDS_CITATION] or entailment-failed claims as silent log lines: the gate must be repair, removal, or visible in-document flagging. Keep 'logged, never a build failure' for the free/draft pipeline, but a 'verified' SKU needs a hard quality gate (e.g., >95% of citation-bearing claims pass entailment, 100% references resolve) plus a sampled human audit before the word 'verified' appears on the PDF.",
+  "Marketing language is itself a liability surface: FTC Operation AI Comply (DoNotPay, $193k) treats unsubstantiated AI-quality claims as deceptive practice. Do not label output 'research-grade' or 'verified' without retained substantiation (the verification report from the upgraded S8); disclose AI generation in the assembled PDF colophon \u2014 Deloitte's revised report had to add exactly this disclosure after the fact.",
+  "Copyright requires license-aware input gating in S0 Ingest: the expansion is a derivative of the source paper, and Wainwright (2d Cir. 1977) plus Thomson Reuters v. Ross plus the Copyright Office's May 2025 substitution test mean commercial sale is risky for all-rights-reserved or arXiv-default-license (no derivatives) inputs, and prohibited for CC BY-NC-ND. Safe lanes: CC BY/CC BY-SA inputs (with attribution), user-owns-the-document inputs, or positioning output as pedagogical companion that quotes minimally and synthesizes from third-party sources (which most of S5/S7 content already is). S0 should detect the source license from arXiv/Crossref metadata and gate or watermark accordingly.",
+  "Positioning insight: the verification machinery is the product. General deep-research tools plateau at ~65% citation quality and a single-document-grounded pipeline can credibly exceed 90-95% with cheap, proven tooling \u2014 shipping the per-claim verification report alongside the PDF converts know-expand's pipeline cost into a defensible differentiator that the Deloitte/MAHA incidents have made commercially legible."
+ ]
+}

@@ -1,0 +1,253 @@
+{
+ "subsystem": "llm-routing",
+ "issues": [
+  {
+   "layer": "objective",
+   "severity": "critical",
+   "title": "Routing order directly contradicts the product's core quality promise",
+   "detail": "models.yaml:33 labels the researcher role 'Long output, quality IS the product \u2014 no cheap shortcuts', yet the list (models.yaml:34-43) is ordered cheapest-first: free OAuth geminicli, then gemini-2.5-flash ($0.30/M), mistral-small, 3.5-flash, free-tier groq 70B \u2014 claude-opus-4-7 is 6th and will essentially never run unless five cheaper providers all fail. README.md:43 tells users to 'expect $50\u2013150 per deep run with Opus as primary researcher' while models.yaml:20-22 computes the actual expected cost at ~$0.73/run because the design intent is to drain free tiers first. The pitch is 'research-publication-grade'; the router optimizes for $0. These are not reconcilable: output quality is whatever model happens to have quota left, and varies nondeterministically mid-run as fallbacks fire. There is no quality floor (e.g., 'researcher must be at least X'), no per-role minimum tier, and no record of which model wrote which domain (see cost-tracking issue).",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/models.yaml:20-43",
+    "/Users/cyan/ccr/know-expand/README.md:43",
+    "/Users/cyan/ccr/know-expand/README.md:262"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "critical",
+   "title": "Capability failures (schema validation) never trigger fallback \u2014 they crash the call",
+   "detail": "QuotaAwareRouter.call() only falls back on auth errors, RateLimitError, ServiceUnavailableError, or any geminicli error (base.py:748-814). Everything else hits the bare `raise` at base.py:814. When instructor's Pydantic validation fails (InstructorRetryException with no auth/rate-limit in the chain) \u2014 i.e., the model couldn't produce the schema \u2014 the router re-raises instead of escalating to the next, stronger model. Combined with cheapest-first ordering, the weakest models attempt the hardest schemas (DomainSummary, ReconcilerOutput) first, making schema noncompliance the single most likely failure mode, and it is the one failure the fallback chain does not handle. This inverts the router's stated purpose. Note the asymmetry: for geminicli, even a one-off JSON parse error permanently skips the provider for the router's lifetime (base.py:799-813), while for API models the same class of error kills the call outright.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:748-814"
+   ]
+  },
+  {
+   "layer": "architecture",
+   "severity": "critical",
+   "title": "Single-tenant by construction: process-env keys, personal OAuth creds, module-global mutable state",
+   "detail": "For a product 'many users run concurrently': (1) credentials are process-wide env vars only (_probe_one, base.py:433-454) \u2014 no per-request/tenant key injection; (2) the slot-0 model for every role is geminicli, which authenticates via the operator's personal ~/.gemini/oauth_creds.json (base.py:423-430) \u2014 a single individual free-tier OAuth identity cannot back multiple users, likely violates the CLI's individual-use terms, and on Google's free tier user content may be used for training \u2014 i.e., customers' uploaded documents are routed by default through a free tier with no data-privacy posture; (3) router state is module-global (_PROBED_UNAVAILABLE base.py:373, lazy global semaphores base.py:500-520), so any future move to a multi-run server process shares quota/skip state across tenants. Today each run is its own subprocess which masks this, but nothing in the layer is designed for the stated deployment model.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:373",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:423-430",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:500-520"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "README-documented cost tracking does not exist anywhere in the code",
+   "detail": "README.md:723-729 documents `state/audit/model_usage.jsonl` with per-call `cost_usd`, `switched_from`/`switch_reason`, and a `model_consistency: mixed` flag in pipeline.json plus frontmatter recording which model wrote which domain. grep finds zero occurrences of model_usage, cost_usd, cost, model_consistency, or switched_from in know_expand/*.py. The only telemetry is tok_in/tok_out in events.jsonl (base.py:623-634), and the slot-0 provider (geminicli) emits tok_in/tok_out as None (base.py:169-171), so the default path has no usage data at all. litellm ships completion_cost() \u2014 it is simply never called. For a product whose fallback chain can silently escalate from $0 to Opus at $25/M output, having no cost accounting and no spend cap is a real operational hazard, and the README actively misleads users into believing it exists ('Monitor state/audit/model_usage.jsonl \u2014 every call is logged with cost_usd', README.md:43).",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/README.md:43",
+    "/Users/cyan/ccr/know-expand/README.md:723-729",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:163-172"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "Error taxonomy incomplete: 500/529/timeout/connection errors crash instead of backoff/fallback",
+   "detail": "The comment at base.py:727 says the failure counter is 'for headerless 429/500/529', but the handlers (base.py:750-751, 901-902) only catch litellm.RateLimitError and litellm.ServiceUnavailableError. litellm maps provider 500s and Anthropic 529 'overloaded' to InternalServerError, and network blips to APIConnectionError/Timeout \u2014 none are referenced anywhere in the package (grep confirms), so they fall through to `raise` at base.py:814 and kill the call. A transient Anthropic overload during a 3-hour deep run crashes a stage rather than backing off or switching models, directly violating README design principle 13 ('Distinguish failure modes precisely'). No explicit timeout is passed to litellm.acompletion either, so non-geminicli calls rely on library defaults.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:727",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:750-751",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:814"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "Retry-After path: unbounded retry loop, uncapped sleep, and int() crash on HTTP-date",
+   "detail": "base.py:764-772 (duplicated at 908-915): when a 429 carries Retry-After, the code pops the failure counter, sleeps `int(retry_after)`, and retries the same model forever \u2014 there is no attempt cap on this branch, so a provider that always includes Retry-After on quota-exhausted 429s (Anthropic does) is never failed over, contradicting the README's own table ('429 without Retry-After = exhaustion; switch model' assumes exhausted quotas omit the header, which is not reliably true). The sleep is uncapped (Retry-After: 86400 stalls a coroutine for a day; only S5 has an outer 2700s timeout). And Retry-After may legally be an HTTP-date string; `int()` then raises ValueError from inside the except handler, escaping call() as an unrelated crash.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:764-772",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:908-915"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "geminicli subprocess provider: orphaned processes on timeout, unpinned npx supply chain, prompt in argv",
+   "detail": "Three distinct problems in _do_geminicli_call/_do_geminicli_tool_call: (1) `asyncio.wait_for(proc.communicate(), timeout=600)` (base.py:138-141, 221-224) never kills the child on TimeoutError \u2014 the except block (base.py:175-185) only emits and re-raises, so every timeout leaks a live npx\u2192node\u2192gemini-cli process tree; at 8 concurrent calls this accumulates orphans for hours. (2) `npx --yes @google/gemini-cli` (base.py:131-134) resolves and potentially auto-installs the latest npm version on the operator's machine per call \u2014 unpinned supply chain plus 1-3s npx resolution latency on every single LLM call on the default routing path. (3) The full prompt \u2014 which contains the user's document content \u2014 is passed as an argv parameter (`-p full_prompt`), visible to every local user via `ps`, and bounded by ARG_MAX. For the provider that fronts every role, this is not production-robust.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:131-141",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:175-185",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:214-224"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "Silent model aliasing: models.yaml says gemini-3.5-flash, code runs gemini-3.1-pro-preview, README says gemini-2.5-pro",
+   "detail": "_geminicli_model_name (base.py:42-44) discards the requested model and always returns the hardcoded _GEMINICLI_CLI_MODEL = 'gemini-3.1-pro-preview' (base.py:29). So the slot-0 entry 'geminicli/gemini-3.5-flash' in every role list (models.yaml:26,35,...) is a routing key for a different model entirely. README.md:701 and :1022 reference yet a third name, 'geminicli/gemini-2.5-pro'. Events log the CLI model while router skip-state keys on the yaml name (a mismatch that already caused one shipped bug, per commit fd18d6e and test_base.py:242-290). For a product claiming research-grade provenance, the system cannot truthfully state which model produced the content, and three documents disagree about it.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:29",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:42-44",
+    "/Users/cyan/ccr/know-expand/models.yaml:26",
+    "/Users/cyan/ccr/know-expand/README.md:1022"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "high",
+   "title": "lc_adapter context trimming breaks tool-call message pairing",
+   "detail": "build_react_graph trims to `messages[:1] + messages[-20:]` (lc_adapter.py:183-184, _CONTEXT_WINDOW=20 at :151) with no awareness of tool-call structure. When the window boundary lands between an AIMessage carrying tool_calls and its ToolMessage responses, OpenAI-format providers reject the request with a 400 ('tool message without preceding tool_calls'). S9's budget is 30 tool calls (\u226560 messages) and S6's is 12 per domain, so trimming will trigger on real runs. Because a BadRequestError is neither auth nor rate-limit, call_with_tools re-raises (base.py:955), crashing the agent stage. The trim also silently drops earlier work product from the agent's view with no summarization.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/lc_adapter.py:151",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/lc_adapter.py:183-184",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:955"
+   ]
+  },
+  {
+   "layer": "architecture",
+   "severity": "high",
+   "title": "Four-layer provider abstraction with per-branch semantics \u2014 'provider-agnostic' only on the happy path",
+   "detail": "The stack is litellm \u2192 instructor \u2192 QuotaAwareRouter \u2192 langchain-core BaseChatModel adapter for langgraph, plus two bespoke providers that bypass parts of it: geminicli skips instructor entirely (hand-rolled schema-in-prompt + _extract_json, base.py:103-185), and llamacpp skips both _instructor_mode and the JSON sanitizer wrapper (base.py:310-340 uses bare instructor.from_litellm with default TOOLS mode). Consequences: structured-output enforcement, retry semantics, token accounting (None for geminicli), prompt-caching (cache_control blocks only meaningful for Anthropic), and error mapping all differ by which branch a call lands on \u2014 and the branch is chosen dynamically by quota state. README's anti-pattern table rejects 'Direct anthropic SDK' for lock-in and 'LangChain' as heavy, yet lc_adapter.py imports langchain_core directly (lc_adapter.py:17-28) \u2014 undeclared in pyproject.toml (only langgraph at :23), a transitive-dependency time bomb. The real lock-in risk here is not a vendor; it is the bespoke geminicli provider whose behavior nothing else can replicate.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:310-340",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/lc_adapter.py:17-28",
+    "/Users/cyan/ccr/know-expand/pyproject.toml:23"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "call() and call_with_tools() are ~120 duplicated lines that have already diverged",
+   "detail": "The retry/fallback state machine is copy-pasted between call() (base.py:735-821) and call_with_tools() (base.py:824-956) with observable drift: the tools path skips the model_auth_skip emit (base.py:904-906 vs 757-763), and on exhaustion raises without emitting quota_exhausted (base.py:956 vs 816-821), so agent-stage failovers are partially invisible to the dashboard. call_with_tools also double-emits agent_tool_call_start for geminicli (base.py:837-841 and again inside _do_geminicli_tool_call at :211). Any future fix to the retry logic must be made twice; one of the two will be missed.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:735-821",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:824-956"
+   ]
+  },
+  {
+   "layer": "architecture",
+   "severity": "medium",
+   "title": "Shared failure counter under concurrency: a 30-second provider blip permanently removes a model for a multi-hour run",
+   "detail": "_fail_counts is shared across all coroutines using a router (base.py:727, 774-791). With 8+ parallel map-phase tasks, three concurrent headerless 503s during a brief provider incident push the counter to 3 instantly and the model is added to _skip permanently \u2014 there is no cooldown, half-open re-probe, or per-attempt isolation. For a 1-3 hour pipeline this means a transient blip at minute 5 can demote the entire run to weaker fallbacks for the remaining hours. 'Skip for the rest of the run' is the only circuit state; production routing needs a recovery path.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:727",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:774-791"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "Free-tier semaphore caps hardcoded at 3; README documents config keys that don't exist",
+   "detail": "README.md:224-227 shows `concurrency: { default: 8, groq: 3, mistral: 3 }` as config.yaml knobs, but ConcurrencyConfig has only `default` (config.py:36-37), config.yaml has only `default` (config.yaml:31-32), and the groq/mistral semaphores are hardcoded Semaphore(3) (base.py:512, 516). Provider selection for semaphores and probing is substring matching on the model string ('groq' in model, 'mistral' in model, base.py:510-517, 437-446) \u2014 fragile against model names that embed another provider's substring and impossible to extend via config.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:508-520",
+    "/Users/cyan/ccr/know-expand/know_expand/config.py:36-37",
+    "/Users/cyan/ccr/know-expand/README.md:224-227"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "_is_auth_error keyword sniffing can permanently skip a healthy model",
+   "detail": "base.py:417-419 treats any openai.OpenAIError whose message contains 'credential', 'api_key', or 'missing' as a permanent auth failure. 'missing' is a generic word ('missing required parameter...' from a malformed request would match), and the consequence is severe and unrecoverable for the run: the model is added to _skip forever. The heuristic exists for a real pre-request edge case but the substring set is too broad for a permanent-skip action.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:406-420"
+   ]
+  },
+  {
+   "layer": "planning",
+   "severity": "medium",
+   "title": "--primary-model prepends to every role, making the advertised quality override a cost trap",
+   "detail": "pipeline.py:114-120 prepends the override model to all roles including extractor and classifier \u2014 the per-chunk bulk roles. README.md:289-292 markets `--primary-model claude-opus-4-7` as the way to force quality, but doing so routes every chunk-level extraction/classification call (the highest-volume, lowest-difficulty work) through Opus, with no cost tracking (see above) to reveal it. The flag needed to fix the cheapest-first researcher ordering is itself mis-scoped; a per-role override (e.g., --researcher-model) is what the quality story requires.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/pipeline.py:108-120",
+    "/Users/cyan/ccr/know-expand/README.md:289-292"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "No max_tokens/temperature control in the routing layer \u2014 long-form output left to provider defaults",
+   "detail": "Neither _do_call nor _do_call_with_thinking passes max_tokens (grep over base.py: zero hits), so output length is whatever litellm's per-provider default is (4096 for Anthropic). For a 'long output' researcher role, truncation mid-JSON is plausible and surfaces as an instructor validation failure, which (per the capability-failure issue) crashes rather than retries. Sampling parameters are likewise uncontrolled, adding another source of run-to-run nondeterminism for a reproducibility-sensitive product.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:588-646",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:649-714"
+   ]
+  },
+  {
+   "layer": "execution",
+   "severity": "medium",
+   "title": "Test coverage misses every concurrency-sensitive and failure-path behavior; global state forces manual save/restore",
+   "detail": "tests/test_base.py covers _msg_chars, basic skip seeding, auth-skip, geminicli quota key, _find_in_chain, and _instructor_mode \u2014 all good \u2014 but there are no tests for: the headerless backoff/3-strike path, Retry-After parsing (including the HTTP-date crash), call_with_tools fallback, concurrent callers sharing _fail_counts, subprocess timeout handling, or probe_models. The module-global design (_PROBED_UNAVAILABLE, cached semaphores) forces every test into try/finally snapshot-restore dances (test_base.py:130-137, 148-159, 252-290) and leaves _SEMAPHORE/_GROQ_SEMAPHORE cached across pytest-asyncio event loops. A RouterState object injected per run would fix both testability and the multi-tenant issue at once.",
+   "file_refs": [
+    "/Users/cyan/ccr/know-expand/tests/test_base.py:119-181",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:373",
+    "/Users/cyan/ccr/know-expand/know_expand/agents/base.py:500-520"
+   ]
+  }
+ ],
+ "production_gaps": [
+  "No cost accounting at all (README's model_usage.jsonl with cost_usd is fiction) and no spend caps \u2014 a run that silently escalates to Opus has no budget guardrail",
+  "No per-tenant credential injection or quota isolation; geminicli depends on one personal OAuth credential file and free-tier ToS/data-training exposure for user documents is unaddressed",
+  "No circuit-breaker recovery: skipped models stay skipped for the life of the run with no cooldown or re-probe",
+  "No fallback on schema/validation failures \u2014 the most likely failure of cheap-first routing kills the call instead of escalating to a stronger model",
+  "Unhandled litellm error classes (InternalServerError/529, APIConnectionError, Timeout) and no explicit per-call timeout for API models",
+  "geminicli subprocess hygiene: no child-process kill on timeout (orphan leaks), unpinned `npx --yes` package version (supply chain), prompt content exposed via argv",
+  "No attempt cap or sleep cap on the Retry-After retry loop; Retry-After HTTP-date format crashes the handler",
+  "No max_tokens/temperature control; long-form outputs depend on provider defaults and truncate into validation errors",
+  "No metrics on fallback frequency or model mix per run, so quality regressions from quota-driven model swaps are invisible",
+  "Module-global router state and lazily-cached semaphores preclude safe multi-run/multi-tenant hosting in one process"
+ ],
+ "strengths": [
+  "Exception-chain walking (_find_in_chain, base.py:394-403) to unwrap instructor-wrapped litellm errors is correct, cycle-safe, and unit-tested \u2014 a genuinely hard-won detail most routers get wrong",
+  "The Retry-After vs headerless-429 distinction (README design principle 13) is the right taxonomy, and per-free-tier semaphores (base.py:500-520) correctly prevent fan-out bursts from being misread as quota exhaustion",
+  "Global _PROBED_UNAVAILABLE propagation of terminal quota discoveries across all routers (base.py:154, 373, 731) is a sound design for stopping wasted subprocess spawns, and the yaml-key-vs-cli-model regression is locked down by a dedicated test (test_base.py:242-290)",
+  "Startup probe_models() (base.py:457-497) avoids noisy auth-fail cascades and emits a truthful role-assignment map",
+  "The instructor mode table (base.py:523-544) encodes real provider quirks (Mistral/Groq parallel tool calls, Gemini JSON mode) with correct rationale, documented and tested",
+  "The Gemini LaTeX backslash JSON-repair wrapper (base.py:547-585) is a narrow, well-commented fix for a real failure mode rather than a blanket retry",
+  "Helper-level unit tests exist and are well-written for the pure functions (_msg_chars, _parse_geminicli_stderr, _instructor_mode)"
+ ],
+ "summary": "The routing layer shows real craft at the detail level \u2014 exception-chain unwrapping, Retry-After taxonomy, per-provider semaphores, instructor mode quirks \u2014 but it is engineered for the opposite goal of the product's pitch: every role, including researcher, drains a free personal-OAuth Gemini CLI (which silently runs a different model than models.yaml names) and cheap free tiers before any frontier model, while the README simultaneously promises 'no cheap shortcuts' and '$50-150 deep runs with Opus as primary researcher'. The fallback machine has a structural hole \u2014 capability/schema failures, the dominant failure mode of cheap-first routing, never trigger fallback \u2014 plus an unbounded Retry-After loop, unhandled 500/529/connection errors, and a subprocess provider that leaks orphan processes and passes user documents through argv. Cost tracking, the one feature that would make the cost-vs-quality tradeoff visible, is documented in the README but entirely unimplemented. As a personal tool this is clever frugality; as a multi-user product it is single-tenant by construction (process env keys, one OAuth identity, module-global mutable state) and needs a per-run RouterState, per-role quality floors, validation-failure escalation, and real cost accounting before the 'research-grade' claim is defensible.",
+ "verdicts": [
+  {
+   "title": "Routing order directly contradicts the product's core quality promise",
+   "verdict": "confirmed",
+   "reasoning": "Every checkable assertion is accurate. models.yaml:33 carries the comment 'Long output, quality IS the product \u2014 no cheap shortcuts' directly above a researcher list (lines 34-43) ordered cheapest-first: geminicli (free OAuth), gemini-2.5-flash ($0.30/$2.50/M), mistral-small-latest, gemini-3.5-flash, groq/llama-3.3-70b (free tier), with claude-opus-4-7 in position 6. models.yaml:20-22 computes expected cost at ~$0.73/standard run and ~$1.60/deep run on the explicit premise of draining free tiers first. README.md:43 says to 'expect $50\u2013150 per deep run with Opus as primary researcher' and README.md:3 pitches 'research-publication-grade' \u2014 irreconcilable with the shipped config where Opus runs only after five cheaper providers fail. QuotaAwareRouter._next_model() (agents/base.py:729-733) walks the list strictly in order with no quality floor, no per-role minimum tier, and no researcher-specific escalation \u2014 a repo-wide grep confirms none exists. Models are skipped on auth errors, probe failures, or 3 consecutive headerless 429s, so the effective researcher model does vary nondeterministically mid-run as quotas drain. The cost-tracking sub-claim is understated: README (lines 43, 723-726, 830, 969) documents state/audit/model_usage.jsonl with cost_usd, domain, and switched_from fields, but no code anywhere writes that file or computes cost_usd; the actual llm_call_done events log role/model/tokens but not domain or cost. Two minor softeners do not overturn the claim: (a) the free geminicli slot actually spawns gemini-3.1-pro-preview (base.py:29), a pro-tier model, so slot 0 is not low quality \u2014 but slots 2-5 ahead of Opus are materially below the promised tier; (b) README:43's '$50\u2013150' is phrased conditionally, but users are never told the shipped config makes that condition false, and README:262 reproduces the cheapest-first list under the same quality-promise comment. Critical severity is defensible for an objective-layer contradiction between the product's core pitch and its routing behavior, compounded by documentation of a nonexistent cost log."
+  },
+  {
+   "title": "Capability failures (schema validation) never trigger fallback \u2014 they crash the call",
+   "verdict": "confirmed",
+   "reasoning": "Read /Users/cyan/ccr/know-expand/know_expand/agents/base.py:735-821 directly. The cited behavior is verbatim accurate: the except block (748) classifies errors as auth (_is_auth_error, chain-walking via _find_in_chain), rate-limit/ServiceUnavailable (with Retry-After sleep or 3-strike backoff-then-skip), or geminicli (skip+continue, lines 799-813); everything else hits the bare `raise` at line 814. An InstructorRetryException from Pydantic schema validation chains to ValidationError \u2014 not auth or rate-limit \u2014 so for non-geminicli models the router re-raises instead of trying the next model. The asymmetry claim is also correct: any non-auth/non-transient geminicli error (including one-off parse errors) is added to self._skip for the router's lifetime, while the identical error class on an API model crashes the call. Cheapest-first ordering is confirmed in models.yaml (geminicli flash \u2192 gemini-2.5-flash \u2192 mistral-small \u2192 groq llamas before claude-opus-4-7 for researcher/synthesizer), and the hardest schemas (ReconcilerOutput embedding DomainSummary, schemas.py:186/203) flow through these routers (s5_research.py:817). I searched for mitigating code and found none at the call sites or pipeline level: no try/except wraps any router.call in stages/ (the s5 asyncio.gather has no return_exceptions), and pipeline.py has zero exception handling, so the raise kills the stage/run (resumable only via pipeline.json stage markers, and a resume retries the same cheapest-first order). The verdict therefore stands as confirmed.",
+   "correction": "Two softening details the claim omits (they reduce frequency, not the structural gap): (1) instructor 1.15.1's create_with_completion defaults to max_retries=3, so each model gets up to 3 self-correcting re-ask attempts with validation errors fed back before InstructorRetryException ever reaches the router \u2014 many schema failures recover on the same model; (2) _make_sanitized_completion (base.py:573-585) repairs invalid backslash escapes before parsing, mitigating one class of JSON failure. Also, \"single most likely failure mode\" is plausible inference, not something verifiable from the code alone, so \"critical\" severity rests partly on that unverified prevalence assumption; \"high\" may be more defensible given runs are resumable."
+  },
+  {
+   "title": "Single-tenant by construction: process-env keys, personal OAuth creds, module-global mutable state",
+   "verdict": "partially_confirmed",
+   "reasoning": "Every code-level observation checks out at the exact cited lines. (1) /Users/cyan/ccr/know-expand/know_expand/agents/base.py:433-454 `_probe_one` validates credentials solely via os.environ; litellm calls rely on process env (the only explicit api_key anywhere is \"not-needed\" for local llamacpp at lines 337/860); observe.py `_spawn_pipeline` propagates `env=os.environ.copy()` (line 2526) and web-UI keys live in server process env \u2014 there is genuinely no per-request/tenant key path. (2) base.py:423-430 `_geminicli_is_available` checks ~/.gemini/oauth_creds.json, and models.yaml puts geminicli/gemini-3.5-flash in slot 0 for all 7 roles (comment: \"free OAuth CLI, daily cap ~1500 req/day\"), so document content is routed through a single personal free-tier OAuth identity by default. (3) base.py:373 `_PROBED_UNAVAILABLE` is a runtime-mutated module-global set and base.py:500-520 are lazy module-global semaphores; in any single-process multi-run server these would be shared across runs. No mitigating per-tenant code exists anywhere in the repo. However, the claim's framing and severity rest on a premise the repo does not contain: the quoted phrase \"many users run concurrently\" appears nowhere in the working tree or in any commit in git history (searched all revisions). README/CLAUDE.md/pyproject consistently present a single-operator local CLI with a localhost dashboard and per-run subprocesses; there are no \"customers\" or hosted multi-tenant deployment model stated. The auditor concedes current behavior is correct (\"each run is its own subprocess\"). For the deployment model the repo actually states, process-env keys and a personal OAuth slot-0 are conventional design, not a critical defect.",
+   "correction": "The three technical observations are accurate as descriptions of the code, but the \"critical\" severity and the framing are not supported: the repo nowhere states a \"many users run concurrently\" product model \u2014 that quoted premise does not exist in the codebase or its git history. know-expand is documented as a single-operator local CLI (per-run subprocesses, localhost dashboard, .env keys), for which process-wide env credentials and module-global router state are ordinary design choices. The accurate residual finding is architecture/medium at most: a forward-looking note that nothing in the credential/router layer (base.py:373, 423-454, 500-520) is tenant-aware, plus a real but single-user-scoped privacy observation that slot-0 geminicli routes document content through the operator's free-tier Google OAuth identity by default (the free tier's data-use terms are an external assertion the repo neither confirms nor denies)."
+  },
+  {
+   "title": "README-documented cost tracking does not exist anywhere in the code",
+   "verdict": "confirmed",
+   "reasoning": "I attempted to refute the claim and could not \u2014 every load-bearing assertion checks out against the code.\n\n1. README documents the feature exactly as claimed. /Users/cyan/ccr/know-expand/README.md:43 says verbatim \"Monitor `state/audit/model_usage.jsonl` \u2014 every call is logged with `cost_usd`.\" README.md:723-729 (\"Model usage audit log\" section) shows example jsonl lines with `cost_usd`, `switched_from`, `switch_reason`, and states pipeline.json carries `\"model_consistency\": \"mixed\"` with frontmatter recording per-domain model provenance. The fiction is repeated at README.md:830 and in the file tree at README.md:969.\n\n2. The implementation does not exist. Repo-wide grep (py/yaml/toml/md, plus tests/) for `model_usage`, `cost_usd`, `model_consistency`, `switched_from`, `switch_reason`, `completion_cost` hits ONLY README.md. Nothing in know_expand/ writes `state/audit/model_usage.jsonl`; nothing computes cost; litellm's `completion_cost()` is never imported or called. config.py's `budget_tokens` is a thinking-token budget, not a spend cap. The S10 pandoc frontmatter (know_expand/stages/s10_assemble.py:531-549) contains only title/bibliography/csl \u2014 no model provenance. observe.py has no cost view.\n\n3. The cited base.py lines behave as claimed. The geminicli `llm_call_done` emit at /Users/cyan/ccr/know-expand/know_expand/agents/base.py:163-172 hardcodes `\"tok_in\": None, \"tok_out\": None, \"tok_s\": None`, and models.yaml puts `geminicli/gemini-3.5-flash` in slot 0 of every role, so the default path indeed produces no usage numbers. The API-path emit at base.py:617-634 logs tok_in/tok_out/cache tokens to events.jsonl \u2014 token telemetry only, no dollars.\n\n4. The escalation hazard is real: researcher and synthesizer chains in models.yaml fall through to `claude-opus-4-7` ($5/$25 per M per the file's own comments), and there is no spend cap anywhere.\n\nMinor caveat (does not change the verdict): the claim's phrase \"no usage data at all\" slightly overstates \u2014 events.jsonl does record the model name per call plus `model_quota_switch` (base.py:793, 936) and `model_auth_skip` events, so model switches are observable and post-hoc cost reconstruction from tok_in/tok_out is possible for API calls. But none of the documented artifacts (model_usage.jsonl, cost_usd, model_consistency flag, frontmatter provenance) exist, so the README is materially misleading. Severity \"high\" is defensible given the README's own $50-150/run estimate and the silent free-to-Opus fallback.",
+   "correction": ""
+  },
+  {
+   "title": "Error taxonomy incomplete: 500/529/timeout/connection errors crash instead of backoff/fallback",
+   "verdict": "confirmed",
+   "reasoning": "Every load-bearing technical assertion verified against the code and installed litellm 1.85.0.\n\n1. Comment/code mismatch confirmed. /Users/cyan/ccr/know-expand/know_expand/agents/base.py:726-727 says the counter is \"for headerless 429/500/529\", but both handlers (lines 750-751 in call(), 901-902 in call_with_tools()) only do _find_in_chain(e, litellm.RateLimitError) and _find_in_chain(e, litellm.ServiceUnavailableError). _find_in_chain uses isinstance (base.py:394-403), and in litellm 1.85.0 InternalServerError is NOT a subclass of ServiceUnavailableError (verified via MRO inspection: both descend directly from APIStatusError; issubclass returns False both directions). So 500/529 never enter the backoff path despite the comment.\n\n2. litellm mapping confirmed. exception_mapping_utils.py in the installed venv maps Anthropic \"overloaded_error\"/\"Overloaded\" strings and status codes 500 and 529 to litellm.InternalServerError. Timeout subclasses APIConnectionError, not ServiceUnavailableError.\n\n3. Grep confirms InternalServerError, APIConnectionError, and litellm Timeout are referenced nowhere in the know_expand package (only JS setTimeout hits in observe.py). litellm.num_retries is None (no global retry), and instructor's retry only re-asks on validation errors, so these exceptions reach the router's else branch and, for non-geminicli models, hit the bare `raise` at base.py:814 \u2014 no backoff, no model switch. This contradicts both the base.py comment and README.md:663 design principle 13.\n\n4. Timeout claim confirmed: _do_call/_do_call_with_thinking/call_with_tools pass no timeout kwarg to litellm/instructor (only the geminicli subprocess path and a 3s httpx health probe have explicit timeouts); non-geminicli calls rely on litellm's default request_timeout.\n\nOne refinement to the impact narrative (does not reduce severity): the propagated exception does not always literally \"crash a stage\". S5 gathers per-domain coroutines with return_exceptions=True (s5_research.py:990-1010) and S4 has a per-domain try/except (s4_audit.py:424-432), so in those stages a transient 529 silently drops an entire domain's content, emits s5_domain_failed/domain_failed, and still marks the stage complete \u2014 meaning resume will NOT regenerate the lost domain. That is arguably worse than a crash. In S7 (gather at s7_synthesize.py:356-359 without return_exceptions), S2's main extraction call, S1, and S3 the exception is unhandled and does crash the run (pipeline.py and cli.py contain zero try/except). High severity stands either way: a single transient Anthropic overload either crashes the run mid-stage or permanently loses a domain from the final document."
+  },
+  {
+   "title": "Retry-After path: unbounded retry loop, uncapped sleep, and int() crash on HTTP-date",
+   "verdict": "confirmed",
+   "reasoning": "I tried to refute this and could not \u2014 every sub-claim matches the code, and the one mitigating factor the auditor conceded turns out not to exist.\n\n1. Unbounded retry loop: At /Users/cyan/ccr/know-expand/know_expand/agents/base.py:764-772 (QuotaAwareRouter.call) and the duplicate at 908-915 (call_with_tools), when a RateLimitError/ServiceUnavailableError carries a `retry-after` header, the code executes `self._fail_counts.pop(model, None); await asyncio.sleep(int(retry_after)); continue`. The pop actively RESETS the 3-strike counter, the model is never added to `self._skip`, and `_next_model()` returns the same model. There is no iteration cap, no cumulative-sleep cap, and no escalation on this branch \u2014 a provider that persistently returns 429 + Retry-After (Anthropic includes retry-after on 429s; Groq free tier includes it on daily-quota exhaustion with multi-hour values, and Groq/Mistral free tiers are this repo's actual fallback providers per models.yaml/CLAUDE.md) is retried on the same model forever. README.md:667-668, 690, and 913 document the \"429 without Retry-After = true exhaustion\" assumption, confirming the design relies on exhausted quotas omitting the header, which is not reliably true.\n\n2. Uncapped sleep: `int(retry_after)` is passed to asyncio.sleep with no clamp \u2014 Retry-After: 86400 stalls the coroutine for a day.\n\n3. int() crash on HTTP-date: RFC 9110 \u00a710.2.3 allows Retry-After to be an HTTP-date; `int(\"Wed, 21 Oct 2026 07:28:00 GMT\")` raises ValueError inside the `except` handler, which propagates out of call() as an unrelated crash (with the original error only as __context__). No parsing helper or try/except guards it. tests/test_base.py has zero coverage of the retry-after path (grep for retry_after/RateLimitError/retry-after returns nothing).\n\n4. Mitigation search came up worse than claimed, not better: the auditor's concession that \"only S5 has an outer 2700s timeout\" is itself false in the code. config.yaml has `domain_research_seconds: 2700` and README.md:752 claims \"Each domain task in S5 is wrapped with asyncio.timeout(2700)\", but `domain_research_seconds` is referenced by zero .py files and s5_research.py contains no asyncio.timeout/wait_for at all (the only wait_for calls in the codebase are around the geminicli subprocess at base.py:138/221). So no stage-level timeout bounds this loop anywhere.\n\nSeverity \"high\" is defensible for an unattended overnight pipeline: this is a liveness hang (indefinite same-model retry while working fallback models sit idle) plus an uncapped day-long sleep plus a latent ValueError crash, on the primary error-handling path of the only LLM router in the system. The only soft caveat: triggering the loop requires litellm to surface `.response.headers` on the exception (when absent, the headerless 3-strike path correctly fails over) \u2014 that is a precondition, not a refutation, since litellm's OpenAI-SDK-derived exceptions do carry the httpx response for the major providers.",
+   "correction": "Claim stands as written. One detail is wrong in the code's favor-of-the-auditor direction: the \"outer 2700s timeout in S5\" the claim cites as the sole bound does not actually exist in code \u2014 it is documented in README.md:752 and configured in config.yaml (`domain_research_seconds: 2700`) but never wired up in s5_research.py \u2014 so the exposure is strictly worse than claimed."
+  },
+  {
+   "title": "geminicli subprocess provider: orphaned processes on timeout, unpinned npx supply chain, prompt in argv",
+   "verdict": "partially_confirmed",
+   "reasoning": "All three cited code behaviors are real and the line numbers are exact. (1) /Users/cyan/ccr/know-expand/know_expand/agents/base.py:138-141 and 221-224 use `asyncio.wait_for(proc.communicate(), timeout=cfg.timeouts.get(\"geminicli_timeout_s\", 120))` with no kill on timeout; the except blocks (175-185, and the tool-call equivalent) only emit an event and re-raise, and a repo-wide grep finds zero `.kill()`/`.terminate()` calls in the package \u2014 so a timed-out npx\u2192node\u2192gemini-cli child is indeed left running. (2) base.py:132 and 215 spawn `npx --yes @google/gemini-cli` with no version pin anywhere in the repo, and models.yaml places geminicli/gemini-3.5-flash at slot 0 for all seven roles, so it is the default routing path for every call. (3) The full prompt, built from message content including document text, is passed as `-p full_prompt` in argv (base.py:134, 217) \u2014 ps-visible and ARG_MAX-bounded; gemini-cli's stdin mode is not used. However, the impact framing of problem (1) is overstated: the auditor missed QuotaAwareRouter.call()'s else-branch at base.py:799-813, where ANY geminicli exception (including TimeoutError) permanently adds the model to that router's `_skip` set (\"geminicli errors are always terminal for this run\"). Routers are created per stage (make_router per stage entry), so timeouts cannot recur for hours \u2014 leaks are bounded to roughly one in-flight concurrent batch per stage before geminicli is abandoned. Additionally, gemini-cli `-p` is one-shot (leaked children usually run to completion and exit rather than persisting indefinitely), and the web UI stop path uses os.killpg (observe.py:2705), which sweeps same-process-group children on manual stop. The missing proc.kill() is still a genuine defect worth fixing, the unpinned npx and argv-prompt findings stand as written, but \"accumulates orphans for hours at 8 concurrent calls\" does not match the actual fallback behavior, which slightly inflates the headline severity.",
+   "correction": "The code defects are real, but the orphan-accumulation scenario is bounded, not open-ended: on the first geminicli TimeoutError, QuotaAwareRouter permanently skips geminicli for that router instance (base.py:799-813, per-stage routers), so at most one concurrent batch of calls (~8) can leak per stage per run \u2014 not continuous accumulation for hours. Leaked gemini-cli one-shot processes also typically self-terminate after completing their single request, and os.killpg on manual stop (observe.py:2705) cleans same-group survivors. Severity is closer to medium-high: the unpinned `npx --yes @google/gemini-cli` supply chain and prompt-in-argv exposure are accurately described and unmitigated."
+  },
+  {
+   "title": "Silent model aliasing: models.yaml says gemini-3.5-flash, code runs gemini-3.1-pro-preview, README says gemini-2.5-pro",
+   "verdict": "confirmed",
+   "reasoning": "Every checkable assertion in the claim is accurate against the repo.\n\n1. Hardcoded substitution \u2014 CONFIRMED. /Users/cyan/ccr/know-expand/know_expand/agents/base.py:29 defines `_GEMINICLI_CLI_MODEL = \"gemini-3.1-pro-preview\"`, and `_geminicli_model_name` (base.py:42-44) takes the requested model as a parameter and unconditionally returns the hardcoded constant \u2014 the argument is discarded. Both call paths (`_do_geminicli_call` line 110, `_do_geminicli_tool_call` line 196) pass this to `npx @google/gemini-cli -m`.\n\n2. YAML routing key names a model that never runs \u2014 CONFIRMED. models.yaml slot 0 is `\"geminicli/gemini-3.5-flash\"` in all six roles (lines 26, 35, 46, 58, 68, 77, 87), and the header comment (line 2) describes it as the free OAuth CLI without mentioning the actual model is 3.1-pro-preview.\n\n3. Third name in README \u2014 CONFIRMED. README.md:701 and :1022 both reference `geminicli/gemini-2.5-pro`, a name that appears nowhere in models.yaml or code. README's models.yaml example (lines 255-281) uses `geminicli/gemini-3.5-flash`, and `gemini-3.1-pro-preview` appears nowhere in README.md at all. So three documents genuinely give three different model names for the same provider slot.\n\n4. Dual-key mismatch already shipped a bug \u2014 CONFIRMED. Commit fd18d6e (\"Fix geminicli PROBED_UNAVAILABLE key mismatch\") shows `_PROBED_UNAVAILABLE.add(f\"geminicli/{cli_model}\")` previously added the wrong key so the global quota skip \"silently never fired\"; the regression test is exactly at tests/test_base.py:242-290 as cited. Events still log the CLI name (`f\"geminicli/{cli_model}\"` at base.py:125, 166, 180, 209) while skip-state keys on the yaml name (base.py:154, 230) \u2014 the split-key convention persists and is held together only by code comments and one test.\n\nTwo minor qualifications that temper but do not refute the claim: (a) the sentence \"the system cannot truthfully state which model produced the content\" is slightly overstated \u2014 events.jsonl does log the real CLI model (`geminicli/gemini-3.1-pro-preview`) in llm_call_done, and probe_models deliberately reports \"the real CLI model name so the log is truthful\" (base.py:483-486); run-level provenance is recoverable from the event log. (b) The aliasing is not fully silent to maintainers \u2014 CLAUDE.md:78 documents the `-m gemini-3.1-pro-preview` invocation. However, neither point rescues the user-facing surfaces: models.yaml and README \u2014 the two documents a user would read to know what model runs \u2014 name two different wrong models, and the README is internally inconsistent (3.5-flash in its example, 2.5-pro in its constraints). Severity \"high\" is defensible rather than inflated: this exact key-aliasing already caused one shipped runtime bug, and the convention remains a standing footgun for any new geminicli code path."
+  }
+ ]
+}

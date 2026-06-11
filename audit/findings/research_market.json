@@ -1,0 +1,100 @@
+{
+ "topic": "market",
+ "summary": "The market splits into five clusters, none of which occupies know-expand's exact position. (1) Document-grounded study tools: Google NotebookLM (17M+ MAU, free to $99.99-200/mo via Google AI tiers, added its own Deep Research in Nov 2025 plus audio/video/slide outputs) and Anara/ex-Unriddle (claims 3M users, $10-20/mo, $167/mo Deep Search, passage-level citation verification). These produce interactive artifacts or short reports, never long verified documents. (2) Foundation-lab Deep Research features (OpenAI $20/$100/$200 tiers with 10/50/250 runs per month, Gemini, Claude, Perplexity at $20/mo with 45M users and ~$450M ARR): commodity 10-40 page web-sourced reports, no pedagogy, no verification pass, no bibliographic rigor. (3) Scientific literature tools: Elicit (2M+ users, $12-79/user/mo plus custom enterprise, PRISMA 2020 systematic-review product for pharma), Consensus (10M+ users, $30M Series A May 2026, $10-45/mo), SciSpace ($12-20/mo), Undermind ($16-20/mo, YC, 1,000+ GSK scientists), and Ai2's free open-source Asta agents on Semantic Scholar \u2014 these do search/screening/extraction, not synthesis into learning material. (4) Open source: Stanford STORM (70k preview users, short Wikipedia-style articles, research artifact) and gpt-researcher (27.4k GitHub stars, 5-10 page reports). (5) The closest analog on depth and pricing: Edison Scientific's Kosmos ($70M seed at $250M valuation; 12-hour autonomous runs reading ~1,500 papers producing fully-cited reports at $200/run) \u2014 but it targets discovery/hypothesis generation, not pedagogy. AI doc-to-course L&D tools (Coassemble, eduMe, Synthesia, eSkilled at $9-29/mo) produce shallow microlearning from internal docs, and Google's Learn Your Way/LearnLM personalizes existing textbooks rather than creating field guides from papers. WHITE SPACE: no product combines (a) 200+ page book-grade artifact, (b) citation verification/audit, (c) pedagogical structuring (reader profiling, prerequisites, worked examples), (d) seeded from one paper. Nobody is paying for that exact artifact yet because nobody sells it \u2014 but adjacent segments pay heavily for verified synthesized documents: pharma spends ~$141k per systematic literature review (~$16.8M/yr per top-10 pharma company); AlphaSense hit $600M ARR at a $7.5B valuation (June 2026) selling verified research synthesis to 7,000 enterprises; Hebbia ($161M raised) penetrated 33% of top asset managers for diligence document synthesis; expert networks are a ~$3B market growing toward ~$4.9B; corporate training is a $400B market with AI-powered training at $7.49B in 2026 and Sana (acquired by Workday) charging $50-100k/yr; Primer ($237M raised) sells traceable synthesis to defense/intel; and OpenEvidence ($12B valuation, used by 40%+ of US physicians) proves that citation-grounded domain synthesis can reach massive adoption when verification is the headline feature. The risk: deep-research output is commoditizing fast (NotebookLM bundling at $7.99/mo), so the defensible position is the verified, typeset, pedagogically-structured book \u2014 priced per artifact (Kosmos validates $200/run), sold into pharma medical affairs, consulting/PE technical diligence, defense/intel, and technical onboarding rather than to individual learners.",
+ "key_facts": [
+  {
+   "fact": "NotebookLM surpassed 17M monthly active users; pricing now spans Free, Plus $7.99/mo, Pro $19.99/mo, and Ultra $99.99-200/mo via Google AI tiers, with Pro allowing 20 Deep Research reports/day",
+   "source_url": "https://felloai.com/notebooklm-pricing/"
+  },
+  {
+   "fact": "NotebookLM added its own Deep Research mode on Nov 13, 2025 (agentic web research compiled into citation-backed reports added as notebook sources), followed by Gemini 3 upgrade, PPTX export, and 1M-token chat through early 2026",
+   "source_url": "https://blog.google/innovation-and-ai/models-and-research/google-labs/notebooklm-deep-research-file-types/"
+  },
+  {
+   "fact": "ChatGPT Deep Research quotas are tiered: Plus $20/mo gets 10 runs/month, Pro $100/mo gets 50, Pro $200/mo gets 250 \u2014 output is a report, not a structured learning artifact",
+   "source_url": "https://techjacksolutions.com/ai-tools/chatgpt/chatgpt-pricing/"
+  },
+  {
+   "fact": "Perplexity has ~45M active users, crossed $450M annualized recurring revenue in March 2026, valued ~$21B; Deep Research included in $20/mo Pro produces multi-source cited reports in 2-5 minutes",
+   "source_url": "https://aibusinessweekly.net/p/perplexity-ai-statistics"
+  },
+  {
+   "fact": "Elicit serves 2M+ researchers; plans Free/$12/$49/$79 per user/mo plus custom Enterprise with PRISMA 2020-compliant systematic review (40,000-paper screening) aimed at pharma medical affairs and HEOR; median contract ~$1,249/yr",
+   "source_url": "https://elicit.com/blog/systematic-review-for-prisma-2020"
+  },
+  {
+   "fact": "Consensus raised a $30M Series A in May 2026, has 10M+ users and 170+ university library partnerships; pricing Free / Pro $10 / Deep $45 per month",
+   "source_url": "https://costbench.com/software/ai-research-tools/consensus/"
+  },
+  {
+   "fact": "SciSpace (ex-Typeset) prices at Free / $12/mo Premium / $20/user/mo Teams / $100/mo Lab over a 280M-paper index \u2014 summarization and copilot, no long-form synthesis",
+   "source_url": "https://scispace.com/pricing"
+  },
+  {
+   "fact": "Undermind (YC-backed, ~$500K raised) charges ~$16-20/mo Pro for deep adaptive literature search; used by 1,000+ scientists at GSK plus MIT/Harvard/Caltech/Princeton researchers",
+   "source_url": "https://www.undermind.ai/"
+  },
+  {
+   "fact": "Ai2's Asta (launched Aug 2025) is a free, open-source agentic research platform grounded in Semantic Scholar's 200M+ papers \u2014 commoditizing literature-search infrastructure rather than monetizing it",
+   "source_url": "https://allenai.org/blog/asta"
+  },
+  {
+   "fact": "Stanford STORM generates short Wikipedia-style cited articles; 70,000+ people tried the research preview but it remains an unmonetized academic project",
+   "source_url": "https://github.com/stanford-oval/storm"
+  },
+  {
+   "fact": "gpt-researcher has ~27,400 GitHub stars (May 2026) and produces free multi-source cited reports \u2014 open-source baseline for the 'deep research report' commodity",
+   "source_url": "https://github.com/assafelovic/gpt-researcher"
+  },
+  {
+   "fact": "Edison Scientific (FutureHouse spinout, $70M seed at $250M valuation, Nov 2025) sells Kosmos: 12-hour autonomous runs reading ~1,500 papers producing fully-cited research reports at $200/run after 6 free academic runs \u2014 the strongest pricing comp for a per-artifact deep synthesis product",
+   "source_url": "https://www.hpcwire.com/aiwire/2025/11/07/futurehouse-spins-out-edison-scientific-launches-kosmos-ai-for-research/"
+  },
+  {
+   "fact": "Anara (ex-Unriddle, YC) claims 3M+ researchers; $10-30/mo tiers plus a $167/mo Deep Search tier; differentiates on passage-level citation verification where every claim links to the exact source sentence",
+   "source_url": "https://anara.com/pricing"
+  },
+  {
+   "fact": "Each pharma systematic literature review costs ~$141,195 in manual labor; top-10 pharma companies each publish ~119 SLRs/year (~$16.8M/yr per company) \u2014 the clearest evidence of six-figure willingness to pay for verified synthesized documents",
+   "source_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC6722281/"
+  },
+  {
+   "fact": "AlphaSense raised $350M at a $7.5B valuation in June 2026, surpassing $600M ARR with 7,000+ enterprise customers (70%+ of S&P 500) and now ships its own Deep Research product over 500M premium business documents",
+   "source_url": "https://www.alpha-sense.com/press/alphasense-raises-350m-at-7-5b-valuation-and-surpasses-600m-in-annual-recurring-revenue/"
+  },
+  {
+   "fact": "Hebbia ($161M raised, $700M valuation) penetrated 33% of top global asset managers for M&A diligence and investment-memo document synthesis",
+   "source_url": "https://sacra.com/c/hebbia/"
+  },
+  {
+   "fact": "Expert networks (synthesized expert knowledge for consulting/PE) were a ~$3B market in 2025 growing ~12%/yr toward ~$4.9B in 2026, with consulting at ~50% of spend",
+   "source_url": "https://inex.one/blog/expert-network-market-size"
+  },
+  {
+   "fact": "Corporate training is a ~$400B market; AI-powered corporate training is $7.49B in 2026 (19.4% CAGR); Sana Labs ($136M raised, acquired by Workday Sept 2025) charged $50-100k/yr enterprise contracts \u2014 but doc-to-course tools (Coassemble, eduMe, Synthesia, $9-29/mo) only produce shallow microlearning",
+   "source_url": "https://joshbersin.com/2026/02/new-research-how-ai-transforms-400-billion-of-corporate-learning/"
+  },
+  {
+   "fact": "Primer AI ($237M raised, incl. $69M in Dec 2025) sells traceable summarization/knowledge-discovery to defense and intelligence agencies and Fortune 50 companies \u2014 provenance is the purchase criterion in this segment",
+   "source_url": "https://primer.ai/news/primer-announces-69m-in-funding-to-accelerate-ai-enabled-information-advantage"
+  },
+  {
+   "fact": "OpenEvidence reached a $12B valuation (Jan 2026, $250M Series D) with 40%+ of US physicians using it and $100M+ revenue \u2014 proof that citation-grounded, verified domain synthesis wins massive adoption when trust is the headline feature",
+   "source_url": "https://www.cnbc.com/2026/01/21/openevidence-chatgpt-for-doctors-doubles-valuation-to-12-billion.html"
+  },
+  {
+   "fact": "Google's Learn Your Way (LearnLM, Google Labs) converts existing textbooks into adaptive multi-format learning material and showed RCT gains \u2014 validating pedagogy-aware generation, but it does not create field guides from papers",
+   "source_url": "https://research.google/blog/learn-your-way-reimagining-textbooks-with-generative-ai/"
+  }
+ ],
+ "implications": [
+  "The exact artifact know-expand produces \u2014 a 200+ page verified, pedagogically-structured, typeset field guide grown from one seed paper \u2014 has no direct competitor. Every adjacent tool stops at either short reports (Deep Research, STORM, gpt-researcher), interactive study aids (NotebookLM, Anara), search/extraction (Elicit, Consensus, Undermind, Asta), or discovery reports (Kosmos). The white space is real, but so is the reason it's empty: no proven consumer demand for book-length output, so validation must come from professional segments.",
+  "Do not price as a $10-20/mo subscription \u2014 that band is saturated (NotebookLM $7.99, Consensus $10, Elicit $12, SciSpace $12, Undermind $16, Perplexity/ChatGPT/Anara $20) and buys commodity reports. Kosmos's $200/run and Anara's $167/mo Deep Search tier validate per-artifact / premium pricing; a verified 200-page guide plausibly supports $100-500 per run, which also comfortably covers know-expand's token costs (relevant to the planned --batch-mode 50% discount).",
+  "Verification is the marketable moat, not generation. Anara wins users with passage-level citation links; OpenEvidence reached a $12B valuation on citation-grounded trust; Primer sells traceability to defense. know-expand's S8 citation audit, CSL-JSON bibliography, 65/35 foundational/frontier split, and [NEEDS_CITATION] discipline should be the headline of any positioning \u2014 and surfacing a per-claim 'verification report' alongside the PDF would make the moat visible.",
+  "The S1 interview and S3 human taxonomy review are differentiators, not friction: Google's Learn Your Way RCT showed personalization to the reader measurably improves outcomes, and no deep-research competitor profiles the reader at all. Keep human-in-the-loop as a premium feature rather than racing the fully-autonomous tools.",
+  "Best-paying wedges in order of evidence strength: (1) pharma medical affairs / literature review teams (~$141k per SLR, $16.8M/yr per top-10 pharma; Elicit Enterprise proves the buyer exists \u2014 a PRISMA-adjacent 'field guide' mode could ride the same budget); (2) consulting/PE technical due diligence (AlphaSense $600M ARR, Hebbia in 33% of top asset managers \u2014 a deep-tech diligence guide from a target's key patent/paper is a natural fit); (3) defense/intel analyst onboarding (Primer's segment; know-expand's provenance/event-log architecture fits the traceability requirement); (4) corporate technical onboarding L&D ($50-100k/yr Sana-style contracts; existing doc-to-course tools are shallow, leaving deep technical material unserved).",
+  "Commoditization is the main threat and it is fast: NotebookLM shipped Deep Research, 1M-token chat, and PPTX export within ~5 months and bundles at $7.99/mo. know-expand should not market itself as 'deep research' (a lost battle) but as 'the verified book' \u2014 output quality (xelatex typesetting, prerequisite primers, worked examples, boss-node synthesis) that chat products structurally won't replicate.",
+  "Free infrastructure is improving in know-expand's favor: Ai2's Asta/Semantic Scholar (already used for bibliography) and OpenAlex (already used for taxonomy validation) are open and grounded \u2014 the cost structure of the pipeline benefits while competitors who monetize search (Consensus, Undermind) get squeezed.",
+  "GTM pattern worth copying from Edison/Kosmos: a small free tier of full runs (they give 6 to academics) to let the artifact sell itself, since a 200-page verified guide is a demo that no screenshot conveys; pair with per-run pricing for individuals and seat/volume licensing for the pharma/consulting/defense segments."
+ ]
+}
