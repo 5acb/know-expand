@@ -11,6 +11,7 @@ stdout — real-time progress for the terminal operator (key events only)
 stderr — nothing; all output is routed to files or stdout
 """
 
+import contextvars
 import json
 import logging
 import os
@@ -18,6 +19,10 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO, TypedDict
+
+# Context variables to track currently active pipeline execution context
+active_stage: contextvars.ContextVar = contextvars.ContextVar("active_stage", default=None)
+active_domain: contextvars.ContextVar = contextvars.ContextVar("active_domain", default=None)
 
 # ---------------------------------------------------------------------------
 # Run identity
@@ -102,6 +107,8 @@ class PipelineState(TypedDict):
     input_path: str
     depth: str           # survey | standard | deep
     domain_ids: list[str]
+    no_bibliography_fetch: bool
+    bypass_license_gate: bool
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +140,7 @@ def load_pipeline_json(state_dir: Path) -> dict:
 
 def save_pipeline_json(state_dir: Path, data: dict) -> None:
     p = state_dir / "pipeline.json"
-    p.write_text(json.dumps(data, indent=2))
+    atomic_write(p, json.dumps(data, indent=2))
 
 
 def mark_stage_complete(state_dir: Path, stage: str | int) -> None:
@@ -154,6 +161,52 @@ def stage_is_complete(state_dir: Path, stage: str | int) -> bool:
 # emit() — structured events → file + stdout progress
 # ---------------------------------------------------------------------------
 
+def calculate_cost(model: str, tok_in: int | None, tok_out: int | None) -> float:
+    if not tok_in:
+        tok_in = 0
+    if not tok_out:
+        tok_out = 0
+    m = model.lower()
+    if m.startswith("geminicli/") or m.startswith("llamacpp/"):
+        return 0.0
+    
+    in_rate = 0.0
+    out_rate = 0.0
+    
+    if "opus" in m:
+        in_rate = 15.0 / 1_000_000
+        out_rate = 75.0 / 1_000_000
+    elif "sonnet" in m:
+        in_rate = 3.0 / 1_000_000
+        out_rate = 15.0 / 1_000_000
+    elif "gpt-4o-mini" in m:
+        in_rate = 0.15 / 1_000_000
+        out_rate = 0.60 / 1_000_000
+    elif "gpt-4o" in m:
+        in_rate = 5.0 / 1_000_000
+        out_rate = 15.0 / 1_000_000
+    elif "gemini-2.5-flash" in m:
+        in_rate = 0.30 / 1_000_000
+        out_rate = 2.50 / 1_000_000
+    elif "gemini-3.5-flash" in m:
+        in_rate = 1.50 / 1_000_000
+        out_rate = 9.00 / 1_000_000
+    elif "mistral-small" in m:
+        in_rate = 0.15 / 1_000_000
+        out_rate = 0.60 / 1_000_000
+    elif "llama-3.1-8b" in m:
+        in_rate = 0.05 / 1_000_000
+        out_rate = 0.08 / 1_000_000
+    elif "llama-3.3-70b" in m or "llama-3.3-70b-versatile" in m:
+        in_rate = 0.59 / 1_000_000
+        out_rate = 0.79 / 1_000_000
+    else:
+        in_rate = 1.0 / 1_000_000
+        out_rate = 3.0 / 1_000_000
+        
+    return (tok_in * in_rate) + (tok_out * out_rate)
+
+
 def emit(event: dict) -> None:
     """
     Write a timestamped JSON event to events.jsonl, log it to the appropriate
@@ -163,10 +216,43 @@ def emit(event: dict) -> None:
     ts = _utc()
     stamped = {"ts": ts, **event}
 
+    name = event.get("event", "")
+    if name == "llm_call_done":
+        stage = active_stage.get()
+        domain = active_domain.get()
+        model = event.get("model", "")
+        tok_in = event.get("tok_in")
+        tok_out = event.get("tok_out")
+        cost = calculate_cost(model, tok_in, tok_out)
+        
+        event["cost_usd"] = round(cost, 5)
+        stamped["cost_usd"] = round(cost, 5)
+        if stage is not None:
+            stamped["stage"] = stage
+        if domain is not None:
+            stamped["domain"] = domain
+            
+        if _log_dir is not None:
+            audit_dir = _log_dir.parent / "state" / "audit"
+            audit_dir.mkdir(parents=True, exist_ok=True)
+            with open(audit_dir / "model_usage.jsonl", "a") as f:
+                f.write(json.dumps(stamped) + "\n")
+
+    if name in ("model_quota_switch", "model_auth_skip", "model_geminicli_skip"):
+        if _log_dir is not None:
+            state_dir = _log_dir.parent / "state"
+            if state_dir.exists():
+                try:
+                    data = load_pipeline_json(state_dir)
+                    if data.get("model_consistency") != "mixed":
+                        data["model_consistency"] = "mixed"
+                        save_pipeline_json(state_dir, data)
+                except Exception:
+                    pass
+
     if _event_fh is not None:
         _event_fh.write(json.dumps(stamped) + "\n")
 
-    name = event.get("event", "")
     _route_to_log(name, event)
     line = _progress_line(ts, name, event)
     if line:
@@ -355,6 +441,10 @@ def _progress_line(ts: str, name: str, ev: dict) -> str | None:
                 f"words={ev.get('total_words')} "
                 f"output={ev.get('output_md')}"
             )
+        case "run_failed":
+            return f"{ts}  ✗  run {ev.get('run_id')} FAILED: {ev.get('error')}"
+        case "run_complete":
+            return f"{ts}  ✓  run {ev.get('run_id')} COMPLETE"
         case _:
             return None
 

@@ -1,13 +1,12 @@
 roles:
-  # Slot 0: geminicli/gemini-3.5-flash  — free OAuth CLI (daily cap, ~1500 req/day)
-  # Slot 1: gemini/gemini-2.5-flash     — $0.30/$2.50 per M — cheapest quality paid fallback
-  # Slot 2: gemini/gemini-3.5-flash     — $1.50/$9.00 per M — quality backstop if 2.5-flash quota hits
-  # No Chinese API providers. Local = llamacpp/glm4 on localhost (127.0.0.1:8080).
+  # Slot 0: gemini/gemini-2.5-flash     — $0.30/$2.50 per M — cheapest quality paid provider
+  # Slot 1: gemini/gemini-3.5-flash     — $1.50/$9.00 per M — quality backstop if 2.5-flash quota hits
+  # No Chinese API providers. Local = llamacpp/glm4 (http://localhost:8080).
   #
   # WARNING: gemini/gemini-3.5-flash (Google I/O 2026) ≠ gemini/gemini-2.5-flash.
   # 3.5-flash costs 5× more. Keep it as a backstop, not the primary paid fallback.
   #
-  # Effective cost order (slot 0 exhausted):
+  # Effective cost order:
   #   gemini/gemini-2.5-flash  $0.30/$2.50  ← use this first
   #   mistral-small-latest     $0.15/$0.60  256K ctx, MoE, European
   #   groq/llama-3.1-8b        $0.05/$0.08  bulk floor (extractor/classifier only)
@@ -17,13 +16,12 @@ roles:
   #   claude-sonnet-4-6        $3.00/$15.00
   #   claude-opus-4-7          $5.00/$25.00 ← researcher/synthesizer only
   #
-  # Expected cost per standard run (geminicli fully exhausted, 2.5-flash in slot 1):
-  #   ~$0.73/run   (vs ~$3.59 if 3.5-flash were slot 1)
+  # Expected cost per standard run:
+  #   ~$0.73/run   (vs ~$3.59 if 3.5-flash were slot 0)
   # Deep run: ~$1.60/run
 
   # Tool calling, multi-turn ReAct — correctness over cost, low volume.
   agent:
-    - "geminicli/gemini-3.5-flash"
     - "gemini/gemini-2.5-flash"
     - "gemini/gemini-3.5-flash"
     - "groq/llama-3.3-70b-versatile"
@@ -32,30 +30,27 @@ roles:
 
   # Long output, quality IS the product — no cheap shortcuts.
   researcher:
-    - "geminicli/gemini-3.5-flash"
-    - "gemini/gemini-2.5-flash"
-    - "mistral/mistral-small-latest"
-    - "gemini/gemini-3.5-flash"
-    - "groq/llama-3.3-70b-versatile"
     - "claude-opus-4-7"
     - "claude-sonnet-4-6"
     - "gpt-4o"
+    - "gemini/gemini-3.5-flash"
+    - "gemini/gemini-2.5-flash"
+    - "mistral/mistral-small-latest"
+    - "groq/llama-3.3-70b-versatile"
     - "llamacpp/glm4"
 
   synthesizer:
-    - "geminicli/gemini-3.5-flash"
-    - "gemini/gemini-2.5-flash"
-    - "mistral/mistral-small-latest"
-    - "gemini/gemini-3.5-flash"
-    - "groq/llama-3.3-70b-versatile"
     - "claude-opus-4-7"
     - "claude-sonnet-4-6"
     - "gpt-4o"
+    - "gemini/gemini-3.5-flash"
+    - "gemini/gemini-2.5-flash"
+    - "mistral/mistral-small-latest"
+    - "groq/llama-3.3-70b-versatile"
     - "llamacpp/glm4"
 
   # Reasoning matters, medium volume.
   critic:
-    - "geminicli/gemini-3.5-flash"
     - "gemini/gemini-2.5-flash"
     - "mistral/mistral-small-latest"
     - "gemini/gemini-3.5-flash"
@@ -65,7 +60,6 @@ roles:
 
   # Bulk structured JSON, runs per-chunk — groq 8B first for speed/cost, then escalate.
   extractor:
-    - "geminicli/gemini-3.5-flash"
     - "groq/llama-3.1-8b-instant"
     - "groq/llama-3.3-70b-versatile"
     - "gemini/gemini-2.5-flash"
@@ -74,7 +68,6 @@ roles:
 
   # Highest volume, simplest task — 8B first.
   classifier:
-    - "geminicli/gemini-3.5-flash"
     - "groq/llama-3.1-8b-instant"
     - "groq/llama-3.3-70b-versatile"
     - "gemini/gemini-2.5-flash"
@@ -84,7 +77,6 @@ roles:
 
   # Structured doc gen, benefits from large context.
   assembler:
-    - "geminicli/gemini-3.5-flash"
     - "gemini/gemini-2.5-flash"
     - "mistral/mistral-small-latest"
     - "gemini/gemini-3.5-flash"

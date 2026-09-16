@@ -30,6 +30,33 @@ def _fetch_url(url: str, timeout: int = 30) -> str:
         return resp.text
 
 
+def _check_license(text: str, state: PipelineState) -> None:
+    sample = text[:10000]
+    keywords = [
+        "arxiv.org/licenses/nonexclusive-distrib",
+        "cc by-nc-nd",
+        "cc by-nd",
+        "non-commercial",
+        "no derivatives",
+    ]
+    detected = []
+    for kw in keywords:
+        if kw in sample.lower():
+            detected.append(kw)
+    if detected:
+        bypass = state.get("bypass_license_gate", False)
+        emit({
+            "event": "license_detected",
+            "licenses": detected,
+            "bypass": bypass,
+        })
+        if not bypass:
+            raise ValueError(
+                f"Restrictive license terms found in document: {detected}. "
+                "Ingestion blocked. Use --bypass-license-gate to override."
+            )
+
+
 async def run(state: PipelineState, cfg: Config) -> None:
     state_dir = Path(state["state_dir"])
 
@@ -154,6 +181,11 @@ async def run(state: PipelineState, cfg: Config) -> None:
                 "chunk_count": len(raw_chunks_text),
             }
 
+    # Perform license gating scan
+    source_txt = state_dir / "source.txt"
+    if source_txt.exists():
+        _check_license(source_txt.read_text(errors="replace"), state)
+
     (state_dir / "source_meta.json").write_text(json.dumps(meta, indent=2))
     (state_dir / "structural_zones.json").write_text(
         json.dumps(sorted(structural_zones), indent=2)
@@ -171,3 +203,4 @@ async def run(state: PipelineState, cfg: Config) -> None:
         "source_ref_count": source_ref_count,
         "artifact": str(state_dir / "structural_zones.json"),
     })
+

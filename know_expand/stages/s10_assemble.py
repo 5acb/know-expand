@@ -348,14 +348,37 @@ def _is_slug_title(title: str) -> bool:
     return bool(re.match(r'^[A-Z0-9_\-]+$', title))
 
 
-def _clean_section_text(text: str) -> str:
+def _clean_section_text(
+    text: str,
+    strip_markers: bool = True,
+    citation_warnings: dict[str, str] = None,
+    valid_keys: set[str] = None,
+) -> str:
     """Strip internal pipeline markers and fix bare math before writing final output."""
-    text = _UNVALIDATED_RE.sub(" ", text)
-    text = _NEEDS_CITATION_RE.sub(" ", text)
-    text = _CITATION_NEEDED_RE.sub(" ", text)
-    text = _INFERRED_MARKER_RE.sub(" ", text)
-    text = _INFERRED_COMMENT_RE.sub("", text)
+    if strip_markers:
+        text = _UNVALIDATED_RE.sub(" ", text)
+        text = _NEEDS_CITATION_RE.sub(" ", text)
+        text = _CITATION_NEEDED_RE.sub(" ", text)
+        text = _INFERRED_MARKER_RE.sub(" ", text)
+        text = _INFERRED_COMMENT_RE.sub("", text)
     text = _CITE_SYNTAX_RE.sub(lambda m: _convert_cite_syntax(m.group(1)), text)
+
+    # Append warnings to citation keys if matching warnings exist or key is unknown
+    if citation_warnings or valid_keys:
+        def _add_warnings(match: re.Match) -> str:
+            full_match = match.group(0)
+            keys = [k.strip().lstrip("@") for k in match.group(1).split(";")]
+            warnings_to_add = []
+            for k in keys:
+                if valid_keys is not None and k not in valid_keys:
+                    warnings_to_add.append("[UNVERIFIED: unknown citation key]")
+                elif citation_warnings and k in citation_warnings:
+                    warnings_to_add.append(f"[{citation_warnings[k]}]")
+            if warnings_to_add:
+                return full_match + " " + " ".join(warnings_to_add)
+            return full_match
+        text = re.sub(r"\[@([^\]]+)\]", _add_warnings, text)
+
     text = _ORPHAN_SPACE_PUNCT_RE.sub(r'\1', text)
     text = _fix_mixed_display_math(text)
     text = _fix_bare_math(text)
@@ -428,6 +451,34 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
         "artifact": str(bib_path),
     })
 
+    # Load verification report to determine gating and warnings
+    report_path = output_dir / "verification_report.json"
+    strip_markers = True
+    citation_warnings = {}
+    valid_keys = {entry.get("id") for entry in bibliography}
+
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text())
+            entailment_rate = report.get("summary", {}).get("entailment_rate", 1.0)
+            if entailment_rate < 0.95:
+                strip_markers = False
+            
+            # Map citation keys to warning labels if not fully supported
+            for c_item in report.get("claims", []):
+                key = c_item.get("citation_key")
+                relations = [c.get("relation") for c in c_item.get("decomposed_claims", [])]
+                if "contradicts" in relations:
+                    citation_warnings[key] = "UNVERIFIED: claim not supported by cited source"
+                elif "neutral" in relations:
+                    reasons = [c.get("reason", "") for c in c_item.get("decomposed_claims", [])]
+                    if any("no abstract" in r.lower() for r in reasons):
+                        citation_warnings[key] = "UNVERIFIED: no abstract available"
+                    else:
+                        citation_warnings[key] = "UNVERIFIED: claim not supported by cited source"
+        except Exception as _exc:
+            _logger.warning("s10: failed to parse verification_report.json: %s", _exc)
+
     # Assemble sections in order
     doc_title = _load_title(state_dir, state.get("input_path"))
     doc_parts: list[str] = [f"# {doc_title}\n"]
@@ -437,7 +488,12 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
     for domain_id in ordered_domain_ids:
         section_path = sections_dir / f"section_{domain_id}.md"
         if section_path.exists():
-            doc_parts.append(_clean_section_text(section_path.read_text()))
+            doc_parts.append(_clean_section_text(
+                section_path.read_text(),
+                strip_markers=strip_markers,
+                citation_warnings=citation_warnings,
+                valid_keys=valid_keys,
+            ))
             section_files_used.append(section_path.name)
         else:
             emit({
@@ -449,7 +505,12 @@ async def run(state: PipelineState, cfg: Config, no_pdf: bool = False) -> None:
     # Add synthesis section, optionally prepending a Reading Roadmap from S5 metadata
     synthesis_path = sections_dir / "section_synthesis.md"
     if synthesis_path.exists():
-        synthesis_text = _clean_section_text(synthesis_path.read_text())
+        synthesis_text = _clean_section_text(
+            synthesis_path.read_text(),
+            strip_markers=strip_markers,
+            citation_warnings=citation_warnings,
+            valid_keys=valid_keys,
+        )
 
         # Inject structured Reading Roadmap from summary_synthesis.json if available
         summary_synthesis_path = state_dir / "summaries" / "summary_synthesis.json"

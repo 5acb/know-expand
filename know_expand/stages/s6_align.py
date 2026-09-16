@@ -208,27 +208,118 @@ async def _run_searches(
     queries: list[str],
     http: httpx.AsyncClient,
     cfg: Config,
-) -> str:
+) -> tuple[str, list[dict]]:
     queries = queries[:_MAX_SEARCH_QUERIES]
     tasks = [_ss_search(q, http, cfg, limit=5) for q in queries]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     blocks = []
+    all_papers = []
     for q, r in zip(queries, results):
         blocks.append(f"Query: {q}")
         if isinstance(r, Exception):
             blocks.append(f"  Error: {r}")
         elif r:
             blocks.extend(f"  {_format_paper(p)}" for p in r[:5])
+            all_papers.extend(r[:5])
         else:
             blocks.append("  No results.")
-    return "\n\n".join(blocks)
+    return "\n\n".join(blocks), all_papers
 
 
-def _persist_bibliography(plan: AlignmentPlan, domain_id: str, audit_dir: Path) -> None:
-    """Extract any paper references from patch content and note them.
-    (Best-effort: actual citation ids are embedded by the LLM in content.)"""
-    # No-op for now; bibliography persistence happens via existing s3 pipeline.
-    pass
+def _match_key_to_paper(key: str, papers: list[dict]) -> dict | None:
+    from know_expand.bibliography import _make_id
+    key_lower = key.lower().strip()
+    
+    for paper in papers:
+        try:
+            base_id = _make_id(paper, set())
+            if base_id.lower() == key_lower:
+                return paper
+        except Exception:
+            pass
+            
+    for paper in papers:
+        authors = paper.get("authors") or []
+        year = str(paper.get("year") or "")
+        if not year or year not in key_lower:
+            continue
+        for author in authors:
+            name = author.get("name", "")
+            if name:
+                last_name = name.rsplit(" ", 1)[-1].lower()
+                if last_name and last_name in key_lower:
+                    return paper
+    return None
+
+
+def _persist_bibliography(
+    plan: AlignmentPlan,
+    domain_id: str,
+    audit_dir: Path,
+    all_fetched_papers: list[dict],
+) -> None:
+    """Extract any paper references from patch content and append them to bibliography."""
+    import re
+    import json
+    from know_expand.state import atomic_write
+    from know_expand.bibliography import _to_citation_record
+
+    new_keys = set()
+    for patch in plan.patches:
+        found = re.findall(r"\[@([a-zA-Z0-9_-]+)\]", patch.content)
+        new_keys.update(found)
+
+    if not new_keys:
+        return
+
+    bib_path = audit_dir / f"bibliography_{domain_id}.json"
+    existing_records = []
+    seen_ids = set()
+    seen_dois = set()
+    if bib_path.exists():
+        try:
+            data = json.loads(bib_path.read_text())
+            for item in data:
+                existing_records.append(item)
+                if "id" in item:
+                    seen_ids.add(item["id"])
+                if "DOI" in item and item["DOI"]:
+                    seen_dois.add(item["DOI"].lower())
+        except Exception as e:
+            _logger.warning("Failed to read bibliography for domain %s: %s", domain_id, e)
+
+    added_any = False
+    for key in new_keys:
+        if key in seen_ids:
+            continue
+        
+        matched_paper = _match_key_to_paper(key, all_fetched_papers)
+        if matched_paper:
+            doi = (matched_paper.get("externalIds") or {}).get("DOI")
+            if doi and doi.lower() in seen_dois:
+                continue
+            
+            seen_for_make = seen_ids.copy()
+            rec = _to_citation_record(matched_paper, "frontier", seen_for_make)
+            rec.id = key
+            
+            existing_records.append(rec.model_dump())
+            seen_ids.add(key)
+            if rec.DOI:
+                seen_dois.add(rec.DOI.lower())
+            added_any = True
+
+    if added_any:
+        try:
+            atomic_write(bib_path, json.dumps(existing_records, indent=2))
+            emit({
+                "event": "s6_bibliography_persisted",
+                "domain_id": domain_id,
+                "added_keys": list(new_keys & seen_ids),
+                "artifact": str(bib_path),
+            })
+        except Exception as e:
+            _logger.warning("Failed to write updated bibliography for domain %s: %s", domain_id, e)
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +352,8 @@ async def _align_domain(
         return
 
     raw_text = section_path.read_text()
-    section_text = raw_text[:8000]
-    if len(raw_text) > 8000:
+    section_text = raw_text[:64000]
+    if len(raw_text) > 64000:
         section_text += f"\n\n... [truncated, {len(raw_text)} chars total]"
 
     # --- Pass 1 ---
@@ -286,9 +377,10 @@ async def _align_domain(
         return
 
     # --- Pass 2 (only if search needed) ---
+    all_fetched_papers = []
     if plan.search_queries:
         try:
-            search_results = await _run_searches(plan.search_queries, http, cfg)
+            search_results, all_fetched_papers = await _run_searches(plan.search_queries, http, cfg)
         except Exception as exc:
             search_results = f"Search failed: {exc}"
 
@@ -313,6 +405,8 @@ async def _align_domain(
     for patch in plan.patches:
         result = _apply_patch(section_path, patch.position, patch.content)
         patches_applied.append({"position": patch.position, "checklist_item": patch.checklist_item, "result": result})
+
+    _persist_bibliography(plan, domain_id, audit_dir, all_fetched_papers)
 
     emit({
         "event": "s4_5_domain_aligned",
@@ -360,6 +454,8 @@ async def run(state: PipelineState, cfg: Config) -> None:
     async with httpx.AsyncClient(timeout=cfg.timeouts.get("http_async_seconds", 30)) as http:
         for domain in domains:
             try:
+                from know_expand.state import active_domain
+                active_domain.set(domain["id"])
                 await _align_domain(domain, sections_dir, audit_dir, http, cfg, router)
             except Exception as exc:
                 emit({

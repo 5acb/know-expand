@@ -214,8 +214,9 @@ async def test_s4_domain_failure_doesnt_kill_others(tmp_path):
 
     with patch("know_expand.stages.s5_research._research_domain", side_effect=fake_research_domain):
         with patch("know_expand.stages.s5_research.make_router", return_value=mock_router):
-            # Should not raise even though domain_a fails
-            await s5_research.run(state, cfg)
+            # Should raise RuntimeError because domain_a fails
+            with pytest.raises(RuntimeError, match="s5 research failed for domains: domain_a"):
+                await s5_research.run(state, cfg)
 
     # domain_b should have produced output
     sections_dir = state_dir / "sections"

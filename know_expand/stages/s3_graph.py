@@ -62,7 +62,7 @@ async def _prompt_taxonomy_web(
     issues: list[str],
     cfg,
 ) -> dict:
-    """Web IPC variant: write proposals to state dir, poll for user's choice."""
+    """Web IPC variant: write proposals to state dir, pause via interrupt, handle resume choice."""
     state_dir = taxonomy_path.parent
 
     review = {
@@ -74,17 +74,10 @@ async def _prompt_taxonomy_web(
     emit({"event": "stage3_review_pending", "lumper_domains": len(lumper.domains),
           "splitter_domains": len(splitter.domains)})
 
+    from langgraph.types import interrupt
+    choice = interrupt("taxonomy_review")
+
     choice_path = state_dir / _TAXONOMY_CHOICE_FILE
-    deadline = time.monotonic() + _TAXONOMY_WEB_TIMEOUT
-    choice = None
-    while time.monotonic() < deadline:
-        await asyncio.sleep(1.0)
-        if choice_path.exists():
-            try:
-                choice = json.loads(choice_path.read_text()).get("choice", "l")
-            except Exception:
-                pass
-            break
 
     # Clean up IPC files
     for f in (state_dir / _TAXONOMY_REVIEW_FILE, choice_path):
@@ -97,11 +90,12 @@ async def _prompt_taxonomy_web(
         mode, domains = "splitter", splitter.domains
     elif choice == "m":
         return await _auto_merge(lumper, splitter, issues, router, cfg)
-    else:  # "l" or timeout → lumper
+    else:  # "l" or fallback → lumper
         mode, domains = "lumper", lumper.domains
 
     emit({"event": "stage3_review_complete", "mode": mode, "domains": len(domains)})
     return {"status": "approved", "mode": mode, "domains": [d.model_dump() for d in domains]}
+
 
 
 async def _prompt_taxonomy(
