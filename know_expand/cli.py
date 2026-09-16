@@ -72,7 +72,6 @@ def main() -> None:
     serve_p.add_argument("--runs-dir", type=Path, default=Path("runs"))
 
     # Output / mode
-    parser.add_argument("--human", action="store_true", help="Rich terminal output")
     parser.add_argument("--no-pdf", action="store_true", help="Skip PDF build")
 
     # Pipeline control
@@ -85,6 +84,7 @@ def main() -> None:
     parser.add_argument("--user-profile", type=Path, metavar="PATH")
     parser.add_argument("--auto-taxonomy", action="store_true")
     parser.add_argument("--no-bibliography-fetch", action="store_true")
+    parser.add_argument("--bypass-license-gate", action="store_true", help="Bypass Stage 0 restrictive license gate")
     parser.add_argument(
         "--primary-model", type=str, default=None, metavar="MODEL",
         help="Prepend MODEL to all role model lists (e.g. 'claude-sonnet-4-6')",
@@ -122,7 +122,14 @@ def main() -> None:
         return
 
     runs_dir: Path = args.runs_dir
-    run_id = args.run_id or new_run_id()
+    run_id = args.run_id
+    if not run_id and args.resume:
+        latest_sd = _find_latest_state_dir(runs_dir)
+        if latest_sd:
+            run_id = latest_sd.parent.name
+            print(f"Resuming from latest run: {run_id}", flush=True)
+    if not run_id:
+        run_id = new_run_id()
     run_dir = runs_dir / run_id
     state_dir = run_dir / "state"
     output_dir = run_dir / "output"
@@ -163,16 +170,33 @@ def main() -> None:
 
     from know_expand.pipeline import run_pipeline
 
-    asyncio.run(run_pipeline(
-        input_path=input_path,
-        state_dir=state_dir,
-        output_dir=output_dir,
-        depth=args.depth,
-        cfg=cfg,
-        auto_taxonomy=args.auto_taxonomy,
-        primary_model=args.primary_model,
-        resume_stage=int(args.resume) if args.resume else None,
-    ))
+    try:
+        asyncio.run(run_pipeline(
+            input_path=input_path,
+            state_dir=state_dir,
+            output_dir=output_dir,
+            depth=args.depth,
+            cfg=cfg,
+            auto_taxonomy=args.auto_taxonomy,
+            primary_model=args.primary_model,
+            no_pdf=args.no_pdf,
+            resume_stage=int(args.resume) if args.resume else None,
+            only_stage=int(args.stage) if args.stage else None,
+            user_profile_path=args.user_profile,
+            no_bibliography_fetch=args.no_bibliography_fetch,
+            bypass_license_gate=args.bypass_license_gate,
+        ))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        emit({
+            "event": "run_failed",
+            "run_id": run_id,
+            "error": str(e),
+            "traceback": tb,
+        })
+        print(f"Run failed: {e}", file=sys.stderr, flush=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

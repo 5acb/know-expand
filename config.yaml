@@ -64,7 +64,7 @@ graph_defaults:
   node_xp: 100
 
 llamacpp:
-  base_url: "http://127.0.0.1:8080"
+  base_url: "http://localhost:8080"
   # health_path: /health  (llama-server default)
 
 # S5 persona prompt sizing.
@@ -87,7 +87,14 @@ research_context:
     deep: 500
 
 critic_thinking:
-  budget_tokens: 0        # 0 = disabled; 8192 = recommended for deep critic runs
+  budget_tokens: 0
+
+# Memory settings for Mem0 + Qdrant container
+memory:
+  provider: "qdrant"
+  host: "localhost"
+  port: 6333
+  collection_name: "know_expand_memory"
 
 boilerplate_stop_list:
   - introduction
@@ -106,3 +113,4 @@ boilerplate_stop_list:
   - references
   - background
   - overview
+

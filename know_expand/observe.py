@@ -682,7 +682,9 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, -apple
     <h1>know-expand</h1>
   </div>
   <div class="topbar-sep"></div>
-  <span class="run-id" id="run-label"></span>
+  <select id="run-select" onchange="selectRun(this.value)" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm);font-family:var(--font-mono);font-size:11px;padding:2px 6px;cursor:pointer;outline:none;"></select>
+  <button id="delete-run-btn" onclick="deleteCurrentRun()" title="Delete current run" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;padding:2px 6px;font-weight:bold;line-height:1;">&#215;</button>
+  <span class="run-id" id="run-label" style="display:none"></span>
   <span class="topbar-spacer"></span>
   <span class="top-status" id="top-status">connecting…</span>
   <button id="stop-btn" onclick="stopRun()">&#9632; Stop</button>
@@ -868,6 +870,109 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, -apple
 
 <script>
 const $ = id => document.getElementById(id);
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str).replace(/[&<>"']/g, function(m) {
+    switch (m) {
+      case '&': return '&amp;';
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '"': return '&quot;';
+      case "'": return '&#039;';
+      default: return m;
+    }
+  });
+}
+
+let currentRunId = '';
+
+const apiHeaders = () => {
+  const headers = {};
+  const apiKey = localStorage.getItem('KNOW_EXPAND_API_KEY') || '';
+  if (apiKey) {
+    headers['KNOW_EXPAND_API_KEY'] = apiKey;
+  }
+  return headers;
+};
+
+function handleAuthError() {
+  const key = prompt("Please enter KNOW_EXPAND_API_KEY:");
+  if (key) {
+    localStorage.setItem('KNOW_EXPAND_API_KEY', key);
+    location.reload();
+  }
+}
+
+async function fetchApi(url, options = {}) {
+  const headers = { ...apiHeaders(), ...options.headers };
+  let targetUrl = url;
+  if (currentRunId && !url.includes('run_id=')) {
+    const separator = url.includes('?') ? '&' : '?';
+    targetUrl = `${url}${separator}run_id=${encodeURIComponent(currentRunId)}`;
+  }
+  
+  const response = await fetch(targetUrl, { ...options, headers });
+  if (response.status === 401) {
+    handleAuthError();
+    throw new Error('Unauthorized');
+  }
+  return response;
+}
+
+async function refreshRunsList() {
+  try {
+    const r = await fetchApi('/api/runs');
+    const runs = await r.json();
+    const select = $('run-select');
+    const previousSelection = select.value || currentRunId;
+    
+    select.innerHTML = runs.map(run => {
+      const label = (run.run_id || '').slice(0, 8) + (run.status ? ` (${run.status})` : '');
+      return `<option value="${run.run_id}" title="${run.input_path || ''}">${label}</option>`;
+    }).join('');
+    
+    if (runs.length === 0) {
+      select.innerHTML = '<option value="">(no runs)</option>';
+      currentRunId = '';
+    } else {
+      if (previousSelection && runs.some(run => run.run_id === previousSelection)) {
+        select.value = previousSelection;
+        currentRunId = previousSelection;
+      } else {
+        select.value = runs[0].run_id;
+        currentRunId = runs[0].run_id;
+      }
+    }
+  } catch (e) {
+    console.error("Failed to load runs", e);
+  }
+}
+
+function selectRun(runId) {
+  currentRunId = runId;
+  lastStatusEtag = '';
+  lastEventsEtag = '';
+  stageArtifacts = {};
+  poll();
+}
+
+async function deleteCurrentRun() {
+  if (!currentRunId) return;
+  if (!confirm(`Are you sure you want to delete run ${currentRunId}? This will delete its entire state and output directory.`)) return;
+  try {
+    await fetchApi(`/api/runs/${currentRunId}/delete`, {
+      method: 'POST'
+    });
+    currentRunId = '';
+    await refreshRunsList();
+    lastStatusEtag = '';
+    lastEventsEtag = '';
+    poll();
+  } catch (e) {
+    alert("Failed to delete run: " + e);
+  }
+}
+
 
 // ── Drawer ────────────────────────────────────────────────────────────────────
 function openDrawer() {
@@ -996,39 +1101,39 @@ function fmtEvent(evt) {
   if (e === 'llm_call_done') {
     const tok = evt.tok_out ?? '?', toks = evt.tok_s ?? '?', el = evt.elapsed_s ?? '?';
     return { cls: 'llm',
-      body: `<span class="pl-role">${evt.role}</span> <span class="pl-schema">${evt.schema}</span> `
+      body: `<span class="pl-role">${escapeHtml(evt.role)}</span> <span class="pl-schema">${escapeHtml(evt.schema)}</span> `
           + `<span class="pl-dim">${el}s · ${tok}tok · ${toks}tok/s</span> `
-          + `<span class="pl-model">← ${evt.model}</span>` };
+          + `<span class="pl-model">← ${escapeHtml(evt.model)}</span>` };
   }
   if (e === 'agent_tool_call_done') {
     return { cls: 'agent',
-      body: `<span class="pl-role">${evt.role}</span> `
+      body: `<span class="pl-role">${escapeHtml(evt.role)}</span> `
           + `<span class="pl-dim">calls=${evt.tool_calls}  ${evt.elapsed_s}s</span> `
-          + `<span class="pl-model">← ${evt.model}</span>` };
+          + `<span class="pl-model">← ${escapeHtml(evt.model)}</span>` };
   }
   if (e === 'llm_call_error') {
     return { cls: 'error',
-      body: `<span class="pl-role">${evt.role}</span> `
-          + `<span class="pl-model">${evt.model}</span> `
-          + `<span class="pl-dim">${(evt.error||'').slice(0,100)}</span>` };
+      body: `<span class="pl-role">${escapeHtml(evt.role)}</span> `
+          + `<span class="pl-model">${escapeHtml(evt.model)}</span> `
+          + `<span class="pl-dim">${escapeHtml((evt.error||'').slice(0,100))}</span>` };
   }
   if (e === 'model_auth_skip' || e === 'model_quota_switch') {
     return { cls: 'warn',
       body: `<span class="pl-warn">model switch</span> `
-          + `<span class="pl-model">${evt.skipped_model}</span>`
-          + ` → <span class="pl-model">${evt.next_model||'—'}</span>` };
+          + `<span class="pl-model">${escapeHtml(evt.skipped_model)}</span>`
+          + ` → <span class="pl-model">${escapeHtml(evt.next_model||'—')}</span>` };
   }
   if (e === 'model_probe_done') {
-    const avail = (evt.available||[]).join('  ');
-    const skip  = (evt.unavailable||[]).join('  ');
+    const avail = (evt.available||[]).map(escapeHtml).join('  ');
+    const skip  = (evt.unavailable||[]).map(escapeHtml).join('  ');
     return { cls: 'probe',
       body: `<span class="pl-dim">available: </span><span class="pl-model">${avail}</span>`
           + (skip ? `<span class="pl-dim">  |  skipping: ${skip}</span>` : '') };
   }
   if (e === 'model_role_assignments') {
     const rows = Object.entries(evt.assignments||{}).sort(([a],[b])=>a.localeCompare(b))
-      .map(([r,m]) => `<span class="pl-assign-row"><span class="pl-role">${r}</span>`
-                    + `<span class="pl-model">${m||'—'}</span></span>`).join('');
+      .map(([r,m]) => `<span class="pl-assign-row"><span class="pl-role">${escapeHtml(r)}</span>`
+                    + `<span class="pl-model">${escapeHtml(m||'—')}</span></span>`).join('');
     return { cls: 'probe', body: `<span class="pl-dim">role assignments</span><div class="pl-assign">${rows}</div>` };
   }
 
@@ -1041,7 +1146,7 @@ function fmtEvent(evt) {
   else if (e.startsWith('ss')) cls = 'ss';
   const body = Object.entries(evt)
     .filter(([k]) => !['event','ts','stage'].includes(k))
-    .map(([k,v]) => `${k}=${JSON.stringify(v)}`).join('  ');
+    .map(([k,v]) => `${escapeHtml(k)}=${escapeHtml(JSON.stringify(v))}`).join('  ');
   return { cls, body };
 }
 
@@ -1126,7 +1231,7 @@ function renderExtract(area, a) {
   const terms = a.terms || [];
   if (!terms.length) { area.innerHTML = '<div class="empty">no terms yet</div>'; return; }
   area.innerHTML = `<div class="term-chips">${terms.map(t =>
-    `<span class="term-chip">${t.name}<span class="cnt">×${t.occurrence_count}</span></span>`
+    `<span class="term-chip">${escapeHtml(t.name)}<span class="cnt">×${t.occurrence_count}</span></span>`
   ).join('')}</div>`;
 }
 
@@ -1134,7 +1239,7 @@ function renderGraph(area, a) {
   const domains = (a.taxonomy || {}).domains || [];
   const strategy = (a.taxonomy || {}).strategy || '';
   let html = kv([
-    ['strategy', strategy],
+    ['strategy', escapeHtml(strategy)],
     ['domains', domains.length],
     ['nodes', a.node_count ?? '—'],
     ['edges', a.edge_count ?? '—'],
@@ -1142,8 +1247,8 @@ function renderGraph(area, a) {
   if (domains.length) {
     html += `<div class="card-grid" style="margin-top:8px">${domains.map(d =>
       `<div class="card">
-        <div class="card-label">${d.label}</div>
-        <div class="card-meta">${(d.example_terms || []).slice(0,4).join(', ')}</div>
+        <div class="card-label">${escapeHtml(d.label)}</div>
+        <div class="card-meta">${(d.example_terms || []).map(escapeHtml).slice(0,4).join(', ')}</div>
       </div>`
     ).join('')}</div>`;
   }
@@ -1157,13 +1262,13 @@ function renderAudit(area, a) {
     const gapList = info.gaps || [];
     if (!gapList.length) continue;
     html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:5px;overflow:hidden;margin-top:8px">
-      <div style="padding:8px 12px;font-size:12px;font-weight:600;border-bottom:1px solid var(--border)">${info.label}</div>
+      <div style="padding:8px 12px;font-size:12px;font-weight:600;border-bottom:1px solid var(--border)">${escapeHtml(info.label)}</div>
       ${gapList.map(g => {
         const v = g.verdict || 'pending';
         const vc = v==='real_gap'?'v-real':v==='ambiguous'?'v-ambiguous':'v-not';
         return `<div class="gap-item">
-          <div class="gap-desc"><span class="${vc}">[${v}]</span>  ${g.gap_description||''}</div>
-          ${g.evidence_anchor_ids?.length ? `<div class="gap-evidence">evidence: ${g.evidence_anchor_ids.join(', ')}</div>` : ''}
+          <div class="gap-desc"><span class="${vc}">[${v}]</span>  ${escapeHtml(g.gap_description||'')}</div>
+          ${g.evidence_anchor_ids?.length ? `<div class="gap-evidence">evidence: ${g.evidence_anchor_ids.map(escapeHtml).join(', ')}</div>` : ''}
         </div>`;
       }).join('')}
     </div>`;
@@ -1198,12 +1303,12 @@ function renderResearch(area, a) {
     const cls = clickable ? 'card done clickable' : (d.personas_done ? 'card active' : 'card');
     const sel = d.id === selectedSectionId ? ' selected' : '';
     const pulse = !hasSec && d.personas_done ? ' style="animation:pulse 1.8s ease-in-out infinite"' : '';
-    return `<div class="${cls}${sel}" onclick="${clickable ? `loadSection('${d.id}')` : ''}" data-domain="${d.id}">
+    return `<div class="${cls}${sel}" onclick="${clickable ? `loadSection('${escapeHtml(d.id)}')` : ''}" data-domain="${escapeHtml(d.id)}">
       <div class="card-label" style="display:flex;align-items:center;gap:6px">
         <span style="flex-shrink:0;width:7px;height:7px;border-radius:50%;${dotStyle}"${pulse}></span>
-        ${d.label}
+        ${escapeHtml(d.label)}
       </div>
-      <div class="card-meta">${statusLabel}</div>
+      <div class="card-meta">${escapeHtml(statusLabel)}</div>
     </div>`;
   }).join('')}</div>`;
 }
@@ -1222,7 +1327,7 @@ function renderAlign(area, a) {
     const cl = d.checklist || {};
     return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:5px;overflow:hidden;margin-bottom:8px">
       <div style="padding:8px 12px;font-size:12px;font-weight:600;border-bottom:1px solid var(--border)">
-        ${d.label}${d.aligned ? ' <span style="color:var(--green);font-weight:400;font-size:11px">aligned</span>' : ''}
+        ${escapeHtml(d.label)}${d.aligned ? ' <span style="color:var(--green);font-weight:400;font-size:11px">aligned</span>' : ''}
       </div>
       ${CHECKS.map(([key, label]) => {
         const pass = cl[key];
@@ -1285,7 +1390,7 @@ async function loadSection(id) {
   view.className = 'visible';
   view.innerHTML = '<p style="color:var(--muted);padding:1rem;font-size:12px">loading…</p>';
   try {
-    const r = await fetch('/api/section/' + id);
+    const r = await fetchApi('/api/section/' + id);
     const d = await r.json();
     view.innerHTML = d.html || '<p class="empty">not available yet</p>';
   } catch {
@@ -1317,7 +1422,7 @@ async function selectStage(sid) {
   } else {
     $('results-area').innerHTML = '<div class="empty">loading…</div>';
     try {
-      const r = await fetch('/api/stage/' + sid);
+      const r = await fetchApi('/api/stage/' + sid);
       const a = await r.json();
       stageArtifacts[sid] = a;
       renderResults(sid, a);
@@ -1368,9 +1473,16 @@ let _serverDown = false;  // true while server is unreachable
 let _artifactPollCount = 0;
 
 async function poll() {
+  if (!currentRunId) {
+    await pollQa();
+    await pollTaxonomy();
+    return;
+  }
   try {
     // Status
-    const sr = await fetch('/api/status', {headers: lastStatusEtag ? {'If-None-Match': lastStatusEtag} : {}});
+    const headers = { ...apiHeaders() };
+    if (lastStatusEtag) headers['If-None-Match'] = lastStatusEtag;
+    const sr = await fetchApi('/api/status', { headers });
 
     // Server came back after a disconnect — clear stale ETags so we get fresh data
     if (_serverDown) {
@@ -1393,7 +1505,7 @@ async function poll() {
       _stateDir = s.state_dir || '';
       $('run-label').textContent = s.run_id || '';
       $('top-status').textContent = s.summary || '';
-      updateResumeCard(s.stages || {}, s.input_path || '', s.run_id || '');
+      updateResumeCard(s.stages || {}, s.input_path || '', s.run_id || '', s.depth, s.auto_taxonomy, s.no_pdf);
       // Sync run pane mode with actual pipeline state
       if (s.pipeline_running && runPaneMode === 'setup') {
         setRunMode('running');
@@ -1421,7 +1533,9 @@ async function poll() {
     }
 
     // Events
-    const er = await fetch('/api/events', {headers: lastEventsEtag ? {'If-None-Match': lastEventsEtag} : {}});
+    const erHeaders = { ...apiHeaders() };
+    if (lastEventsEtag) erHeaders['If-None-Match'] = lastEventsEtag;
+    const er = await fetchApi('/api/events', { headers: erHeaders });
     if (er.status !== 304) {
       lastEventsEtag = er.headers.get('ETag') || '';
       const ed = await er.json();
@@ -1439,7 +1553,7 @@ async function poll() {
     _artifactPollCount++;
     if (_pipelineRunning && selectedView && selectedView !== 'all-events' && _artifactPollCount % 5 === 0) {
       try {
-        const ar = await fetch('/api/stage/' + selectedView);
+        const ar = await fetchApi('/api/stage/' + selectedView);
         if (ar.ok) {
           const artifacts = await ar.json();
           stageArtifacts[selectedView] = artifacts;
@@ -1466,8 +1580,9 @@ setInterval(poll, 2000);
 // Initialize provider status grid on load
 (async () => {
   try {
-    const d = await (await fetch('/api/keys')).json();
+    const d = await (await fetchApi('/api/keys')).json();
     renderProvGrid(d);
+    await refreshRunsList();
   } catch {}
 })();
 
@@ -1476,7 +1591,12 @@ const STAGE_NAMES_SHORT = {
   '5':'Research','6':'Align','7':'Synth','8':'Verify','9':'Prereq','10':'Assemble'
 };
 
-function updateResumeCard(stages, inputPath, runId) {
+let _resumeInputPath = '';   // set by updateResumeCard from prior run's input_path
+let _resumeDepth = 'standard';
+let _resumeAutoTax = true;
+let _resumeNoPdf = false;
+
+function updateResumeCard(stages, inputPath, runId, depth, autoTax, noPdf) {
   const card = $('resume-card');
   const completedIds = Object.entries(stages)
     .filter(([,v]) => v.status === 'complete')
@@ -1493,6 +1613,9 @@ function updateResumeCard(stages, inputPath, runId) {
   }
 
   _resumeInputPath = inputPath || '';
+  _resumeDepth = depth || 'standard';
+  _resumeAutoTax = autoTax !== undefined ? autoTax : true;
+  _resumeNoPdf = noPdf !== undefined ? noPdf : false;
   card.style.display = 'block';
 
   // Health check: any error stages?
@@ -1516,8 +1639,6 @@ function updateResumeCard(stages, inputPath, runId) {
   $('resume-info').textContent = info;
 }
 
-let _resumeInputPath = '';   // set by updateResumeCard from prior run's input_path
-
 function setResumeMode(doResume) {
   $('run-resume').value = doResume ? '1' : '0';
   $('resume-btn-fresh').classList.toggle('active', !doResume);
@@ -1540,19 +1661,14 @@ function updateRunActiveInfo() {
 
 // ── Stop / clear ─────────────────────────────────────────────────────────
 async function stopRun() {
-  const r = await fetch('/api/stop', {method: 'POST'});
+  const r = await fetchApi('/api/stop', {method: 'POST'});
   const d = await r.json().catch(() => ({}));
   lastStatusEtag = '';
   lastEventsEtag = '';   // force events refresh so run_stopped appears immediately
   $('stop-btn').style.display = 'none';
   currentQaId = null;
   qaHistory = [];
-  // Don't call setRunMode here — the next poll will detect pipeline_running=false
-  // and transition to 'setup' cleanly. Calling it here causes a flash to setup
-  // before the process has fully died.
-  // Switch to all-events so the run_stopped log line is visible
   if (selectedView !== 'all-events') $('sl-all-events').click();
-  // Flash outcome in the events filter bar
   const bar = $('evt-filter-input');
   const prev = bar.placeholder;
   bar.placeholder = d.killed ? '■ run stopped' : '■ stop sent (no process found)';
@@ -1560,10 +1676,9 @@ async function stopRun() {
 }
 
 async function clearStage(sid) {
-  await fetch(`/api/stage/${sid}/clear`, {method: 'POST'});
+  await fetchApi(`/api/stage/${sid}/clear`, {method: 'POST'});
   delete stageArtifacts[sid];
   lastStatusEtag = '';
-  // If we're viewing this stage, refresh header
   if (selectedView === sid) renderDetailHeader(sid);
 }
 
@@ -1598,7 +1713,7 @@ let taxReviewPending = false;
 async function pollTaxonomy() {
   if (runPaneMode !== 'running' && runPaneMode !== 'taxonomy') return;
   try {
-    const r = await fetch('/api/taxonomy');
+    const r = await fetchApi('/api/taxonomy');
     const d = await r.json();
     if (d.lumper && !taxReviewPending) {
       taxReviewPending = true;
@@ -1636,12 +1751,21 @@ function renderTaxonomyReview(d) {
 
 async function submitTaxonomy(choice) {
   $('tax-actions').querySelectorAll('.tax-btn').forEach(b => b.disabled = true);
-  await fetch('/api/taxonomy/choice', {
+  await fetchApi('/api/taxonomy/choice', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({choice}),
   });
   taxReviewPending = false;
+  if (!_pipelineRunning) {
+    try {
+      await fetchApi('/api/run', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ resume: true })
+      });
+    } catch(e) {}
+  }
   setRunMode('running');
 }
 
@@ -1687,7 +1811,7 @@ function renderProvGrid(keys) {
 
 async function loadProviders() {
   try {
-    const d = await (await fetch('/api/keys')).json();
+    const d = await (await fetchApi('/api/keys')).json();
     renderProvGrid(d);
   } catch {}
 }
@@ -1697,7 +1821,6 @@ async function startRun() {
   const input = isResume ? _resumeInputPath : $('run-input').value.trim();
   if (!input) {
     if (isResume) {
-      // Prior run predates input_path tracking — fall back to text field
       setResumeMode(false);
       $('run-input').focus();
       $('run-input').placeholder = 'enter input path to resume…';
@@ -1706,33 +1829,32 @@ async function startRun() {
     }
     return;
   }
-  // In resume mode depth/autoTax/noPdf come from the prior run — pass
-  // sensible defaults; the pipeline already has them baked into state.
-  const depth = isResume ? 'standard' : $('run-depth').value;
-  const autoTax = isResume ? true : $('run-auto-tax').checked;
-  const noPdf = isResume ? true : $('run-no-pdf').checked;
+  const depth = isResume ? _resumeDepth : $('run-depth').value;
+  const autoTax = isResume ? _resumeAutoTax : $('run-auto-tax').checked;
+  const noPdf = isResume ? _resumeNoPdf : $('run-no-pdf').checked;
   const resume = isResume;
 
   $('run-start-btn').disabled = true;
   $('run-start-btn').textContent = 'starting…';
 
   try {
-    await fetch('/api/run', {
+    const response = await fetchApi('/api/run', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         input, depth, auto_taxonomy: autoTax, no_pdf: noPdf,
         resume,
+        run_id: isResume ? currentRunId : undefined
       }),
     });
+    const data = await response.json();
+    if (data.ok) {
+      currentRunId = data.run_id;
+      await refreshRunsList();
+    }
 
-    // Invalidate status cache so stage list refreshes
     lastStatusEtag = '';
-
-    // Always start in running mode; pollQa/pollTaxonomy switch reactively
     setRunMode('running');
-
-    // Show all-events view so user sees live log immediately
     $('sl-all-events').click();
   } catch(e) {
     $('run-start-btn').disabled = false;
@@ -1752,7 +1874,7 @@ function toggleBrowser() {
 }
 
 async function loadDir(dir) {
-  const r = await fetch('/api/files?dir=' + encodeURIComponent(dir));
+  const r = await fetchApi('/api/files?dir=' + encodeURIComponent(dir));
   if (!r.ok) return;
   const d = await r.json();
   fbCwd = d.cwd;
@@ -1760,7 +1882,6 @@ async function loadDir(dir) {
   const list = $('fb-list');
   list.innerHTML = '';
 
-  // Parent dir entry
   if (d.parent) {
     const row = document.createElement('div');
     row.className = 'fb-entry';
@@ -1774,7 +1895,7 @@ async function loadDir(dir) {
     row.className = 'fb-entry';
     const sizeStr = e.type === 'file' ? _fmtBytes(e.size) : '';
     row.innerHTML = `<span class="fb-icon">${e.type === 'dir' ? '▶' : '·'}</span>` +
-      `<span class="fb-name ${e.type === 'dir' ? 'dir' : ''}">${e.name}</span>` +
+      `<span class="fb-name ${e.type === 'dir' ? 'dir' : ''}">${escapeHtml(e.name)}</span>` +
       `<span class="fb-size">${sizeStr}</span>`;
     if (e.type === 'dir') {
       row.onclick = () => loadDir(e.path);
@@ -1798,21 +1919,16 @@ function _fmtBytes(n) {
 
 // Q&A polling (called from main poll loop)
 async function pollQa() {
-  // Run in both 'running' (stage 1 may start) and 'qa' (actively interviewing) modes
   if (runPaneMode !== 'qa' && runPaneMode !== 'running') return;
 
   try {
-    const r = await fetch('/api/qa');
+    const r = await fetchApi('/api/qa');
     const d = await r.json();
 
-    // If a live question exists and we're not in qa mode yet, switch into it.
-    // Do NOT use history.length here — history persists after interview_complete,
-    // which would cause running→qa→running oscillation on every poll.
     if (d.question && !d.interview_complete && runPaneMode === 'running') {
       setRunMode('qa');
     }
 
-    // Rebuild history messages if history changed (covers resume case)
     const hist = d.history || [];
     if (hist.length !== qaHistory.length) {
       qaHistory = hist;
@@ -1820,7 +1936,6 @@ async function pollQa() {
     }
 
     if (d.interview_complete) {
-      // Remove thinking indicator, show completion
       removeThinking();
       if (runPaneMode === 'qa') {
         appendAgentBubble('Profile complete. Running pipeline…');
@@ -1836,7 +1951,6 @@ async function pollQa() {
       currentQaId = d.question.id;
       renderQuestion(d.question);
     } else if (!d.question && currentQaId) {
-      // Waiting for next question
       ensureThinking();
     }
   } catch(e) {}
@@ -1948,7 +2062,6 @@ function renderQuestion(q) {
 }
 
 async function submitAnswer(qid, answer, questionEl) {
-  // Disable options
   questionEl.querySelectorAll('.chat-opt').forEach(b => {
     b.disabled = true;
     if (b.textContent === answer) b.classList.add('chosen');
@@ -1956,7 +2069,6 @@ async function submitAnswer(qid, answer, questionEl) {
   $('chat-input').value = '';
   $('chat-input-area').style.display = 'none';
 
-  // User bubble
   const area = $('chat-messages');
   const userEl = document.createElement('div');
   userEl.className = 'chat-msg user-msg';
@@ -1970,11 +2082,21 @@ async function submitAnswer(qid, answer, questionEl) {
   ensureThinking();
   currentQaId = null;
 
-  await fetch('/api/qa/answer', {
+  await fetchApi('/api/qa/answer', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({id: qid, answer}),
   });
+
+  if (!_pipelineRunning) {
+    try {
+      await fetchApi('/api/run', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ resume: true })
+      });
+    } catch(e) {}
+  }
 }
 
 function appendAgentBubble(text) {
@@ -2043,7 +2165,8 @@ def _find_active_state_dir(runs_dir: Path) -> "Path | None":
 def _load_state(state_dir: Path) -> dict:
     result: dict = {"stages": {}, "domains": [], "run_id": "", "summary": "",
                     "pipeline_running": _pipeline_is_running(state_dir),
-                    "state_dir": str(state_dir)}
+                    "state_dir": str(state_dir),
+                    "depth": "standard", "auto_taxonomy": False, "no_pdf": False}
 
     pipeline_path = state_dir / "pipeline.json"
     if pipeline_path.exists():
@@ -2052,6 +2175,9 @@ def _load_state(state_dir: Path) -> dict:
             result["stages"] = data.get("stages", {})
             result["run_id"] = data.get("run_id", "")
             result["input_path"] = data.get("input_path", "") or data.get("input", "")
+            result["depth"] = data.get("depth", "standard")
+            result["auto_taxonomy"] = data.get("auto_taxonomy", False)
+            result["no_pdf"] = data.get("no_pdf", False)
         except Exception:
             pass
 
@@ -2411,14 +2537,29 @@ def _render_section(section_path: Path) -> str:
 
 
 
+def _is_path_inside_cwd(path: Path | str) -> bool:
+    cwd = Path.cwd().resolve()
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except Exception:
+        return False
+    return resolved == cwd or cwd in resolved.parents
+
+
 def _list_files(dir_param: str) -> dict:
     """Return directory listing for the file browser."""
     try:
         target = Path(dir_param).expanduser().resolve()
     except Exception:
         target = Path.cwd()
+
+    if not _is_path_inside_cwd(target):
+        target = Path.cwd()
+
     if not target.is_dir():
         target = target.parent if target.parent.is_dir() else Path.cwd()
+        if not _is_path_inside_cwd(target):
+            target = Path.cwd()
 
     entries = []
     try:
@@ -2438,28 +2579,274 @@ def _list_files(dir_param: str) -> dict:
     except PermissionError:
         pass
 
-    parent = str(target.parent) if target != target.parent else None
+    parent = str(target.parent) if (target != target.parent and _is_path_inside_cwd(target.parent)) else None
     return {"cwd": str(target), "parent": parent, "entries": entries}
 
 
-def _spawn_pipeline(runs_dir: Path, params: dict) -> int:
+def _resolve_state_dir(runs_dir: Path, run_id: str | None) -> Path:
+    if run_id:
+        return runs_dir / run_id / "state"
+    return _find_active_state_dir(runs_dir) or (runs_dir / "_default" / "state")
+
+
+def init_db(db_path: Path):
+    import sqlite3
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS runs (
+            run_id TEXT PRIMARY KEY,
+            input_path TEXT,
+            depth TEXT,
+            status TEXT,
+            created_at REAL,
+            updated_at REAL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def sync_db(runs_dir: Path):
+    import sqlite3
+    import json
+    db_path = runs_dir / "runs.db"
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    if not runs_dir.exists():
+        conn.close()
+        return
+        
+    for run_dir in runs_dir.iterdir():
+        if not run_dir.is_dir() or run_dir.name.startswith("_") or run_dir.name == "runs.db":
+            continue
+        state_dir = run_dir / "state"
+        if not state_dir.is_dir():
+            continue
+            
+        run_id = run_dir.name
+        
+        # Load state of this run
+        pipeline_path = state_dir / "pipeline.json"
+        input_path = ""
+        depth = "standard"
+        created_at = run_dir.stat().st_ctime
+        
+        if pipeline_path.exists():
+            try:
+                data = json.loads(pipeline_path.read_text())
+                input_path = data.get("input_path", "") or data.get("input", "")
+                depth = data.get("depth", "standard")
+            except Exception:
+                pass
+                
+        # Determine status
+        running = _pipeline_is_running(state_dir)
+        
+        stage10_done = False
+        if pipeline_path.exists():
+            try:
+                pj = json.loads(pipeline_path.read_text())
+                stage10_done = pj.get("stages", {}).get("10", {}).get("status") == "complete"
+            except Exception:
+                pass
+                
+        if stage10_done:
+            status = "complete"
+        elif running:
+            status = "running"
+        else:
+            qa_state = _get_qa_state(state_dir)
+            has_qa = qa_state.get("question") is not None
+            tax_review_path = state_dir / "taxonomy_review.json"
+            tax_choice_path = state_dir / "taxonomy_choice.json"
+            has_tax = tax_review_path.exists() and not tax_choice_path.exists()
+            
+            if has_qa or has_tax:
+                status = "paused"
+            else:
+                ef = state_dir.parent / "logs" / "events.jsonl"
+                last_event = None
+                if ef.exists():
+                    try:
+                        lines = ef.read_text(errors="replace").splitlines()
+                        if lines:
+                            last_event = json.loads(lines[-1])
+                    except Exception:
+                        pass
+                if last_event and last_event.get("event") == "run_complete":
+                    status = "complete"
+                elif last_event and last_event.get("event") == "pipeline_paused":
+                    status = "paused"
+                else:
+                    status = "failed"
+                    
+        cursor.execute("""
+            INSERT INTO runs (run_id, input_path, depth, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                input_path=excluded.input_path,
+                depth=excluded.depth,
+                status=excluded.status,
+                updated_at=excluded.updated_at
+        """, (run_id, input_path, depth, status, created_at, time.time()))
+        
+    # Clean up entries in DB that no longer exist on disk
+    cursor.execute("SELECT run_id FROM runs")
+    db_run_ids = [r[0] for r in cursor.fetchall()]
+    for rid in db_run_ids:
+        if not (runs_dir / rid).is_dir():
+            cursor.execute("DELETE FROM runs WHERE run_id = ?", (rid,))
+            
+    conn.commit()
+    conn.close()
+
+
+def get_all_runs(runs_dir: Path) -> list[dict]:
+    import sqlite3
+    import json
+    db_path = runs_dir / "runs.db"
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT run_id, input_path, depth, status, created_at, updated_at FROM runs ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    
+    runs = []
+    updated_rows = []
+    
+    for row in rows:
+        run_id, input_path, depth, status, created_at, updated_at = row
+        state_dir = runs_dir / run_id / "state"
+        
+        current_status = status
+        if state_dir.is_dir():
+            running = _pipeline_is_running(state_dir)
+            if running:
+                current_status = "running"
+            elif status == "running":
+                # Stopped running, let's find out what status it should have
+                stage10_done = False
+                pipeline_json_path = state_dir / "pipeline.json"
+                if pipeline_json_path.exists():
+                     try:
+                         pj = json.loads(pipeline_json_path.read_text())
+                         stage10_done = pj.get("stages", {}).get("10", {}).get("status") == "complete"
+                     except Exception:
+                         pass
+                
+                if stage10_done:
+                    current_status = "complete"
+                else:
+                    qa_state = _get_qa_state(state_dir)
+                    has_qa = qa_state.get("question") is not None
+                    tax_review_path = state_dir / "taxonomy_review.json"
+                    tax_choice_path = state_dir / "taxonomy_choice.json"
+                    has_tax = tax_review_path.exists() and not tax_choice_path.exists()
+                    if has_qa or has_tax:
+                        current_status = "paused"
+                    else:
+                        ef = state_dir.parent / "logs" / "events.jsonl"
+                        last_event = None
+                        if ef.exists():
+                            try:
+                                lines = ef.read_text(errors="replace").splitlines()
+                                if lines:
+                                    last_event = json.loads(lines[-1])
+                            except Exception:
+                                pass
+                        if last_event and last_event.get("event") == "run_complete":
+                            current_status = "complete"
+                        elif last_event and last_event.get("event") == "pipeline_paused":
+                            current_status = "paused"
+                        else:
+                            current_status = "failed"
+                
+                updated_rows.append((current_status, run_id))
+        else:
+            current_status = "deleted"
+            
+        runs.append({
+            "run_id": run_id,
+            "input_path": input_path,
+            "depth": depth,
+            "status": current_status,
+            "created_at": created_at,
+            "updated_at": updated_at
+        })
+        
+    for new_status, rid in updated_rows:
+        cursor.execute("UPDATE runs SET status = ?, updated_at = ? WHERE run_id = ?", (new_status, time.time(), rid))
+        
+    conn.commit()
+    conn.close()
+    
+    return [r for r in runs if r["status"] != "deleted"]
+
+
+def save_or_update_run(runs_dir: Path, run_id: str, input_path: str, depth: str, status: str):
+    import sqlite3
+    db_path = runs_dir / "runs.db"
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    now = time.time()
+    cursor.execute("""
+        INSERT INTO runs (run_id, input_path, depth, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id) DO UPDATE SET
+            input_path=excluded.input_path,
+            depth=excluded.depth,
+            status=excluded.status,
+            updated_at=excluded.updated_at
+    """, (run_id, input_path, depth, status, now, now))
+    conn.commit()
+    conn.close()
+
+
+def update_run_status_only(runs_dir: Path, run_id: str, status: str):
+    import sqlite3
+    db_path = runs_dir / "runs.db"
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE runs SET status = ?, updated_at = ? WHERE run_id = ?", (status, time.time(), run_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_run_db(runs_dir: Path, run_id: str):
+    import sqlite3
+    db_path = runs_dir / "runs.db"
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+    conn.commit()
+    conn.close()
+
+
+def _spawn_pipeline(runs_dir: Path, params: dict, target_run_id: str | None = None) -> int:
     """Determine run_id, create run dir tree, clear Q&A state, spawn pipeline subprocess, return PID."""
     from know_expand.state import new_run_id as _new_run_id
 
     is_resume = params.get("resume", False)
 
     if is_resume:
-        # Reuse the run directory from the currently active run.
-        # Always use the directory name (UUID) as run_id — the run_id stored
-        # inside pipeline.json can differ (e.g. "run_4ed94c55" vs the UUID dir
-        # "85af6a8b-…"), and the CLI uses --run-id to construct the state path.
-        active_state = _find_active_state_dir(runs_dir)
-        if active_state is not None:
-            run_id = active_state.parent.name  # directory name is the canonical id
-            state_dir = active_state
-        else:
-            run_id = _new_run_id()
+        if target_run_id:
+            run_id = target_run_id
             state_dir = runs_dir / run_id / "state"
+        else:
+            active_state = _find_active_state_dir(runs_dir)
+            if active_state is not None:
+                run_id = active_state.parent.name  # directory name is the canonical id
+                state_dir = active_state
+            else:
+                run_id = _new_run_id()
+                state_dir = runs_dir / run_id / "state"
     else:
         run_id = _new_run_id()
         state_dir = runs_dir / run_id / "state"
@@ -2504,6 +2891,11 @@ def _spawn_pipeline(runs_dir: Path, params: dict) -> int:
             except Exception:
                 pass
 
+    if input_path:
+        if not (input_path.startswith("http://") or input_path.startswith("https://")):
+            if not _is_path_inside_cwd(input_path):
+                raise ValueError("Access denied: Input path must be within the workspace directory.")
+
     depth = params.get("depth", "standard")
     auto_taxonomy = params.get("auto_taxonomy", False)
     no_pdf = params.get("no_pdf", False)
@@ -2527,57 +2919,11 @@ def _spawn_pipeline(runs_dir: Path, params: dict) -> int:
         preexec_fn=lambda: _sig.signal(_sig.SIGCHLD, _sig.SIG_DFL),
     )
     (state_dir / "pipeline_pid").write_text(str(proc.pid))
+    
+    # Save/update run in database
+    save_or_update_run(runs_dir, run_id, input_path, depth, "running")
+    
     return proc.pid
-
-
-def _get_qa_state(state_dir: Path) -> dict:
-    """Return current Q&A state: current question, history, completion flag."""
-    complete_flag = state_dir / "qa_complete"
-    queue_file = state_dir / "qa_queue.jsonl"
-    answers_file = state_dir / "qa_answers.jsonl"
-
-    def _read_jsonl(path: Path) -> list[dict]:
-        if not path.exists():
-            return []
-        out = []
-        for line in path.read_text(errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-        return out
-
-    questions = _read_jsonl(queue_file)
-    answers = _read_jsonl(answers_file)
-    answered_ids = {a["id"]: a["answer"] for a in answers}
-
-    history = []
-    for q in questions:
-        qid = q.get("id", "")
-        if qid in answered_ids:
-            history.append({"question": q.get("text", ""), "answer": answered_ids[qid]})
-
-    if complete_flag.exists():
-        return {"question": None, "interview_complete": True, "history": history}
-
-    first_unanswered = None
-    for q in questions:
-        if q.get("id", "") not in answered_ids:
-            first_unanswered = q
-            break
-
-    return {"question": first_unanswered, "interview_complete": False, "history": history}
-
-
-def _post_answer(state_dir: Path, qid: str, answer: str) -> None:
-    """Append an answer to qa_answers.jsonl."""
-    answers_file = state_dir / "qa_answers.jsonl"
-    record = json.dumps({"id": qid, "answer": answer, "ts": time.time()})
-    with answers_file.open("a") as f:
-        f.write(record + "\n")
 
 
 def cmd_serve(runs_dir: Path, port: int = 7842) -> None:
@@ -2588,181 +2934,198 @@ def cmd_serve(runs_dir: Path, port: int = 7842) -> None:
     # Do NOT forward SIGTERM to children — the pipeline survives server restarts.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
-    import hashlib
+    from fastapi import FastAPI, Request, HTTPException, Body, Response
+    from fastapi.responses import HTMLResponse, JSONResponse
+    import uvicorn
 
-    def _etag(data: bytes) -> str:
-        return '"' + hashlib.md5(data).hexdigest() + '"'
+    app = FastAPI(title="Know Expand Dashboard")
 
-    def _json_response(handler, obj: object) -> None:
-        payload = json.dumps(obj, default=str).encode()
-        tag = _etag(payload)
-        if handler.headers.get("If-None-Match", "") == tag:
-            handler.send_response(304)
-            handler.end_headers()
-            return
-        handler.send_response(200)
-        handler.send_header("Content-Type", "application/json; charset=utf-8")
-        handler.send_header("Content-Length", str(len(payload)))
-        handler.send_header("ETag", tag)
-        handler.end_headers()
-        handler.wfile.write(payload)
+    expected_key = os.environ.get("KNOW_EXPAND_API_KEY")
 
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, *a):
-            pass
+    @app.middleware("http")
+    async def api_key_and_csrf_middleware(request: Request, call_next):
+        # 1. API Key Auth check
+        if expected_key and request.url.path.startswith("/api/"):
+            provided_key = request.headers.get("KNOW_EXPAND_API_KEY") or request.headers.get("know-expand-api-key")
+            if provided_key != expected_key:
+                return Response("Unauthorized", status_code=401)
 
-        def do_GET(self):
-            state_dir = _find_active_state_dir(runs_dir) or (runs_dir / "_default" / "state")
+        # 2. CSRF check (only for POST/DELETE/etc.)
+        if request.method in ("POST", "DELETE", "PUT", "PATCH"):
+            host = request.headers.get("host", "")
+            if not (host.startswith("localhost") or host.startswith("127.0.0.1")):
+                return Response("Forbidden: Invalid Host header", status_code=403)
+                
+            origin = request.headers.get("origin")
+            if origin:
+                from urllib.parse import urlparse
+                parsed = urlparse(origin)
+                if not (parsed.netloc.startswith("localhost") or parsed.netloc.startswith("127.0.0.1")):
+                    return Response("Forbidden: Invalid Origin header", status_code=403)
+                    
+            referer = request.headers.get("referer")
+            if referer:
+                from urllib.parse import urlparse
+                parsed = urlparse(referer)
+                if not (parsed.netloc.startswith("localhost") or parsed.netloc.startswith("127.0.0.1")):
+                    return Response("Forbidden: Invalid Referer header", status_code=403)
 
-            if self.path == "/":
-                body = _PAGE.encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+        return await call_next(request)
 
-            elif self.path == "/api/status":
-                _json_response(self, _load_state(state_dir))
+    def make_json_response(request: Request, obj: object):
+        import hashlib
+        payload = json.dumps(obj, default=str).encode("utf-8")
+        etag = '"' + hashlib.md5(payload).hexdigest() + '"'
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+        return Response(content=payload, media_type="application/json; charset=utf-8", headers={"ETag": etag})
 
-            elif self.path == "/api/events":
-                _json_response(self, {"events": _load_events(state_dir)})
+    @app.get("/", response_class=HTMLResponse)
+    def get_index():
+        return _PAGE
 
-            elif self.path.startswith("/api/stage/"):
-                sid = self.path[len("/api/stage/"):].split("?")[0].strip("/")
-                _json_response(self, _load_stage_artifacts(sid, state_dir))
+    @app.get("/api/runs")
+    def list_runs_api():
+        sync_db(runs_dir)
+        return get_all_runs(runs_dir)
 
-            elif self.path.startswith("/api/section/"):
-                sid = self.path[len("/api/section/"):].split("?")[0].strip("/")
-                path = state_dir / "sections" / f"section_{sid}.md"
-                _json_response(self, {"html": _render_section(path)})
-
-            elif self.path == "/api/qa":
-                _json_response(self, _get_qa_state(state_dir))
-
-            elif self.path == "/api/taxonomy":
-                review_path = state_dir / "taxonomy_review.json"
-                if review_path.exists():
-                    try:
-                        _json_response(self, json.loads(review_path.read_text()))
-                    except Exception:
-                        _json_response(self, {})
-                else:
-                    _json_response(self, {})
-
-            elif self.path.startswith("/api/files"):
-                from urllib.parse import urlparse, parse_qs
-                qs = parse_qs(urlparse(self.path).query)
-                dir_param = qs.get("dir", ["."])[0]
-                _json_response(self, _list_files(dir_param))
-
-            elif self.path == "/api/keys":
-                import shutil as _shutil
-                _gcli_ok = bool(
-                    _shutil.which("npx") and
-                    os.path.exists(os.path.expanduser("~/.gemini/oauth_creds.json"))
-                )
-                _json_response(self, {
-                    "geminicli": _gcli_ok,
-                    "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
-                    "openai":    bool(os.environ.get("OPENAI_API_KEY")),
-                    "gemini":    bool(os.environ.get("GEMINI_API_KEY")),
-                    "groq":      bool(os.environ.get("GROQ_API_KEY")),
-                    "mistral":   bool(os.environ.get("MISTRAL_API_KEY")),
-                })
-
-            else:
-                self.send_response(404)
-                self.end_headers()
-
-        def do_POST(self):
-            state_dir = _find_active_state_dir(runs_dir) or (runs_dir / "_default" / "state")
-
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length)
+    @app.post("/api/runs/{run_id}/delete")
+    def delete_run_api(run_id: str):
+        import shutil
+        run_dir = runs_dir / run_id
+        if run_dir.exists():
             try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                data = {}
+                shutil.rmtree(run_dir)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to delete run directory: {str(e)}")
+        delete_run_db(runs_dir, run_id)
+        return {"ok": True}
 
-            if self.path == "/api/run":
-                pid = _spawn_pipeline(runs_dir, data)
-                payload = json.dumps({"ok": True, "pid": pid}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+    @app.get("/api/status")
+    def get_status(request: Request, run_id: str | None = None):
+        state_dir = _resolve_state_dir(runs_dir, run_id)
+        return make_json_response(request, _load_state(state_dir))
 
-            elif self.path == "/api/stop":
-                killed = False
-                pid = None
-                active_sd = _find_active_state_dir(runs_dir)
-                pid_file = (active_sd / "pipeline_pid") if active_sd else (state_dir / "pipeline_pid")
-                if pid_file.exists():
-                    try:
-                        pid = int(pid_file.read_text().strip())
-                        os.killpg(os.getpgid(pid), signal.SIGTERM)
-                        killed = True
-                    except Exception:
-                        pass
-                    try:
-                        pid_file.unlink()
-                    except Exception:
-                        pass
-                payload = json.dumps({"ok": True, "killed": killed}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+    @app.get("/api/events")
+    def get_events(request: Request, run_id: str | None = None):
+        state_dir = _resolve_state_dir(runs_dir, run_id)
+        return make_json_response(request, {"events": _load_events(state_dir)})
 
-            elif self.path.startswith("/api/stage/") and self.path.endswith("/clear"):
-                sid = self.path[len("/api/stage/"):-len("/clear")]
-                pipeline_path = state_dir / "pipeline.json"
-                if sid and pipeline_path.exists():
-                    try:
-                        pipe = json.loads(pipeline_path.read_text())
-                        pipe.setdefault("stages", {}).pop(str(sid), None)
-                        pipeline_path.write_text(json.dumps(pipe, indent=2))
-                    except Exception:
-                        pass
-                payload = json.dumps({"ok": True}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+    @app.get("/api/stage/{stage_id}")
+    def get_stage(request: Request, stage_id: str, run_id: str | None = None):
+        state_dir = _resolve_state_dir(runs_dir, run_id)
+        return make_json_response(request, _load_stage_artifacts(stage_id, state_dir))
 
-            elif self.path == "/api/taxonomy/choice":
-                choice = data.get("choice", "l")
-                choice_path = state_dir / "taxonomy_choice.json"
-                choice_path.write_text(json.dumps({"choice": choice}))
-                payload = json.dumps({"ok": True}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+    @app.get("/api/section/{section_id}")
+    def get_section(request: Request, section_id: str, run_id: str | None = None):
+        state_dir = _resolve_state_dir(runs_dir, run_id)
+        path = state_dir / "sections" / f"section_{section_id}.md"
+        return make_json_response(request, {"html": _render_section(path)})
 
-            elif self.path == "/api/qa/answer":
-                qid = data.get("id", "")
-                answer = data.get("answer", "")
-                _post_answer(state_dir, qid, answer)
-                payload = json.dumps({"ok": True}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+    @app.get("/api/qa")
+    def get_qa(request: Request, run_id: str | None = None):
+        state_dir = _resolve_state_dir(runs_dir, run_id)
+        return make_json_response(request, _get_qa_state(state_dir))
 
-            else:
-                self.send_response(404)
-                self.end_headers()
+    @app.get("/api/taxonomy")
+    def get_taxonomy(request: Request, run_id: str | None = None):
+        state_dir = _resolve_state_dir(runs_dir, run_id)
+        review_path = state_dir / "taxonomy_review.json"
+        if review_path.exists():
+            try:
+                val = json.loads(review_path.read_text())
+            except Exception:
+                val = {}
+        else:
+            val = {}
+        return make_json_response(request, val)
 
-    server = http.server.HTTPServer(("127.0.0.1", port), Handler)
+    @app.get("/api/files")
+    def get_files(request: Request, dir: str = "."):
+        return make_json_response(request, _list_files(dir))
+
+    @app.get("/api/keys")
+    def get_keys(request: Request):
+        import shutil as _shutil
+        _gcli_ok = bool(
+            _shutil.which("npx") and
+            os.path.exists(os.path.expanduser("~/.gemini/oauth_creds.json"))
+        )
+        return make_json_response(request, {
+            "geminicli": _gcli_ok,
+            "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "openai":    bool(os.environ.get("OPENAI_API_KEY")),
+            "gemini":    bool(os.environ.get("GEMINI_API_KEY")),
+            "groq":      bool(os.environ.get("GROQ_API_KEY")),
+            "mistral":   bool(os.environ.get("MISTRAL_API_KEY")),
+        })
+
+    @app.post("/api/run")
+    def run_pipeline_api(request: Request, data: dict = Body(default={}), run_id: str | None = None):
+        try:
+            pid = _spawn_pipeline(runs_dir, data, target_run_id=run_id)
+            return {"ok": True, "pid": pid}
+        except ValueError as e:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
+
+    @app.post("/api/stop")
+    def stop_pipeline_api(request: Request, run_id: str | None = None):
+        killed = False
+        target_state_dir = _resolve_state_dir(runs_dir, run_id)
+        pid_file = target_state_dir / "pipeline_pid"
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+                killed = True
+                actual_run_id = target_state_dir.parent.name
+                update_run_status_only(runs_dir, actual_run_id, "failed")
+            except Exception:
+                pass
+            try:
+                pid_file.unlink()
+            except Exception:
+                pass
+        return {"ok": True, "killed": killed}
+
+    @app.post("/api/stage/{stage_id}/clear")
+    def clear_stage_api(stage_id: str, run_id: str | None = None):
+        state_dir = _resolve_state_dir(runs_dir, run_id)
+        pipeline_path = state_dir / "pipeline.json"
+        if stage_id and pipeline_path.exists():
+            try:
+                pipe = json.loads(pipeline_path.read_text())
+                pipe.setdefault("stages", {}).pop(str(stage_id), None)
+                pipeline_path.write_text(json.dumps(pipe, indent=2))
+                if not _pipeline_is_running(state_dir):
+                    actual_run_id = state_dir.parent.name
+                    update_run_status_only(runs_dir, actual_run_id, "paused")
+            except Exception:
+                pass
+        return {"ok": True}
+
+    @app.post("/api/taxonomy/choice")
+    def set_taxonomy_choice_api(data: dict = Body(...), run_id: str | None = None):
+        state_dir = _resolve_state_dir(runs_dir, run_id)
+        choice = data.get("choice", "l")
+        choice_path = state_dir / "taxonomy_choice.json"
+        choice_path.write_text(json.dumps({"choice": choice}))
+        return {"ok": True}
+
+    @app.post("/api/qa/answer")
+    def post_qa_answer_api(data: dict = Body(...), run_id: str | None = None):
+        state_dir = _resolve_state_dir(runs_dir, run_id)
+        qid = data.get("id", "")
+        answer = data.get("answer", "")
+        _post_answer(state_dir, qid, answer)
+        return {"ok": True}
+
+    # Ensure DB is created and synchronized on startup
+    sync_db(runs_dir)
+
     print(f"http://localhost:{port}", flush=True)
     try:
-        server.serve_forever()
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
     except KeyboardInterrupt:
         pass
+

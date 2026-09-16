@@ -220,3 +220,28 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Agent & Evaluator State
+.claude/
+.deepeval/
+
+# Security & Credentials
+.env*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
+id_rsa*
+id_ed25519*
+credentials.json
+client_secret*.json
+service_account*.json
+
+# Diffs & Scrap Files
+*.diff
+*.patch
+git_diff.txt
+analyze_diff.py

@@ -165,15 +165,93 @@ async def test_s6_citation_index_contains_all_valid_ids(tmp_path):
 
 @pytest.mark.asyncio
 async def test_s6_idempotent_when_complete(tmp_path):
-    """Stage 6 is skipped if already marked complete."""
+    """Stage 8 is skipped if already marked complete."""
     from know_expand.state import mark_stage_complete
 
     cfg = _make_cfg()
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     (state_dir / "pipeline.json").write_text("{}")
-    mark_stage_complete(state_dir, 6)
+    mark_stage_complete(state_dir, 8)
     state = _make_state(state_dir)
 
     # Should not raise even though audit_dir and sections_dir don't exist
     await s8_verify.run(state, cfg)
+
+
+@pytest.mark.asyncio
+async def test_s8_resolve_bibliography_links():
+    from unittest.mock import MagicMock, AsyncMock
+    from know_expand.stages.s8_verify import resolve_bibliography_links
+    
+    bibliography = [
+        {"id": "url_ok", "URL": "https://example.com/ok"},
+        {"id": "doi_ok", "DOI": "10.1234/5678"},
+    ]
+    
+    with patch("httpx.AsyncClient.head") as mock_head:
+        mock_head.return_value = MagicMock(status_code=200)
+        res = await resolve_bibliography_links(bibliography)
+        assert res["https://example.com/ok"]["resolved"] is True
+        assert res["https://doi.org/10.1234/5678"]["resolved"] is True
+
+
+@pytest.mark.asyncio
+async def test_s8_claims_verification_entailment(tmp_path):
+    from unittest.mock import MagicMock, AsyncMock
+    cfg = _make_cfg()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    audit_dir = state_dir / "audit"
+    audit_dir.mkdir()
+    sections_dir = state_dir / "sections"
+    sections_dir.mkdir()
+
+    # Write bibliography entry with abstract
+    _write_bibliography(audit_dir, "domain_a", [
+        {
+            "id": "smith_2023_title",
+            "title": "Some Paper",
+            "author": [{"family": "Smith"}],
+            "issued": {"date-parts": [[2023]]},
+            "bucket": "foundational",
+            "abstract": "This paper presents a fast converging algorithm.",
+            "URL": "https://example.com/smith"
+        }
+    ])
+
+    (sections_dir / "section_domain_a.md").write_text(
+        "# Domain A\n\nThe algorithm converges quickly [@smith_2023_title].\n"
+    )
+
+    state = _make_state(state_dir)
+    
+    from know_expand.stages.s8_verify import SentenceVerification, ClaimVerification
+    
+    mock_response = SentenceVerification(
+        claims=[
+            ClaimVerification(
+                claim="The algorithm converges quickly",
+                relation="supports",
+                reason="The abstract states it presents a fast converging algorithm."
+            )
+        ]
+    )
+    
+    mock_router = MagicMock()
+    mock_router.call = AsyncMock(return_value=mock_response)
+    
+    with patch("know_expand.stages.s8_verify.make_router", return_value=mock_router), \
+         patch("know_expand.stages.s8_verify.resolve_bibliography_links", return_value={"https://example.com/smith": {"resolved": True, "status_code": 200}}):
+         
+        await s8_verify.run(state, cfg)
+        
+    # Read the verification report
+    report_path = state_dir / "output" / "verification_report.json"
+    assert report_path.exists()
+    
+    report = json.loads(report_path.read_text())
+    assert report["summary"]["total_claims_checked"] == 1
+    assert report["summary"]["supported_claims"] == 1
+    assert report["summary"]["entailment_rate"] == 1.0
+

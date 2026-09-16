@@ -515,7 +515,7 @@ def _narrative_to_markdown(output: ReconcilerOutput) -> str:
     return output.narrative
 
 
-def _compact_narrative(narrative: str, domain_label: str, max_chars: int = 8000) -> str:
+def _compact_narrative(narrative: str, domain_label: str, max_chars: int = 64000) -> str:
     """Trim narrative to max_chars for critic context, preserving structure.
 
     The critic only needs the intro and the most recently revised content; the
@@ -523,9 +523,11 @@ def _compact_narrative(narrative: str, domain_label: str, max_chars: int = 8000)
     """
     if len(narrative) <= max_chars:
         return narrative
-    # Keep first 3000 chars (intro + what-is section) and last 5000 chars (most recent content)
-    head = narrative[:3000]
-    tail = narrative[-5000:]
+    # Keep first half and last half
+    head_size = max_chars // 2
+    tail_size = max_chars - head_size
+    head = narrative[:head_size]
+    tail = narrative[-tail_size:]
     truncated = len(narrative) - max_chars
     return head + f"\n\n[... {truncated} chars truncated ...]\n\n" + tail
 
@@ -658,6 +660,8 @@ async def _research_domain(
 ) -> DomainSummary:
     domain_id = domain["id"]
     domain_label = domain["label"]
+    from know_expand.state import active_domain
+    active_domain.set(domain_id)
     t0 = time.monotonic()
 
     sentinel = sections_dir / f"section_{domain_id}.md.done"
@@ -1006,6 +1010,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
 
     if failed_ids:
         _logger.warning("s5: %d domain(s) failed to produce content: %s", len(failed_ids), ", ".join(failed_ids))
+        raise RuntimeError(f"s5 research failed for domains: {', '.join(failed_ids)}")
 
     mark_stage_complete(state_dir, 5)
     emit({

@@ -95,6 +95,14 @@ class ResearchContextConfig:
 
 
 @dataclass
+class MemoryConfig:
+    provider: str = "qdrant"
+    host: str = "localhost"
+    port: int = 6333
+    collection_name: str = "know_expand_memory"
+
+
+@dataclass
 class Config:
     bibliography: BibliographyConfig
     centrality: CentralityConfig
@@ -111,14 +119,29 @@ class Config:
     llamacpp: LlamaCppConfig = field(default_factory=LlamaCppConfig)
     research_context: ResearchContextConfig = field(default_factory=ResearchContextConfig)
     critic_thinking: CriticThinkingConfig = field(default_factory=CriticThinkingConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
 def load_config(
-    config_path: Path = Path("config.yaml"),
-    models_path: Path = Path("models.yaml"),
+    config_path: Path | None = None,
+    models_path: Path | None = None,
 ) -> Config:
-    raw = yaml.safe_load(config_path.read_text())
-    models_raw = yaml.safe_load(models_path.read_text())
+    if config_path is None:
+        c_p = Path("config.yaml")
+        if not c_p.exists():
+            c_p = Path(__file__).parent / "config.yaml"
+    else:
+        c_p = config_path
+
+    if models_path is None:
+        m_p = Path("models.yaml")
+        if not m_p.exists():
+            m_p = Path(__file__).parent / "models.yaml"
+    else:
+        m_p = models_path
+
+    raw = yaml.safe_load(c_p.read_text())
+    models_raw = yaml.safe_load(m_p.read_text())
 
     def _section(key, cls):
         raw_val = raw.get(key, {})
@@ -143,4 +166,6 @@ def load_config(
         llamacpp=_section("llamacpp", LlamaCppConfig),
         research_context=_section("research_context", ResearchContextConfig),
         critic_thinking=_section("critic_thinking", CriticThinkingConfig),
+        memory=_section("memory", MemoryConfig),
     )
+

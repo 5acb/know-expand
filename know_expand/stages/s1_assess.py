@@ -366,41 +366,7 @@ def _ask_terminal(q: dict) -> str:
         return input("Your answer: ").strip()
 
 
-async def _ask_web(q: dict, state_dir: Path) -> str:
-    """Append question to qa_queue.jsonl; poll qa_answers.jsonl for matching answer.
-
-    Returns the answer string, or "" on timeout (300s).
-    """
-    queue_path = state_dir / "qa_queue.jsonl"
-    answers_path = state_dir / "qa_answers.jsonl"
-
-    # Append question to the queue
-    with queue_path.open("a") as fh:
-        fh.write(json.dumps(q) + "\n")
-
-    # Poll for the answer
-    deadline = time.monotonic() + _WEB_TIMEOUT
-    seen_ids: set[str] = set()
-
-    while time.monotonic() < deadline:
-        await asyncio.sleep(_WEB_POLL_INTERVAL)
-        if not answers_path.exists():
-            continue
-        try:
-            lines = answers_path.read_text().splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ans = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if ans.get("id") == q["id"] and ans["id"] not in seen_ids:
-                return str(ans.get("answer", ""))
-    return ""
+# _ask_web is replaced by LangGraph interrupt()
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +465,15 @@ async def _conduct_interview(
         emit({"event": "stage1_question_asked", "turn": turn, "question": q.text[:120]})
 
         if use_web_ipc:
-            answer = await _ask_web(q_dict, state_dir)
+            queue_path = state_dir / "qa_queue.jsonl"
+            with queue_path.open("a") as fh:
+                fh.write(json.dumps(q_dict) + "\n")
+            from langgraph.types import interrupt
+            answer = interrupt(q_dict)
+            answers_path = state_dir / "qa_answers.jsonl"
+            record = json.dumps({"id": q_dict["id"], "answer": answer, "ts": time.time()})
+            with answers_path.open("a") as f:
+                f.write(record + "\n")
         else:
             answer = _ask_terminal(q_dict)
             if not sys.stdin.isatty() and not answer:
@@ -599,7 +573,15 @@ async def _minimal_fallback_interview(state_dir: Path, use_web_ipc: bool) -> lis
     for q in fallback_questions:
         emit({"event": "stage1_question_asked", "turn": q["turn"], "question": q["text"]})
         if use_web_ipc:
-            answer = await _ask_web(q, state_dir)
+            queue_path = state_dir / "qa_queue.jsonl"
+            with queue_path.open("a") as fh:
+                fh.write(json.dumps(q) + "\n")
+            from langgraph.types import interrupt
+            answer = interrupt(q)
+            answers_path = state_dir / "qa_answers.jsonl"
+            record = json.dumps({"id": q["id"], "answer": answer, "ts": time.time()})
+            with answers_path.open("a") as f:
+                f.write(record + "\n")
         else:
             answer = _ask_terminal(q)
         qa_pairs.append({"question": q["text"], "answer": answer})

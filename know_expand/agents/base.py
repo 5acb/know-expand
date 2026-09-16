@@ -8,7 +8,7 @@ from typing import TypeVar
 
 import httpx
 import litellm
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from know_expand.config import Config
 from know_expand.state import emit
@@ -41,6 +41,8 @@ def _is_llamacpp(model: str) -> bool:
 
 def _geminicli_model_name(model: str) -> str:
     """Return the model name to pass to the CLI binary."""
+    if model.startswith(_GEMINICLI_PREFIX):
+        return model[len(_GEMINICLI_PREFIX):]
     return _GEMINICLI_CLI_MODEL
 
 
@@ -585,6 +587,17 @@ def _make_sanitized_completion():
     return _wrapper
 
 
+def _api_kwargs(cfg: Config) -> dict:
+    kwargs = {}
+    virtual_key = getattr(cfg, "litellm_virtual_key", None)
+    api_base = getattr(cfg, "litellm_api_base", None)
+    if virtual_key:
+        kwargs["api_key"] = virtual_key
+    if api_base:
+        kwargs["api_base"] = api_base
+    return kwargs
+
+
 async def _do_call(
     model: str,
     messages: list[dict],
@@ -607,11 +620,13 @@ async def _do_call(
         "schema": schema.__name__,
         "msg_chars": _msg_chars(messages),
     })
+    extra_kwargs = _api_kwargs(cfg)
     try:
         result, completion = await client.chat.completions.create_with_completion(
             model=model,
             messages=messages,
             response_model=schema,
+            **extra_kwargs
         )
         elapsed = time.monotonic() - t0
         usage = getattr(completion, "usage", None)
@@ -673,12 +688,14 @@ async def _do_call_with_thinking(
         "msg_chars": _msg_chars(messages),
         "thinking_budget": budget,
     })
+    extra_kwargs = _api_kwargs(cfg)
     try:
         result, completion = await client.chat.completions.create_with_completion(
             model=model,
             messages=messages,
             response_model=schema,
             thinking={"type": "enabled", "budget_tokens": budget},
+            **extra_kwargs
         )
         elapsed = time.monotonic() - t0
         usage = getattr(completion, "usage", None)
@@ -712,6 +729,21 @@ async def _do_call_with_thinking(
             "error": str(exc)[:200],
         })
         raise
+
+
+def _parse_retry_after(retry_after: str) -> int:
+    try:
+        return int(retry_after)
+    except ValueError:
+        try:
+            import email.utils
+            import datetime
+            parsed_time = email.utils.parsedate_to_datetime(retry_after)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            delta = int((parsed_time - now).total_seconds())
+            return max(1, delta)
+        except Exception:
+            return 30
 
 
 class QuotaAwareRouter:
@@ -768,7 +800,23 @@ class QuotaAwareRouter:
                     )
                     if retry_after:
                         self._fail_counts.pop(model, None)
-                        await asyncio.sleep(int(retry_after))
+                        sleep_s = min(60, _parse_retry_after(retry_after))
+                        retry_count = self._fail_counts.get(model + "_rate_retry", 0) + 1
+                        self._fail_counts[model + "_rate_retry"] = retry_count
+                        if retry_count > 3:
+                            self._fail_counts.pop(model + "_rate_retry", None)
+                            async with self._lock:
+                                self._skip.add(model)
+                                next_model = self._next_model()
+                            emit({
+                                "event": "model_quota_switch",
+                                "role": self.role,
+                                "exhausted_model": model,
+                                "next_model": next_model,
+                                "reason": "Too many rate limit retries with Retry-After",
+                            })
+                            continue
+                        await asyncio.sleep(sleep_s)
                         continue
                     # Headerless failure: increment counter and backoff before skipping.
                     count = self._fail_counts.get(model, 0) + 1
@@ -796,6 +844,18 @@ class QuotaAwareRouter:
                         "next_model": next_model,
                         "reason": str(transient_err),
                     })
+                elif isinstance(e, ValidationError):
+                    async with self._lock:
+                        self._skip.add(model)
+                        next_model = self._next_model()
+                    emit({
+                        "event": "model_validation_failed",
+                        "role": self.role,
+                        "skipped_model": model,
+                        "next_model": next_model,
+                        "reason": str(e)[:200],
+                    })
+                    continue
                 else:
                     # geminicli errors are always terminal for this run (quota,
                     # session expired, empty output) — skip and try next model.
@@ -863,12 +923,14 @@ class QuotaAwareRouter:
                             tool_choice="auto",
                         )
                 else:
+                    extra_kwargs = _api_kwargs(self.cfg)
                     async with sem:
                         response = await litellm.acompletion(
                             model=model,
                             messages=messages,
                             tools=tools,
                             tool_choice="auto",
+                            **extra_kwargs
                         )
                 msg = response.choices[0].message
                 elapsed = time.monotonic() - t0
@@ -911,7 +973,23 @@ class QuotaAwareRouter:
                     )
                     if retry_after:
                         self._fail_counts.pop(model, None)
-                        await asyncio.sleep(int(retry_after))
+                        sleep_s = min(60, _parse_retry_after(retry_after))
+                        retry_count = self._fail_counts.get(model + "_rate_retry", 0) + 1
+                        self._fail_counts[model + "_rate_retry"] = retry_count
+                        if retry_count > 3:
+                            self._fail_counts.pop(model + "_rate_retry", None)
+                            async with self._lock:
+                                self._skip.add(model)
+                                next_model = self._next_model()
+                            emit({
+                                "event": "model_quota_switch",
+                                "role": self.role,
+                                "exhausted_model": model,
+                                "next_model": next_model,
+                                "reason": "Too many rate limit retries with Retry-After",
+                            })
+                            continue
+                        await asyncio.sleep(sleep_s)
                         continue
                     # Headerless failure: increment counter and backoff before skipping.
                     count = self._fail_counts.get(model, 0) + 1
@@ -931,7 +1009,7 @@ class QuotaAwareRouter:
                     self._fail_counts.pop(model, None)
                     async with self._lock:
                         self._skip.add(model)
-                    next_model = self._next_model()
+                        next_model = self._next_model()
                     emit({
                         "event": "model_quota_switch",
                         "role": self.role,

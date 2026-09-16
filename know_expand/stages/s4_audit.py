@@ -207,6 +207,7 @@ async def _process_domain(
     router,
     http: httpx.AsyncClient,
     domain_nodes: list[dict] | None = None,
+    no_bibliography_fetch: bool = False,
 ) -> GapAnalysisResult:
     domain_id = domain["id"]
     domain_label = domain["label"]
@@ -228,36 +229,39 @@ async def _process_domain(
     sources_cache = sources_dir / f"sources_{domain_id}.json"
 
     if not sources_cache.exists():
-        try:
-            from know_expand.sources import fetch_sources_for_terms  # noqa: PLC0415
-            # Only fetch core + supporting terms, not incidental
-            nodes_for_fetch = domain_nodes or []
-            terms_to_fetch = [
-                (n["name"], term_type_map.get(n["name"], "academic"))
-                for n in nodes_for_fetch
-                if n.get("centrality") in ("core", "supporting")
-            ]
-            # Fallback: if no node dicts available, use all graph_terms as academic
-            if not terms_to_fetch and graph_terms:
+        if no_bibliography_fetch:
+            sources_cache.write_text(json.dumps({}, indent=2))
+        else:
+            try:
+                from know_expand.sources import fetch_sources_for_terms  # noqa: PLC0415
+                # Only fetch core + supporting terms, not incidental
+                nodes_for_fetch = domain_nodes or []
                 terms_to_fetch = [
-                    (name, term_type_map.get(name, "academic")) for name in graph_terms
+                    (n["name"], term_type_map.get(n["name"], "academic"))
+                    for n in nodes_for_fetch
+                    if n.get("centrality") in ("core", "supporting")
                 ]
-            if terms_to_fetch:
-                emit({
-                    "event": "s4_sources_fetch_start",
-                    "domain_id": domain_id,
-                    "term_count": len(terms_to_fetch),
-                })
-                fetched = await fetch_sources_for_terms(terms_to_fetch, http, concurrency=4, domain_label=domain_label)
-                raw_dump = {k: [s.model_dump() for s in v] for k, v in fetched.items()}
-                sources_cache.write_text(json.dumps(raw_dump, indent=2))
-                emit({
-                    "event": "s4_sources_fetch_done",
-                    "domain_id": domain_id,
-                    "terms_with_sources": len(fetched),
-                })
-        except Exception as exc:
-            _logger.warning("s4 sources fetch failed for domain %r: %s", domain_id, exc)
+                # Fallback: if no node dicts available, use all graph_terms as academic
+                if not terms_to_fetch and graph_terms:
+                    terms_to_fetch = [
+                        (name, term_type_map.get(name, "academic")) for name in graph_terms
+                    ]
+                if terms_to_fetch:
+                    emit({
+                        "event": "s4_sources_fetch_start",
+                        "domain_id": domain_id,
+                        "term_count": len(terms_to_fetch),
+                    })
+                    fetched = await fetch_sources_for_terms(terms_to_fetch, http, concurrency=4, domain_label=domain_label)
+                    raw_dump = {k: [s.model_dump() for s in v] for k, v in fetched.items()}
+                    sources_cache.write_text(json.dumps(raw_dump, indent=2))
+                    emit({
+                        "event": "s4_sources_fetch_done",
+                        "domain_id": domain_id,
+                        "terms_with_sources": len(fetched),
+                    })
+            except Exception as exc:
+                _logger.warning("s4 sources fetch failed for domain %r: %s", domain_id, exc)
 
     bib_path = audit_dir / f"bibliography_{domain_id}.json"
     if bib_path.exists() and bib_path.stat().st_size > 0:
@@ -281,38 +285,50 @@ async def _process_domain(
         "term_count": len(graph_terms),
     })
 
-    emit({"event": "domain_fetch_start", "domain_id": domain_id, "depth": depth})
-    (anchors_list, anchor_ss_ids), bibliography = await asyncio.gather(
-        fetch_anchors(domain_label, http, cfg),
-        fetch_bibliography(domain_label, depth, cfg, http),
-    )
-    neighbor_papers = await fetch_anchor_neighbors(anchor_ss_ids, bibliography, http, cfg)
-    if neighbor_papers:
-        bibliography = bibliography + neighbor_papers
-    emit({
-        "event": "domain_fetch_done",
-        "domain_id": domain_id,
-        "elapsed_s": round(time.monotonic() - t0, 2),
-        "neighbor_count": len(neighbor_papers),
-    })
+    if no_bibliography_fetch:
+        emit({
+            "event": "bibliography_fetch_skipped",
+            "domain_id": domain_id,
+            "reason": "no_bibliography_fetch_flag",
+        })
+        anchors_dicts = []
+        bibliography = []
+        anchors_path = audit_dir / f"anchors_{domain_id}.json"
+        anchors_path.write_text(json.dumps([], indent=2))
+        bib_path.write_text(json.dumps([], indent=2))
+    else:
+        emit({"event": "domain_fetch_start", "domain_id": domain_id, "depth": depth})
+        (anchors_list, anchor_ss_ids), bibliography = await asyncio.gather(
+            fetch_anchors(domain_label, http, cfg),
+            fetch_bibliography(domain_label, depth, cfg, http),
+        )
+        neighbor_papers = await fetch_anchor_neighbors(anchor_ss_ids, bibliography, http, cfg)
+        if neighbor_papers:
+            bibliography = bibliography + neighbor_papers
+        emit({
+            "event": "domain_fetch_done",
+            "domain_id": domain_id,
+            "elapsed_s": round(time.monotonic() - t0, 2),
+            "neighbor_count": len(neighbor_papers),
+        })
 
-    anchors_dicts = [a.model_dump() for a in anchors_list]
-    anchors_path = audit_dir / f"anchors_{domain_id}.json"
-    anchors_path.write_text(json.dumps(anchors_dicts, indent=2))
-    emit({
-        "event": "anchors_fetched",
-        "domain_id": domain_id,
-        "anchor_count": len(anchors_dicts),
-        "artifact": str(anchors_path),
-    })
+        anchors_dicts = [a.model_dump() for a in anchors_list]
+        anchors_path = audit_dir / f"anchors_{domain_id}.json"
+        anchors_path.write_text(json.dumps(anchors_dicts, indent=2))
+        emit({
+            "event": "anchors_fetched",
+            "domain_id": domain_id,
+            "anchor_count": len(anchors_dicts),
+            "artifact": str(anchors_path),
+        })
 
-    bib_path.write_text(json.dumps([b.model_dump() for b in bibliography], indent=2))
-    emit({
-        "event": "bibliography_fetched",
-        "domain_id": domain_id,
-        "entry_count": len(bibliography),
-        "artifact": str(bib_path),
-    })
+        bib_path.write_text(json.dumps([b.model_dump() for b in bibliography], indent=2))
+        emit({
+            "event": "bibliography_fetched",
+            "domain_id": domain_id,
+            "entry_count": len(bibliography),
+            "artifact": str(bib_path),
+        })
 
     gap_result = await _run_gap_loop(
         domain_id, domain_label, graph_terms, anchors_dicts, router,
@@ -414,6 +430,8 @@ async def run(state: PipelineState, cfg: Config) -> None:
         # request queue shallow and avoids the retry thundering-herd.
         for domain in domains:
             domain_id = domain["id"]
+            from know_expand.state import active_domain
+            active_domain.set(domain_id)
             domain_node_list = [n for n in nodes if n.get("domain") == domain_id]
             graph_terms = [n["name"] for n in domain_node_list]
             gap_candidates = [
@@ -425,6 +443,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
                 result = await _process_domain(
                     domain, all_terms, audit_dir, depth, cfg, router, http,
                     domain_nodes=domain_node_list,
+                    no_bibliography_fetch=state.get("no_bibliography_fetch", False),
                 )
                 gap_results.append(result)
             except Exception as exc:
@@ -451,6 +470,21 @@ async def run(state: PipelineState, cfg: Config) -> None:
     total_ambiguous = sum(
         sum(1 for g in r.gaps if g.verdict == "ambiguous") for r in gap_results
     )
+
+    # Merge and write bibliography.json so downstream stages have it
+    try:
+        from know_expand.stages.s10_assemble import _merge_bibliographies
+        merged_bib = _merge_bibliographies(audit_dir)
+        bib_path = state_dir / "bibliography.json"
+        from know_expand.state import atomic_write
+        atomic_write(bib_path, json.dumps(merged_bib, indent=2))
+        emit({
+            "event": "s4_bibliography_merged",
+            "entry_count": len(merged_bib),
+            "artifact": str(bib_path),
+        })
+    except Exception as exc:
+        _logger.warning("Failed to merge bibliographies in S4: %s", exc)
 
     mark_stage_complete(state_dir, 4)
     emit({
