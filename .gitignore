@@ -245,3 +245,4 @@ service_account*.json
 *.patch
 git_diff.txt
 analyze_diff.py
+.DS_Store
