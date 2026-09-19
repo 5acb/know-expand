@@ -327,3 +327,37 @@ class AssemblyManifest(BaseModel):
     total_words: int
     output_md: str
     output_pdf: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Stage 7b (quality_eval) — Structured-output models
+#
+# Terminal agent-as-judge scoring pass, adapted from the Quality Evaluator in
+# "Agentic AutoSurvey: Let LLMs Survey LLMs" (arXiv 2509.18661). Fixed named
+# fields (not a free-form list of dimensions) so structured-output models
+# can't drift on dimension names between calls. Never gates the pipeline —
+# see s7b_quality_eval.py.
+# ---------------------------------------------------------------------------
+
+class QualityDimensionScore(BaseModel):
+    score: float          # 0-10 scale
+    justification: str    # 1-3 sentence textual justification
+
+
+class QualityEvaluation(BaseModel):
+    # Core Quality — 60% of weighted_total, 10% per dimension
+    citation_coverage: QualityDimensionScore
+    citation_accuracy: QualityDimensionScore
+    factual_accuracy: QualityDimensionScore
+    synthesis_vs_enumeration: QualityDimensionScore
+    structural_organization: QualityDimensionScore
+    taxonomy_coherence: QualityDimensionScore
+    # Writing Quality — 20% of weighted_total, 10% per dimension
+    readability_at_depth: QualityDimensionScore
+    terminology_consistency: QualityDimensionScore
+    # Content Depth — 20% of weighted_total, 5% per dimension
+    comprehensiveness: QualityDimensionScore
+    critical_analysis: QualityDimensionScore
+    frontier_novelty: QualityDimensionScore
+    where_to_go_next_quality: QualityDimensionScore
+    overall_notes: str = ""   # free-form read-through + check summary

@@ -136,10 +136,10 @@ def cmd_tail(run_id: str | None, runs_dir: Path) -> None:
 _STAGE_META = {
     "0": "Ingest", "1": "Assess", "2": "Extract", "3": "Graph",
     "4": "Audit", "5": "Research", "6": "Align", "7": "Synthesize",
-    "8": "Verify", "9": "Prereq", "10": "Assemble",
+    "7b": "Quality Eval", "8": "Verify", "9": "Prereq", "10": "Assemble",
 }
 
-_STAGE_ORDER = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+_STAGE_ORDER = ["0", "1", "2", "3", "4", "5", "6", "7", "7b", "8", "9", "10"]
 
 _PAGE = r"""<!doctype html>
 <html lang="en">
@@ -991,10 +991,10 @@ function toggleDrawer() {
 function ensureDrawerOpen() {
   if (!$('run-pane').classList.contains('open')) openDrawer();
 }
-const STAGE_ORDER = ['0','1','2','3','4','5','6','7','8','9','10'];
+const STAGE_ORDER = ['0','1','2','3','4','5','6','7','7b','8','9','10'];
 const STAGE_NAMES = {
   '0':'Ingest','1':'Assess','2':'Extract','3':'Graph','4':'Audit',
-  '5':'Research','6':'Align','7':'Synthesize','8':'Verify','9':'Prereq','10':'Assemble'
+  '5':'Research','6':'Align','7':'Synthesize','7b':'Quality Eval','8':'Verify','9':'Prereq','10':'Assemble'
 };
 
 let allEvents = [];
@@ -1588,7 +1588,7 @@ setInterval(poll, 2000);
 
 const STAGE_NAMES_SHORT = {
   '0':'Ingest','1':'Assess','2':'Extract','3':'Graph','4':'Audit',
-  '5':'Research','6':'Align','7':'Synth','8':'Verify','9':'Prereq','10':'Assemble'
+  '5':'Research','6':'Align','7':'Synth','7b':'QEval','8':'Verify','9':'Prereq','10':'Assemble'
 };
 
 let _resumeInputPath = '';   // set by updateResumeCard from prior run's input_path
@@ -1780,10 +1780,9 @@ function toggleMkPanel() {
 }
 
 const PROV_META = [
-  { id: 'geminicli', label: 'Gemini CLI',  note: 'oauth' },
   { id: 'gemini',    label: 'Gemini API'  },
-  { id: 'groq',      label: 'Groq'        },
-  { id: 'mistral',   label: 'Mistral'     },
+  { id: 'deepinfra', label: 'DeepInfra'   },
+  { id: 'nvidia_nim', label: 'NVIDIA NIM' },
   { id: 'anthropic', label: 'Anthropic'   },
   { id: 'openai',    label: 'OpenAI'      },
 ];
@@ -3046,18 +3045,12 @@ def cmd_serve(runs_dir: Path, port: int = 7842) -> None:
 
     @app.get("/api/keys")
     def get_keys(request: Request):
-        import shutil as _shutil
-        _gcli_ok = bool(
-            _shutil.which("npx") and
-            os.path.exists(os.path.expanduser("~/.gemini/oauth_creds.json"))
-        )
         return make_json_response(request, {
-            "geminicli": _gcli_ok,
-            "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
-            "openai":    bool(os.environ.get("OPENAI_API_KEY")),
-            "gemini":    bool(os.environ.get("GEMINI_API_KEY")),
-            "groq":      bool(os.environ.get("GROQ_API_KEY")),
-            "mistral":   bool(os.environ.get("MISTRAL_API_KEY")),
+            "anthropic":  bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "openai":     bool(os.environ.get("OPENAI_API_KEY")),
+            "gemini":     bool(os.environ.get("GEMINI_API_KEY")),
+            "deepinfra":  bool(os.environ.get("DEEPINFRA_API_KEY")),
+            "nvidia_nim": bool(os.environ.get("NVIDIA_API_KEY")),
         })
 
     @app.post("/api/run")

@@ -16,7 +16,9 @@ Each run creates `runs/{run_id}/` containing `state/`, `logs/`, `output/`.
 
 ## Pipeline stages
 
-**Stage order:** `ingest → extract → assess → graph → audit → research → align → synthesize → verify → prereq → assemble`
+**Stage order:** `ingest → extract → assess → graph → audit → research → align → synthesize → quality_eval → prereq → verify → assemble`
+
+Note the runtime order is `prereq` before `verify` (not `verify` before `prereq` as the pipeline-stage numbers S8/S9 might suggest) — this was already true before the quality-eval stage was added; `quality_eval` slots in right after `synthesize`, ahead of both.
 
 S2 Extract runs before S1 Assess so the interview presents real extracted terms instead of LLM guesses.
 
@@ -26,11 +28,12 @@ S2 Extract runs before S1 Assess so the interview presents real extracted terms 
 | S2 Extract | `s2_extract.py` | 3-signal extraction (spaCy + KeyBERT/BGE-M3 + LLM); Union-Find alias dedup; centrality scoring; **LLM batch classification into `academic` / `tool_library` / `concept`** |
 | S1 Assess | `s1_assess.py` | LLM-driven 10–15 turn interview using extracted core terms → `UserProfile`; web IPC (`qa_queue.jsonl` / `qa_answers.jsonl` / `qa_complete`) or TTY |
 | S3 Graph | `s3_graph.py` | Lumper/Splitter taxonomy proposals, OpenAlex validation, human web review or `--auto-taxonomy`, term → domain assignment → `graph.json` |
-| S4 Audit | `s4_audit.py` | SS anchor papers + bibliography (65% foundational / 35% frontier); adversarial Gap Finder → Defender → Rebuttal loop; **multi-source fetch (Wikipedia/PyPI/arXiv) cached at `audit/sources/sources_{domain_id}.json`** |
+| S4 Audit | `s4_audit.py`, `s4_tools.py` | SS anchor papers + bibliography (65% foundational / 35% frontier); adversarial Gap Finder → Defender → Rebuttal loop, with Finder/Defender each running a live-tool ReAct grounding pass (`_run_react_grounding`, built on `call_with_tools`) before their structured verdict — Finder checks candidate gaps via `check_recent_coverage` (SS/arXiv), Defender checks claimed rebrands via `check_graph_synonym` (graph-term similarity + Wikipedia); falls back to the ungrounded prompt in `--no-bibliography-fetch` mode or on tool/model failure; **multi-source fetch (Wikipedia/PyPI/arXiv) cached at `audit/sources/sources_{domain_id}.json`** |
 | S5 Research | `s5_research.py` | Three-persona parallel research (Theoretician / Engineer / Practitioner) + Reconciler; adversarial critic loop; full pedagogical protocol; knowledge_sources injected into all prompts |
 | S6 Align | `s6_align.py` | Pedagogical alignment pass: inject symbol tables, worked examples, where-to-go-next, resolve `[NEEDS_CITATION]` |
 | S7 Synthesize | `s7_synthesize.py` | Cross-domain synthesis, connector bridges, boss nodes; reads ONLY `graph.json` + `summary_*.json` |
-| S8 Verify | `s8_verify.py` | Citation audit, fact-check; `[NEEDS_CITATION]` logged, not a build failure |
+| S7b Quality Eval | `s7b_quality_eval.py` | Terminal agent-as-judge scoring pass (12-dimension rubric, 3 weighted categories, adapted from arXiv 2509.18661); scores are logged to `audit/quality_eval*.json`/`.md`, never gates or triggers revision |
+| S8 Verify | `s8_verify.py` | Structural citation audit + two-check claim verification: live abstract fetch (`fetch_paper_abstract`) when the cached one is missing, then a debiased ensemble-adjudicated entailment check (`ensemble_verify`) instead of a single-model verdict; `[NEEDS_CITATION]` logged, not a build failure |
 | S9 Prereq | `s9_prereq.py` | Blockquote primers for unknown terms |
 | S10 Assemble | `s10_assemble.py` | Topological sort → stitch → pandoc + xelatex ×2; CSL-JSON bibliography; PDF size check |
 
@@ -47,12 +50,12 @@ know_expand/
   observe.py      — self-contained web server + HTML/CSS/JS dashboard (~2700 lines)
   sources.py      — multi-source knowledge fetcher: Wikipedia REST / PyPI JSON / arXiv Atom
   agents/
-    base.py       — QuotaAwareRouter, geminicli provider, _instructor_mode(), probe_models()
+    base.py       — QuotaAwareRouter, DeepInfra/NVIDIA NIM providers, _instructor_mode(), probe_models()
     schemas.py    — all Pydantic models for LLM structured outputs
   stages/
     s*.py         — one file per stage
 
-config.yaml       — all tunable knobs; timeouts.geminicli_timeout_s = 600
+config.yaml       — all tunable knobs
 models.yaml       — model lists per role (researcher, extractor, classifier, etc.)
 runs/             — one subdir per run: state/ logs/ output/
 ```
@@ -68,41 +71,33 @@ Tries models in order from `models.yaml` for the given role. Fallback rules:
 | `litellm.AuthenticationError` (may be wrapped in `InstructorRetryException`) | Permanently skip model; use `_find_in_chain()` to walk exception chain |
 | Rate-limit / 503 **with** `Retry-After` header | Sleep exact duration, retry same model |
 | Headerless 429/503 | Exponential backoff (2s → 4s → 8s); skip after 3 consecutive failures |
-| geminicli `RuntimeError` (any) | Permanently skip geminicli for this run; emit `model_geminicli_skip`; try next model |
 | All models exhausted | Emit `quota_exhausted`; raise `RuntimeError` |
 
 `_next_model()` checks both `self._skip` (per-router) **and** `_PROBED_UNAVAILABLE` (global) — so a quota discovery in one coroutine immediately affects all other routers.
 
-### geminicli provider (`geminicli/` prefix)
+### DeepInfra / NVIDIA NIM providers
 
-Spawns `npx @google/gemini-cli -m gemini-3.1-pro-preview -p <prompt>` as a subprocess. No API key — uses cached OAuth from `~/.gemini/oauth_creds.json`.
+Both are plain litellm-native model prefixes (`deepinfra/*`, `nvidia_nim/*`) — no custom transport code, unlike the geminicli/llamacpp providers they replaced (removed 2026-09). Auth is a single env var per provider (`DEEPINFRA_API_KEY`, `NVIDIA_API_KEY`); `_probe_one()` checks it before any LLM call.
 
-**Quota detection:** `_parse_geminicli_stderr()` checks stderr for `TerminalQuotaError`. When found:
-1. Adds `geminicli/{model}` to the global `_PROBED_UNAVAILABLE` set immediately — all routers across all roles stop trying geminicli without spawning further subprocesses
-2. Raises `RuntimeError("geminicli quota exhausted resets in Xh")` with parsed `retryDelayMs`
-
-Timeout: `cfg.timeouts.get("geminicli_timeout_s", 120)` — currently 600s in `config.yaml`.
-
-**Do not use `getattr(cfg, "geminicli_timeout_s", 120)`** — `Config.timeouts` is a `dict`, not dataclass fields.
+DeepInfra (Palo Alto, CA; US data centers; SOC 2 / ISO 27001; zero data retention) is the consolidated open-weight fallback tier — replaces the old Groq / Mistral / local llama.cpp / geminicli patchwork with one provider, one API key, one quota model. It also hosts some Chinese-lab open-weight checkpoints (GLM-5.2, Kimi-K2.7-Code) — see "No Chinese API providers" below for why that's fine.
 
 ### Instructor modes (`_instructor_mode(model)`)
 
-`instructor.from_litellm()` defaults to `TOOLS` mode (function calling). Mistral and Groq return parallel tool calls for single-schema requests, which instructor rejects. Use JSON mode for both:
+`instructor.from_litellm()` defaults to `TOOLS` mode (function calling). The open-weight Llama/Mistral models served through DeepInfra return parallel tool calls for single-schema requests, which instructor rejects — same behavior these model families showed via Groq/Mistral's own APIs. Use JSON mode instead:
 
 | Model | Mode | Reason |
 |-------|------|--------|
-| `mistral/*` | `instructor.Mode.JSON` | `MISTRAL_STRUCTURED_OUTPUTS` requires `mistralai` SDK; litellm works with JSON mode |
-| `groq/*` | `instructor.Mode.JSON` | Groq Llama models return parallel tool calls in TOOLS mode |
-| `gemini/*` (API, not geminicli) | `instructor.Mode.JSON` | `GEMINI_TOOLS` mode requires native `google-generativeai` SDK; litellm works with JSON mode |
-| everything else | `instructor.Mode.TOOLS` | Default; correct for OpenAI/Anthropic |
+| `deepinfra/*` | `instructor.Mode.JSON` | Open-weight Llama/Mistral models return parallel tool calls in TOOLS mode |
+| `gemini/*` | `instructor.Mode.JSON` | `GEMINI_TOOLS` mode requires native `google-generativeai` SDK; litellm works with JSON mode |
+| everything else | `instructor.Mode.TOOLS` | Default; correct for OpenAI/Anthropic/NVIDIA NIM |
 
 ### Per-provider concurrency semaphores
 
-Free-tier providers (Groq, Mistral) get their own `asyncio.Semaphore(3)` to prevent 20 parallel map-phase tasks from bursting them simultaneously and triggering 429 cascades. All other models share the global semaphore (`cfg.concurrency.default = 8`).
+DeepInfra gets its own `asyncio.Semaphore(5)` to bound burst concurrency against per-model rate limits (it's pay-as-you-go, not free-tier-capped like the old Groq setup, so this is a courtesy cap rather than a hard necessity). All other models share the global semaphore (`cfg.concurrency.default = 8`).
 
 ### `probe_models()`
 
-Runs at pipeline startup — checks env vars, binary presence, and server health (no LLM calls). Adds unavailable models to `_PROBED_UNAVAILABLE`. `llamacpp/` is health-checked via HTTP GET to `cfg.llamacpp.base_url/health` and used if the server is up. Prefixes `ollama/`, `lm_studio/`, `local/` are always skipped.
+Runs at pipeline startup — checks env vars only (no LLM calls, no health-check subprocess). Adds unavailable models to `_PROBED_UNAVAILABLE`. Prefixes `ollama/`, `lm_studio/`, `local/` are always skipped.
 
 ## Multi-source knowledge (`sources.py`)
 
@@ -118,6 +113,8 @@ Fetched in S4, cached at `audit/sources/sources_{domain_id}.json`. Injected into
 
 Wikipedia requires `User-Agent` header or returns 403. Relevance gate rejects mismatches. PyPI stub filter rejects deprecated backport packages.
 
+**OpenAlex daily budget:** separate from its 10 req/s polite-pool rate limit, OpenAlex enforces a small per-caller daily USD budget (observed as $0 free budget, 2026-09) — once exhausted, every request 429s with an `"Insufficient budget"` body until reset (~UTC midnight), not seconds later like an ordinary rate limit. `_parse_openalex_budget_error()` in `sources.py` distinguishes the two: budget phrase in the body, or a `Retry-After` longer than `config.yaml`'s `timeouts.openalex_budget_retry_after_threshold_s` (default 600s), is treated as exhausted. On detection it emits `{"event": "openalex_budget_exhausted", "term", "retry_after_s", "resets_at"}` and sets a module-level flag (`_OPENALEX_BUDGET_EXHAUSTED`) that skips all further OpenAlex calls for the rest of the process — no retry loop, no stall. `fetch_sources_for_term`'s `"academic"` branch falls back to arXiv when OpenAlex comes up empty for any reason (budget exhausted or no results), same as the `"concept"` branch already did.
+
 ## S5 Research prompt sizing and caching
 
 Persona prompts were ~44k chars (causing 120s timeouts). Reduced to ~11k via depth-aware caps (see `ResearchContextConfig`).
@@ -132,16 +129,26 @@ Caching threshold: 4,096 tokens for Sonnet 4.6 / Opus 4.7. Deep depth reliably e
 
 Planned `--batch-mode` flag for unattended deep runs: submits all 8-domain × 4 persona calls as one batch at 50% discount. Wall-clock increases to 1–3 hours (batch completes before any reconciler starts); this is intentional and not a concern for overnight runs. **Observability gap to solve before shipping:** the batch polling loop must emit `{"event": "s5_batch_poll", "pending": N, "completed": M}` every poll cycle so the web dashboard reflects progress. Without this the UI shows the pipeline frozen for up to an hour. See Anthropic Batches API docs for polling pattern.
 
-## S8 Citation classifier — abstract field
+## S4 junk-venue filter (`bibliography.py`)
 
-`_classify_citation_contexts` in `s8_verify.py` skips entries with no `abstract` field. Abstracts **are** fetched and stored: `bibliography.py` includes `"abstract"` in `_SS_FIELDS` and stores it in `_to_citation_record`. `s8_citation_classify_skipped` fires only when SS genuinely returns no abstract for a paper (common for older works).
+`_drop_junk()` runs on raw Semantic Scholar result lists **before** ranking in `fetch_bibliography` (both buckets), `fetch_anchors`, and `fetch_anchor_neighbors`. It drops papers whose `venue` / `publicationVenue.name` matches a regex in `config.yaml` `bibliography.junk_venues` (case-insensitive) or whose DOI starts with a `bibliography.junk_doi_prefixes` entry (Zenodo, SSRN, Research Square, TechRxiv). Toggle with `bibliography.junk_venue_filter` (default on). arXiv is deliberately not filtered. `fetch_source_refs` is not filtered — the source document's own references are authoritative regardless of venue. Every filter pass on a non-empty list emits `ss_junk_filtered` (`query`, `bucket`, `dropped`, `kept`, `dropped_titles[:5]`). The 65/35 split arithmetic is untouched; a short frontier bucket is not backfilled.
+
+## S8 Citation classifier — abstract field and ensemble verification
+
+The claim-verification loop in `s8_verify.py::run()` skips entries with no `abstract` field on the cached `CitationRecord` — but not immediately. Abstracts **are** fetched and stored at S4 time: `bibliography.py` includes `"abstract"` in `_SS_FIELDS` and stores it in `_to_citation_record`. When SS genuinely returns no abstract for a paper (common for older works), the cached field is `""`.
+
+Before falling back to `"No abstract available for this citation."`, `s8_verify.py` now calls `bibliography.fetch_paper_abstract(http, cfg, doi=..., title=...)` for a live, on-demand SS lookup: DOI-exact lookup first (`GET /graph/v1/paper/DOI:{doi}`), title search fallback via the existing `_ss_search()`. Never raises — returns `""` on any failure so the original fallback path is unchanged when both the cache and the live fetch miss.
+
+The decomposition/entailment call itself no longer goes through a single `classifier_router.call()`. It goes through `agents.base.ensemble_verify()` — a debiased LLM-as-judge panel (Zheng et al., MT-Bench/Chatbot Arena): two proposers (`verifier_proposer_a` = gemini/*, `verifier_proposer_b` = gpt-4o-mini + deepinfra/*, both in `models.yaml`) answer the same prompt concurrently; agreement (compared via `_overall_relation()`, which collapses a `SentenceVerification`'s per-claim relations to a single `supports`/`contradicts`/`neutral` signal — see its docstring for why raw claim-list equality doesn't work across two independently-decomposed sentences) returns immediately with no third call. Disagreement escalates to a third-family adjudicator (`verifier_adjudicator` = claude-sonnet-5/claude-opus-5) shown both candidates anonymized and in a randomized order (`random.random()` coin flip per call — never a fixed order, to avoid positional bias). `ensemble_verify()` is a pure addition to `agents/base.py`; it composes `make_router()`/`QuotaAwareRouter` rather than changing them.
+
+`[NEEDS_CITATION]`/verification results remain logged, never a build failure — `ensemble_verify()` can still raise (e.g. `RuntimeError` on quota exhaustion across all three roles), and `s8_verify.py`'s existing per-claim `try/except` around the call is unchanged, falling back to a `"neutral"` claim with the error message as `reason`.
 
 ## API keys
 
 Set in `.env` or via web UI (session only — not persisted to disk):
-- `GROQ_API_KEY` — required for groq fallback (present in `.env`)
-- `MISTRAL_API_KEY` — required for mistral fallback (present in `.env`)
-- `GEMINI_API_KEY` / `GOOGLE_API_KEY` — for `gemini/` API models (not geminicli)
+- `DEEPINFRA_API_KEY` — required for the `deepinfra/*` open-weight fallback tier
+- `NVIDIA_API_KEY` — required for `nvidia_nim/*` (Nemotron 3 Ultra)
+- `GEMINI_API_KEY` / `GOOGLE_API_KEY` — for `gemini/` API models
 - `ANTHROPIC_API_KEY` — for Claude models
 - `OPENAI_API_KEY` — for GPT models
 - `SS_API_KEY` — Semantic Scholar (optional, raises rate limit from 0.1 → 1 req/s)
@@ -194,7 +201,7 @@ Single Python file serving a self-contained HTML/CSS/JS dashboard. No external f
 - Two xelatex passes — always
 - Human interaction only at S1 (Assess) and S3 (Graph)
 - `[NEEDS_CITATION]` is logged, never a build failure
-- No Chinese API providers
-- Models and llama.cpp are pre-configured in `~/ccr` — do not pollute home or other locations
-- `gemini/gemini-3.5-flash` is the API model; `geminicli/gemini-3.5-flash` uses the free OAuth CLI — they are different providers and different costs ($1.50/$9.00 per M vs free)
+- S7b Quality Evaluator scores (`audit/quality_eval_{domain_id}.json`, `audit/quality_eval.md`) are logged, never a build failure or a trigger for revision — same philosophy as `[NEEDS_CITATION]`
+- No Chinese API providers — meaning: never send document/prompt data to a China-operated endpoint (Alibaba Cloud, Zhipu/Z.ai, Moonshot's own APIs). This does NOT ban Chinese-authored open-weight models outright: GLM-5.2 and Kimi-K2.7-Code are served through DeepInfra (US company, US data centers, zero retention), so the weights are Chinese-authored but inference/data handling stay in the US. Do not add a model pointed directly at a Chinese cloud provider's own API.
 - `gemini/gemini-2.5-flash` ($0.30/$2.50/M) is the intended cheap paid fallback — do NOT confuse with 3.5-flash which is 5× more expensive
+- DeepInfra (`deepinfra/*`) is the consolidated open-weight fallback tier (replaced Groq/Mistral/llama.cpp/geminicli 2026-09) — do not reintroduce those providers

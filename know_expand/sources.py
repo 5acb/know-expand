@@ -10,12 +10,15 @@ import logging
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import httpx
 from aiolimiter import AsyncLimiter
 from pydantic import BaseModel
+
+from know_expand.agents.base import _parse_retry_after
+from know_expand.state import emit
 
 _logger = logging.getLogger("know_expand.sources")
 
@@ -35,9 +38,15 @@ class FetchedSource(BaseModel):
     fetched_at: str  # ISO timestamp
 
 
-# OpenAlex allows 10 req/s for polite pool (with email in User-Agent).
+# OpenAlex allows 10 req/s for polite pool (with email in User-Agent), but
+# separately enforces a small **daily USD budget** per caller ($0 free budget
+# observed 2026-09) that a 429 with an "Insufficient budget" body signals —
+# distinct from an ordinary rate-limit 429 that clears in seconds. Once hit,
+# no request will succeed again until the budget resets (~UTC midnight), so
+# we stop calling OpenAlex for the rest of the run instead of retrying.
 # Lazy-initialised so the module can be imported without a Config in scope.
 _OPENALEX_LIMITER: AsyncLimiter | None = None
+_OPENALEX_BUDGET_EXHAUSTED = False
 
 
 def _get_openalex_limiter() -> AsyncLimiter:
@@ -45,6 +54,37 @@ def _get_openalex_limiter() -> AsyncLimiter:
     if _OPENALEX_LIMITER is None:
         _OPENALEX_LIMITER = AsyncLimiter(10, 1)
     return _OPENALEX_LIMITER
+
+
+def _parse_openalex_budget_error(
+    status_code: int,
+    body_text: str,
+    retry_after_header: str | None,
+    threshold_s: float,
+) -> tuple[bool, float | None]:
+    """Distinguish a terminal daily-budget exhaustion from an ordinary transient 429.
+
+    Returns (is_budget_exhausted, retry_after_seconds). A budget exhaustion is
+    either an explicit "Insufficient budget" phrase in the response body, or a
+    429 with a Retry-After longer than `threshold_s` (an ordinary rate-limit
+    429 clears in seconds; a multi-hour Retry-After means "come back tomorrow").
+
+    Retry-After may be either delta-seconds or an HTTP-date (RFC 7231) — uses
+    the shared `_parse_retry_after()` (agents/base.py) so both forms parse
+    correctly instead of only recognizing the numeric form.
+    """
+    retry_after_s: float | None = None
+    if retry_after_header:
+        retry_after_s = float(_parse_retry_after(retry_after_header))
+
+    if status_code != 429:
+        return False, retry_after_s
+
+    if "insufficient budget" in body_text.lower():
+        return True, retry_after_s
+    if retry_after_s is not None and retry_after_s > threshold_s:
+        return True, retry_after_s
+    return False, retry_after_s
 
 
 _OPENALEX_HEADERS = {
@@ -306,9 +346,19 @@ def _reconstruct_abstract(inv_idx: dict) -> str:
     return " ".join(w for _, w in words)
 
 
-async def _fetch_openalex_works(term: str, http: httpx.AsyncClient) -> "list[FetchedSource]":
-    """Fetch top cited works from OpenAlex for a term, returning up to 2 results."""
+async def _fetch_openalex_works(
+    term: str, http: httpx.AsyncClient, budget_retry_after_threshold_s: float = 600.0
+) -> "list[FetchedSource]":
+    """Fetch top cited works from OpenAlex for a term, returning up to 2 results.
+
+    Once a daily-budget exhaustion is detected (see _parse_openalex_budget_error),
+    OpenAlex is skipped for the rest of the process — no more requests are sent
+    until the process restarts.
+    """
+    global _OPENALEX_BUDGET_EXHAUSTED
     results: list[FetchedSource] = []
+    if _OPENALEX_BUDGET_EXHAUSTED:
+        return results
     try:
         limiter = _get_openalex_limiter()
         async with limiter:
@@ -323,6 +373,27 @@ async def _fetch_openalex_works(term: str, http: httpx.AsyncClient) -> "list[Fet
                 headers=_OPENALEX_HEADERS,
                 timeout=15.0,
             )
+            if resp.status_code == 429:
+                is_budget_exhausted, retry_after_s = _parse_openalex_budget_error(
+                    resp.status_code,
+                    resp.text,
+                    resp.headers.get("retry-after"),
+                    budget_retry_after_threshold_s,
+                )
+                if is_budget_exhausted:
+                    _OPENALEX_BUDGET_EXHAUSTED = True
+                    resets_at = (
+                        (datetime.now(timezone.utc) + timedelta(seconds=retry_after_s)).isoformat()
+                        if retry_after_s is not None
+                        else None
+                    )
+                    emit({
+                        "event": "openalex_budget_exhausted",
+                        "term": term,
+                        "retry_after_s": retry_after_s,
+                        "resets_at": resets_at,
+                    })
+                    return results
             resp.raise_for_status()
             data = resp.json()
 
@@ -357,13 +428,15 @@ async def fetch_sources_for_term(
     term_type: str,
     http: httpx.AsyncClient,
     domain_label: str = "",
+    openalex_budget_retry_after_threshold_s: float = 600.0,
 ) -> "list[FetchedSource]":
     """Fetch knowledge sources for a single term based on its type.
 
     term_type:
       "tool_library" -> PyPI first, then Wikipedia
-      "concept"      -> Wikipedia, then arXiv (2 papers)
-      "academic"     -> Wikipedia only (SS handles bibliography)
+      "concept"      -> Wikipedia, then OpenAlex fallback, then arXiv (2 papers)
+      "academic"     -> Wikipedia, then OpenAlex fallback, then arXiv (2 papers)
+                        if OpenAlex also came up empty (e.g. daily budget exhausted)
 
     domain_label: passed to arXiv fetcher to enrich short/generic queries.
     """
@@ -386,7 +459,9 @@ async def fetch_sources_for_term(
         if wiki:
             sources.append(wiki)
         else:
-            oa_results = await _fetch_openalex_works(term, http)
+            oa_results = await _fetch_openalex_works(
+                term, http, openalex_budget_retry_after_threshold_s
+            )
             sources.extend(oa_results)
         arxiv_results = await _fetch_arxiv(term, http, domain_context=domain_label, max_results=2)
         sources.extend(arxiv_results)
@@ -396,8 +471,17 @@ async def fetch_sources_for_term(
         if wiki:
             sources.append(wiki)
         else:
-            oa_results = await _fetch_openalex_works(term, http)
+            oa_results = await _fetch_openalex_works(
+                term, http, openalex_budget_retry_after_threshold_s
+            )
             sources.extend(oa_results)
+            if not oa_results:
+                # OpenAlex empty (no results, or daily budget exhausted) — fall
+                # back to arXiv rather than leaving the term with no sources at all.
+                arxiv_results = await _fetch_arxiv(
+                    term, http, domain_context=domain_label, max_results=2
+                )
+                sources.extend(arxiv_results)
 
     return sources
 
@@ -407,6 +491,7 @@ async def fetch_sources_for_terms(
     http: httpx.AsyncClient,
     concurrency: int = 4,
     domain_label: str = "",
+    openalex_budget_retry_after_threshold_s: float = 600.0,
 ) -> "dict[str, list[FetchedSource]]":
     """Fetch knowledge sources for multiple terms concurrently.
 
@@ -416,6 +501,9 @@ async def fetch_sources_for_terms(
         concurrency: Maximum parallel requests.
         domain_label: Domain context string (e.g. "NLP", "computer vision") used to
             enrich short/generic arXiv queries for concept-type terms.
+        openalex_budget_retry_after_threshold_s: passed through to the OpenAlex
+            fetcher's budget-exhaustion detection (config.yaml
+            timeouts.openalex_budget_retry_after_threshold_s).
 
     Returns:
         Dict mapping term_name -> list of FetchedSource. Terms with no results
@@ -427,7 +515,13 @@ async def fetch_sources_for_terms(
     async def _fetch_one(term: str, term_type: str) -> None:
         async with sem:
             try:
-                fetched = await fetch_sources_for_term(term, term_type, http, domain_label=domain_label)
+                fetched = await fetch_sources_for_term(
+                    term,
+                    term_type,
+                    http,
+                    domain_label=domain_label,
+                    openalex_budget_retry_after_threshold_s=openalex_budget_retry_after_threshold_s,
+                )
                 if fetched:
                     results[term] = fetched
             except Exception as exc:

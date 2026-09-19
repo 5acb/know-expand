@@ -8,9 +8,11 @@ import pytest
 
 from know_expand.agents.schemas import CitationRecord
 from know_expand.bibliography import (
+    _drop_junk,
     _to_citation_record,
     fetch_anchors,
     fetch_bibliography,
+    fetch_paper_abstract,
 )
 from know_expand.config import BibliographyConfig, Config, CentralityConfig, ConcurrencyConfig, RateLimitConfig
 
@@ -45,6 +47,7 @@ def _ss_paper(
     doi: str | None = None,
     authors: list[str] | None = None,
     abstract: str = "",
+    venue: str = "",
 ) -> dict:
     return {
         "title": title,
@@ -53,6 +56,7 @@ def _ss_paper(
         "externalIds": {"DOI": doi} if doi else {},
         "authors": [{"name": n} for n in (authors or ["Jane Smith"])],
         "abstract": abstract,
+        "venue": venue,
     }
 
 
@@ -290,3 +294,215 @@ async def test_bucket_split_standard(httpx_mock):
     n_front = sum(1 for r in results if r.bucket == "frontier")
     assert n_found == 19
     assert n_front == 11
+
+
+# ---------------------------------------------------------------------------
+# Junk-venue filter (bibliography.junk_venues / junk_doi_prefixes)
+# ---------------------------------------------------------------------------
+
+def _junk_and_real_papers() -> tuple[list[dict], list[dict]]:
+    """Mixed SS result list modelled on the 2026-09-17 run: self-uploads with
+    inflated citation counts alongside genuine peer-reviewed frontier work."""
+    junk = [
+        _ss_paper("TA-14 Admissibility Before Execution Doctrine", 2026, 35,
+                  doi="10.5281/zenodo.1234567", venue="Zenodo"),
+        _ss_paper("SΔϕ-42 Alignment as Transition Governance", 2026, 22,
+                  doi="10.2139/ssrn.4999999", venue="SSRN Electronic Journal"),
+        _ss_paper("HNBP-CORE Cross-Platform Tamper-Evident Witness Logs", 2026, 18,
+                  doi="10.21203/rs.3.rs-777777/v1", venue="Research Square"),
+        _ss_paper("Agentic Sovereignty Ledger", 2026, 12,
+                  doi="10.36227/techrxiv.9999", venue="TechRxiv"),
+        # DOI-only signal: venue blank, DOI prefix identifies the platform
+        _ss_paper("Untitled Zenodo Upload", 2026, 10,
+                  doi="10.5281/ZENODO.7654321", venue=""),
+        # publicationVenue.name only (flat `venue` empty)
+        {**_ss_paper("Nested Venue Upload", 2026, 11, doi="10.9999/x1", venue=""),
+         "publicationVenue": {"name": "Research  Square"}},
+    ]
+    real = [
+        _ss_paper("Agent Passports for Accountable Autonomy", 2025, 9,
+                  doi="10.1145/3700000.3700001", venue="ACM CCS"),
+        _ss_paper("Provenance-Bound Tool Use in LLM Agents", 2025, 7,
+                  doi="10.48550/arxiv.2505.01234", venue="arXiv.org"),
+        _ss_paper("Runtime Policy Enforcement for Autonomous Agents", 2024, 14,
+                  doi="10.1109/sp.2024.00001", venue="IEEE Symposium on Security and Privacy"),
+    ]
+    return junk, real
+
+
+def test_drop_junk_filters_and_emits(cfg):
+    junk, real = _junk_and_real_papers()
+    papers = junk[:3] + real[:1] + junk[3:] + real[1:]
+
+    with patch("know_expand.bibliography.emit") as emit:
+        kept = _drop_junk(papers, cfg, query="agentic security governance", bucket="frontier")
+
+    assert [p["title"] for p in kept] == [p["title"] for p in real]
+    emit.assert_called_once()
+    ev = emit.call_args.args[0]
+    assert ev["event"] == "ss_junk_filtered"
+    assert ev["bucket"] == "frontier"
+    assert ev["query"] == "agentic security governance"
+    assert ev["dropped"] == len(junk)
+    assert ev["kept"] == len(real)
+    assert len(ev["dropped_titles"]) == 5  # capped at five examples
+    assert ev["dropped_titles"][0].startswith("TA-14")
+
+
+def test_drop_junk_keeps_arxiv():
+    """arXiv is frontier CS's home; it must never match the junk patterns."""
+    cfg = _make_cfg()
+    paper = _ss_paper("An arXiv Paper", 2025, 3, doi="10.48550/arxiv.2501.00001", venue="arXiv.org")
+    with patch("know_expand.bibliography.emit"):
+        assert _drop_junk([paper], cfg, query="q", bucket="frontier") == [paper]
+
+
+def test_drop_junk_disabled():
+    cfg = _make_cfg(junk_venue_filter=False)
+    junk, real = _junk_and_real_papers()
+    with patch("know_expand.bibliography.emit") as emit:
+        kept = _drop_junk(junk + real, cfg, query="q", bucket="frontier")
+    assert kept == junk + real
+    emit.assert_not_called()
+
+
+def test_drop_junk_custom_patterns():
+    cfg = _make_cfg(junk_venues=[r"^preprints\.org$"], junk_doi_prefixes=[])
+    a = _ss_paper("Preprint", 2025, 1, doi="10.1/a", venue="preprints.org")
+    b = _ss_paper("Zenodo now allowed", 2025, 1, doi="10.5281/zenodo.1", venue="Zenodo")
+    with patch("know_expand.bibliography.emit"):
+        kept = _drop_junk([a, b], cfg, query="q", bucket="anchor")
+    assert kept == [b]
+
+
+@pytest.mark.asyncio
+async def test_frontier_bucket_excludes_junk_venues(httpx_mock):
+    """End-to-end: junk self-uploads outrank real frontier papers on MNCS but
+    never reach the frontier bucket; the emitted event counts them."""
+    foundational = [
+        _ss_paper(f"Old Paper {i}", 2015, 1000 - i * 50, doi=f"10.1/old{i}", venue="NeurIPS")
+        for i in range(8)
+    ]
+    junk, real = _junk_and_real_papers()
+    frontier = junk + real
+
+    httpx_mock.add_response(
+        url=re.compile(r"https://api\.semanticscholar\.org/.*"),
+        content=_ss_response(foundational),
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"https://api\.semanticscholar\.org/.*"),
+        content=_ss_response(frontier),
+    )
+
+    import httpx as _httpx
+    cfg = _make_cfg()
+    with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()), \
+         patch("know_expand.bibliography.emit") as emit:
+        async with _httpx.AsyncClient() as client:
+            results = await fetch_bibliography("agentic security", "survey", cfg, client)
+
+    frontier_titles = {r.title for r in results if r.bucket == "frontier"}
+    assert frontier_titles == {p["title"] for p in real}
+    assert not (frontier_titles & {p["title"] for p in junk})
+    # 6 foundational + 3 frontier: the short frontier bucket is NOT backfilled
+    assert sum(1 for r in results if r.bucket == "foundational") == 6
+
+    junk_events = [c.args[0] for c in emit.call_args_list if c.args[0]["event"] == "ss_junk_filtered"]
+    by_bucket = {e["bucket"]: e for e in junk_events}
+    assert by_bucket["frontier"]["dropped"] == len(junk)
+    assert by_bucket["frontier"]["kept"] == len(real)
+    assert by_bucket["foundational"]["dropped"] == 0
+
+
+# ---------------------------------------------------------------------------
+# fetch_paper_abstract — live abstract lookup for S8 tool-grounding
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_fetch_paper_abstract_by_doi_success(httpx_mock, cfg):
+    """A direct DOI lookup that returns an abstract is used without a title search."""
+    httpx_mock.add_response(
+        url=re.compile(r"https://api\.semanticscholar\.org/graph/v1/paper/DOI:.*"),
+        json={"abstract": "Direct DOI abstract."},
+    )
+
+    import httpx as _httpx
+    with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
+        async with _httpx.AsyncClient() as client:
+            result = await fetch_paper_abstract(client, cfg, doi="10.1/xyz", title="Some Paper")
+
+    assert result == "Direct DOI abstract."
+    # Only the DOI endpoint should have been hit — the title-search fallback
+    # is skipped once the DOI lookup already returns a usable abstract.
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 1
+    assert "DOI:10.1/xyz" in str(requests[0].url)
+
+
+@pytest.mark.asyncio
+async def test_fetch_paper_abstract_falls_back_to_title_search(httpx_mock, cfg):
+    """A 404/empty DOI lookup falls back to a title search via _ss_search."""
+    httpx_mock.add_response(
+        url=re.compile(r"https://api\.semanticscholar\.org/graph/v1/paper/DOI:.*"),
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"https://api\.semanticscholar\.org/graph/v1/paper/search.*"),
+        content=_ss_response([_ss_paper("Some Paper", 2023, 10, abstract="Found via title search.")]),
+    )
+
+    import httpx as _httpx
+    with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
+        async with _httpx.AsyncClient() as client:
+            result = await fetch_paper_abstract(client, cfg, doi="10.1/missing", title="Some Paper")
+
+    assert result == "Found via title search."
+
+
+@pytest.mark.asyncio
+async def test_fetch_paper_abstract_no_doi_uses_title_search(httpx_mock, cfg):
+    """With no DOI at all, goes straight to the title search."""
+    httpx_mock.add_response(
+        url=re.compile(r"https://api\.semanticscholar\.org/graph/v1/paper/search.*"),
+        content=_ss_response([_ss_paper("Some Paper", 2023, 10, abstract="Title-only search result.")]),
+    )
+
+    import httpx as _httpx
+    with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
+        async with _httpx.AsyncClient() as client:
+            result = await fetch_paper_abstract(client, cfg, doi=None, title="Some Paper")
+
+    assert result == "Title-only search result."
+
+
+@pytest.mark.asyncio
+async def test_fetch_paper_abstract_all_sources_fail_returns_empty(httpx_mock, cfg):
+    """Both the DOI lookup and the title-search fallback failing returns ""
+    (never raises) so callers keep their existing 'no abstract' path."""
+    httpx_mock.add_response(
+        url=re.compile(r"https://api\.semanticscholar\.org/graph/v1/paper/DOI:.*"),
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"https://api\.semanticscholar\.org/graph/v1/paper/search.*"),
+        content=_ss_response([]),
+    )
+
+    import httpx as _httpx
+    with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
+        async with _httpx.AsyncClient() as client:
+            result = await fetch_paper_abstract(client, cfg, doi="10.1/missing", title="Nothing Found")
+
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_fetch_paper_abstract_no_doi_no_title_returns_empty(cfg):
+    """No identifying info at all — returns "" without making any request."""
+    import httpx as _httpx
+    with patch("know_expand.bibliography._ss_limiter", _NoOpLimiter()):
+        async with _httpx.AsyncClient() as client:
+            result = await fetch_paper_abstract(client, cfg, doi=None, title=None)
+
+    assert result == ""

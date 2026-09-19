@@ -1,11 +1,16 @@
 """Tests for know_expand.sources — multi-source knowledge fetcher."""
 
+from unittest.mock import AsyncMock
+
+import httpx
 import pytest
 
+import know_expand.sources as sources_mod
 from know_expand.sources import (
     _fetch_pypi,
     _fetch_wikipedia,
     _is_searchable_term,
+    _parse_openalex_budget_error,
     _reconstruct_abstract,
     fetch_sources_for_term,
     FetchedSource,
@@ -242,3 +247,134 @@ async def test_fetch_sources_for_term_skips_snake_case():
     async with httpx.AsyncClient() as http:
         result = await fetch_sources_for_term("hidden_size", "tool_library", http)
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# OpenAlex daily-budget exhaustion (vs. ordinary transient 429s)
+# ---------------------------------------------------------------------------
+
+def test_parse_openalex_budget_error_detects_insufficient_budget_phrase():
+    is_exhausted, retry_after_s = _parse_openalex_budget_error(
+        429,
+        '{"error":"Rate limit exceeded","message":"Insufficient budget. '
+        'This request costs $0.001 but you only have $0 remaining. '
+        'Resets at midnight UTC."}',
+        "28900",
+        threshold_s=600,
+    )
+    assert is_exhausted is True
+    assert retry_after_s == pytest.approx(28900.0)
+
+
+def test_parse_openalex_budget_error_long_retry_after_without_phrase():
+    """A Retry-After well above the threshold is treated as exhausted even
+    without the exact phrase — ordinary rate limits clear in seconds, not hours."""
+    is_exhausted, retry_after_s = _parse_openalex_budget_error(
+        429, "Too Many Requests", "3600", threshold_s=600
+    )
+    assert is_exhausted is True
+    assert retry_after_s == pytest.approx(3600.0)
+
+
+def test_parse_openalex_budget_error_ordinary_rate_limit_not_exhausted():
+    """A short Retry-After without the budget phrase is an ordinary transient 429."""
+    is_exhausted, retry_after_s = _parse_openalex_budget_error(
+        429, "Too Many Requests", "2", threshold_s=600
+    )
+    assert is_exhausted is False
+    assert retry_after_s == pytest.approx(2.0)
+
+
+def test_parse_openalex_budget_error_non_429_never_exhausted():
+    is_exhausted, retry_after_s = _parse_openalex_budget_error(
+        500, "Insufficient budget", None, threshold_s=600
+    )
+    assert is_exhausted is False
+
+
+def test_parse_openalex_budget_error_http_date_retry_after():
+    """Retry-After may be an HTTP-date (RFC 7231), not just delta-seconds.
+    A bare float() would raise ValueError and silently fail to detect
+    exhaustion here — regression test for that bug."""
+    from datetime import datetime, timedelta, timezone
+    future = datetime.now(timezone.utc) + timedelta(hours=8)
+    http_date = future.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    is_exhausted, retry_after_s = _parse_openalex_budget_error(
+        429, "Too Many Requests", http_date, threshold_s=600
+    )
+    assert is_exhausted is True
+    # ~8 hours in seconds, generous tolerance for test execution time
+    assert retry_after_s == pytest.approx(8 * 3600, abs=30)
+
+
+def test_parse_openalex_budget_error_no_retry_after_header():
+    is_exhausted, retry_after_s = _parse_openalex_budget_error(
+        429, "Insufficient budget.", None, threshold_s=600
+    )
+    assert is_exhausted is True
+    assert retry_after_s is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_openalex_works_trips_budget_flag_and_emits_event(monkeypatch):
+    """A 429 with an 'Insufficient budget' body sets the module-level flag and
+    emits a structured openalex_budget_exhausted event instead of raising or
+    silently retrying."""
+    monkeypatch.setattr(sources_mod, "_OPENALEX_BUDGET_EXHAUSTED", False)
+
+    body = (
+        '{"error":"Rate limit exceeded","message":"Insufficient budget. '
+        'This request costs $0.001 but you only have $0 remaining. '
+        'Resets at midnight UTC."}'
+    )
+    fake_response = httpx.Response(429, headers={"retry-after": "28900"}, content=body)
+    fake_http = AsyncMock()
+    fake_http.get = AsyncMock(return_value=fake_response)
+
+    emitted = []
+    monkeypatch.setattr(sources_mod, "emit", lambda e: emitted.append(e))
+
+    results = await sources_mod._fetch_openalex_works("transformer models", fake_http)
+
+    assert results == []
+    assert sources_mod._OPENALEX_BUDGET_EXHAUSTED is True
+    assert len(emitted) == 1
+    assert emitted[0]["event"] == "openalex_budget_exhausted"
+    assert emitted[0]["retry_after_s"] == pytest.approx(28900.0)
+    assert emitted[0]["resets_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_fetch_openalex_works_skips_request_once_exhausted(monkeypatch):
+    """Once the budget flag is tripped, no further HTTP calls are made for the
+    rest of the process — this is what prevents S4 from stalling for hours."""
+    monkeypatch.setattr(sources_mod, "_OPENALEX_BUDGET_EXHAUSTED", True)
+    fake_http = AsyncMock()
+    fake_http.get = AsyncMock(side_effect=AssertionError("must not call OpenAlex once exhausted"))
+
+    results = await sources_mod._fetch_openalex_works("transformer models", fake_http)
+
+    assert results == []
+    fake_http.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_academic_term_falls_back_to_arxiv_when_openalex_exhausted(monkeypatch):
+    """When Wikipedia and OpenAlex both come up empty (e.g. budget exhausted),
+    an "academic" term still gets an arXiv fallback instead of no sources at all."""
+    monkeypatch.setattr(sources_mod, "_fetch_wikipedia", AsyncMock(return_value=None))
+    monkeypatch.setattr(sources_mod, "_fetch_openalex_works", AsyncMock(return_value=[]))
+    arxiv_source = FetchedSource(
+        term="transformer models",
+        source_type="arxiv",
+        title="Attention Is All You Need",
+        url="https://arxiv.org/abs/1706.03762",
+        content="...",
+        fetched_at="2026-09-17T00:00:00+00:00",
+    )
+    monkeypatch.setattr(sources_mod, "_fetch_arxiv", AsyncMock(return_value=[arxiv_source]))
+
+    async with httpx.AsyncClient() as http:
+        result = await fetch_sources_for_term("transformer models", "academic", http)
+
+    assert result == [arxiv_source]

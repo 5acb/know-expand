@@ -9,8 +9,9 @@ import httpx
 from pydantic import BaseModel, Field
 from typing import Literal
 
-from know_expand.agents.base import make_router
+from know_expand.agents.base import ensemble_verify, make_router
 from know_expand.agents.schemas import CitationAuditItem, CitationAuditResult, CitationCheck
+from know_expand.bibliography import fetch_paper_abstract
 from know_expand.config import Config
 from know_expand.state import (
     PipelineState,
@@ -188,6 +189,33 @@ Cited paper abstract:
 Respond with a SentenceVerification containing a list of claims, each with its relation ("supports", "contradicts", "neutral") and reason.
 """
 
+# models.yaml roles used by the ensemble_verify() panel below. Proposer roles
+# must stay on architecturally distinct provider families for the panel to
+# mean anything; see models.yaml's comment on these three roles.
+_VERIFIER_PROPOSER_ROLES = ["verifier_proposer_a", "verifier_proposer_b"]
+_VERIFIER_ADJUDICATOR_ROLE = "verifier_adjudicator"
+
+
+def _overall_relation(result: SentenceVerification) -> str:
+    """Collapse a SentenceVerification's per-claim relations into one verdict.
+
+    Two models decomposing the same sentence into "atomic claims" rarely
+    produce byte-identical claim lists (different granularity/wording), so
+    comparing full decompositions would make the proposers "disagree" on
+    almost every call and defeat the point of the ensemble. Instead we
+    compare the coarser, more stable signal ensemble_verify actually needs:
+    does either reviewer think this citation contradicts the text, does
+    either think it supports it, or do both find it neutral. Contradiction
+    is checked first — a single contradicted claim should never be masked
+    by other claims that happen to be supported.
+    """
+    relations = {c.relation for c in result.claims}
+    if "contradicts" in relations:
+        return "contradicts"
+    if "supports" in relations:
+        return "supports"
+    return "neutral"
+
 
 async def run(state: PipelineState, cfg: Config) -> None:
     state_dir = Path(state["state_dir"])
@@ -247,7 +275,6 @@ async def run(state: PipelineState, cfg: Config) -> None:
     needs_citation_md = _build_needs_citation_md(audit_result)
 
     # 2. Decompose citing sentences and check entailment against abstracts
-    classifier_router = make_router("classifier", cfg)
     claim_verifications = []
 
     # Find citing sentences in all sections
@@ -277,76 +304,114 @@ async def run(state: PipelineState, cfg: Config) -> None:
     # Cap at 50 total to prevent excessive runtimes/cost
     citing_pairs = citing_pairs[:50]
 
-    for section_file, sentence, key in citing_pairs:
-        entry = bibliography_index.get(key)
-        if not entry:
-            # Unknown key citation
-            claim_verifications.append({
-                "section_file": section_file,
-                "citation_key": key,
-                "sentence": sentence,
-                "decomposed_claims": [
-                    {
-                        "claim": sentence,
-                        "relation": "neutral",
-                        "reason": "Citation key not found in bibliography."
-                    }
-                ]
-            })
-            continue
-
-        abstract = entry.get("abstract", "")
-        if not abstract:
-            # No abstract available
-            claim_verifications.append({
-                "section_file": section_file,
-                "citation_key": key,
-                "sentence": sentence,
-                "decomposed_claims": [
-                    {
-                        "claim": sentence,
-                        "relation": "neutral",
-                        "reason": "No abstract available for this citation."
-                    }
-                ]
-            })
-            continue
-
-        prompt = _CLAIM_DECOMPOSE_VERIFY_PROMPT.format(
-            citing_sentence=sentence[:600],
-            abstract=abstract[:800],
-        )
+    # Built once and reused across every claim below so each router's
+    # per-model failure/backoff state persists for the whole stage instead
+    # of being rediscovered from scratch on every single claim. Best-effort:
+    # a role missing from models.yaml (e.g. a minimal test/local config, or
+    # ensemble_verify itself being mocked out) is simply left out here rather
+    # than crashing the stage before any citation actually needs verifying —
+    # ensemble_verify() falls back to building its own router on demand for
+    # any role not present in this dict.
+    verifier_routers = {}
+    for role in (*_VERIFIER_PROPOSER_ROLES, _VERIFIER_ADJUDICATOR_ROLE):
         try:
-            res: SentenceVerification = await classifier_router.call(
-                [{"role": "user", "content": prompt}], SentenceVerification
+            verifier_routers[role] = make_router(role, cfg)
+        except KeyError:
+            pass
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as ss_http:
+        for section_file, sentence, key in citing_pairs:
+            entry = bibliography_index.get(key)
+            if not entry:
+                # Unknown key citation
+                claim_verifications.append({
+                    "section_file": section_file,
+                    "citation_key": key,
+                    "sentence": sentence,
+                    "decomposed_claims": [
+                        {
+                            "claim": sentence,
+                            "relation": "neutral",
+                            "reason": "Citation key not found in bibliography."
+                        }
+                    ]
+                })
+                continue
+
+            abstract = entry.get("abstract", "")
+            if not abstract:
+                # Tool-grounding: the cached bibliography entry has no abstract
+                # (SS omits them for some older/less-indexed works — see
+                # CLAUDE.md's S8 note). Before giving up, try a live SS lookup
+                # by DOI (falls back to a title search) so a merely-missing
+                # cache entry doesn't silently downgrade to "neutral".
+                try:
+                    abstract = await fetch_paper_abstract(
+                        ss_http, cfg, doi=entry.get("DOI"), title=entry.get("title"),
+                    )
+                except Exception as exc:
+                    _logger.warning("s8 live abstract fetch failed for %s: %s", key, exc)
+                    abstract = ""
+
+            if not abstract:
+                # No abstract available, even after a live-fetch attempt
+                claim_verifications.append({
+                    "section_file": section_file,
+                    "citation_key": key,
+                    "sentence": sentence,
+                    "decomposed_claims": [
+                        {
+                            "claim": sentence,
+                            "relation": "neutral",
+                            "reason": "No abstract available for this citation."
+                        }
+                    ]
+                })
+                continue
+
+            prompt = _CLAIM_DECOMPOSE_VERIFY_PROMPT.format(
+                citing_sentence=sentence[:600],
+                abstract=abstract[:800],
             )
-            claim_verifications.append({
-                "section_file": section_file,
-                "citation_key": key,
-                "sentence": sentence,
-                "decomposed_claims": [
-                    {
-                        "claim": c.claim,
-                        "relation": c.relation,
-                        "reason": c.reason
-                    }
-                    for c in res.claims
-                ]
-            })
-        except Exception as exc:
-            _logger.warning("s8 claim entailment check failed for %s: %s", key, exc)
-            claim_verifications.append({
-                "section_file": section_file,
-                "citation_key": key,
-                "sentence": sentence,
-                "decomposed_claims": [
-                    {
-                        "claim": sentence,
-                        "relation": "neutral",
-                        "reason": f"Verification failed due to error: {exc}"
-                    }
-                ]
-            })
+            try:
+                ensemble = await ensemble_verify(
+                    proposer_roles=_VERIFIER_PROPOSER_ROLES,
+                    adjudicator_role=_VERIFIER_ADJUDICATOR_ROLE,
+                    messages=[{"role": "user", "content": prompt}],
+                    schema=SentenceVerification,
+                    cfg=cfg,
+                    verdict_key=_overall_relation,
+                    routers=verifier_routers,
+                )
+                res: SentenceVerification = ensemble.result
+                claim_verifications.append({
+                    "section_file": section_file,
+                    "citation_key": key,
+                    "sentence": sentence,
+                    "ensemble_agreed": ensemble.agreed,
+                    "decomposed_claims": [
+                        {
+                            "claim": c.claim,
+                            "relation": c.relation,
+                            "reason": c.reason
+                        }
+                        for c in res.claims
+                    ]
+                })
+            except Exception as exc:
+                _logger.warning("s8 claim entailment check failed for %s: %s", key, exc)
+                claim_verifications.append({
+                    "section_file": section_file,
+                    "citation_key": key,
+                    "sentence": sentence,
+                    "decomposed_claims": [
+                        {
+                            "claim": sentence,
+                            "relation": "neutral",
+                            "reason": f"Verification failed due to error: {exc}"
+                        }
+                    ]
+                })
 
     # Compute stats for summary
     total_claims = 0

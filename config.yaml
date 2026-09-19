@@ -9,6 +9,23 @@ bibliography:
   ss_retry_initial_delay: 30.0   # first 429 cooldown: 30s, then doubles
   ss_max_backoff: 120.0           # cap backoff at 2 min
   ss_anchors_n: 3
+  # Junk-venue filter (S4 bibliography). Drops Semantic Scholar results whose
+  # venue matches any regex below (case-insensitive) or whose DOI starts with
+  # one of the prefixes. Self-uploads on these platforms accrue 10-35 citations
+  # within months and crowd peer-reviewed work out of the frontier bucket.
+  # arXiv is intentionally NOT listed: frontier CS work lives there.
+  # Dropped rows are counted in the `ss_junk_filtered` event.
+  junk_venue_filter: true
+  junk_venues:
+    - "zenodo"
+    - "ssrn"
+    - "research\\s*square"
+    - "techrxiv"
+  junk_doi_prefixes:
+    - "10.5281/zenodo"   # Zenodo
+    - "10.2139/ssrn"     # SSRN
+    - "10.21203/"        # Research Square
+    - "10.36227/"        # TechRxiv
 
 centrality:
   structural_weight: 2.0
@@ -36,7 +53,11 @@ timeouts:
   http_fetch_seconds: 30
   openalex_seconds: 10
   http_async_seconds: 30
-  geminicli_timeout_s: 600   # allow 10 min for long-form persona generation
+  # OpenAlex enforces a small daily USD budget per caller separately from its
+  # req/s rate limit. A 429 whose Retry-After exceeds this threshold (or whose
+  # body says "Insufficient budget") is treated as exhausted-for-the-day, not
+  # a transient rate limit — see sources.py::_parse_openalex_budget_error.
+  openalex_budget_retry_after_threshold_s: 600
 
 adversarial_rounds:
   survey: 1
@@ -62,10 +83,6 @@ keyword_extraction:
 graph_defaults:
   node_tier: "journeyman"
   node_xp: 100
-
-llamacpp:
-  base_url: "http://localhost:8080"
-  # health_path: /health  (llama-server default)
 
 # S5 persona prompt sizing.
 # knowledge sources caps: survey=~1.5k / standard=~3.2k / deep=~15k chars.

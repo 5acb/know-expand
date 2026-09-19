@@ -9,7 +9,6 @@ from know_expand.config import (
     CentralityConfig,
     Config,
     ConcurrencyConfig,
-    LlamaCppConfig,
     RateLimitConfig,
     ResearchContextConfig,
     load_config,
@@ -42,7 +41,6 @@ def test_bibliography_fractions():
 def test_timeouts_dict_has_expected_keys():
     cfg = load_config(_REPO_ROOT / "config.yaml", _REPO_ROOT / "models.yaml")
     # Keys used in the codebase via cfg.timeouts.get(...)
-    assert "geminicli_timeout_s" in cfg.timeouts
     assert "http_async_seconds" in cfg.timeouts
     assert "openalex_seconds" in cfg.timeouts
     assert "http_fetch_seconds" in cfg.timeouts
@@ -88,12 +86,6 @@ def test_rate_limits_semantic_scholar_present():
     assert rl.time_period > 0
 
 
-def test_geminicli_timeout_value():
-    """config.yaml sets geminicli_timeout_s to 600 (10 min) for long persona calls."""
-    cfg = load_config(_REPO_ROOT / "config.yaml", _REPO_ROOT / "models.yaml")
-    assert cfg.timeouts["geminicli_timeout_s"] == 600
-
-
 # ---------------------------------------------------------------------------
 # Config dataclass construction (unit — no file I/O)
 # ---------------------------------------------------------------------------
@@ -104,17 +96,17 @@ def _make_minimal_cfg() -> Config:
         centrality=CentralityConfig(),
         rate_limits={"semantic_scholar": RateLimitConfig(max_rate=1, time_period=1)},
         concurrency=ConcurrencyConfig(default=4),
-        timeouts={"geminicli_timeout_s": 120, "http_async_seconds": 30},
+        timeouts={"http_async_seconds": 30},
         adversarial_rounds={"survey": 1, "standard": 2, "deep": 3},
         boilerplate_stop_list=["introduction", "conclusion"],
-        models={"researcher": ["geminicli/gemini-3.5-flash"]},
+        models={"researcher": ["deepinfra/meta-llama/Llama-3.3-70B-Instruct-Turbo"]},
     )
 
 
 def test_minimal_cfg_constructs():
     cfg = _make_minimal_cfg()
     assert cfg.concurrency.default == 4
-    assert cfg.timeouts.get("geminicli_timeout_s") == 120
+    assert cfg.timeouts.get("http_async_seconds") == 30
 
 
 def test_bibliography_default_fraction():

@@ -91,7 +91,7 @@ def _get_ss_limiter(cfg: Config) -> AsyncLimiter:
 
 _SS_BASE = "https://api.semanticscholar.org/graph/v1/paper/search"
 _SS_PAPER_BASE = "https://api.semanticscholar.org/graph/v1/paper"
-_SS_FIELDS = "title,year,citationCount,externalIds,abstract,authors,fieldsOfStudy"
+_SS_FIELDS = "title,year,citationCount,externalIds,abstract,authors,fieldsOfStudy,venue,publicationVenue"
 
 
 def _parse_author(name: str) -> dict:
@@ -133,6 +133,53 @@ def _to_citation_record(paper: dict, bucket: str, seen: set[str]) -> CitationRec
         bucket=bucket,
         citation_count=paper.get("citationCount") or 0,
     )
+
+
+def _paper_venues(paper: dict) -> list[str]:
+    """Venue strings SS may attach to a paper: flat `venue` and `publicationVenue.name`."""
+    out: list[str] = []
+    if v := paper.get("venue"):
+        out.append(str(v))
+    pv = paper.get("publicationVenue") or {}
+    if isinstance(pv, dict) and (name := pv.get("name")):
+        out.append(str(name))
+    return out
+
+
+def _is_junk(paper: dict, venue_res: list[re.Pattern], doi_prefixes: list[str]) -> bool:
+    """True if the paper's venue matches a junk regex or its DOI carries a junk prefix."""
+    for venue in _paper_venues(paper):
+        if any(r.search(venue) for r in venue_res):
+            return True
+    doi = ((paper.get("externalIds") or {}).get("DOI") or "").lower()
+    return bool(doi) and any(doi.startswith(pfx.lower()) for pfx in doi_prefixes)
+
+
+def _drop_junk(papers: list[dict], cfg: Config, *, query: str, bucket: str) -> list[dict]:
+    """Remove self-upload / preprint-mill results (Zenodo, SSRN, Research Square, TechRxiv).
+
+    Controlled by `bibliography.junk_venue_filter`; patterns come from
+    `bibliography.junk_venues` (regex on the S2 venue field, case-insensitive) and
+    `bibliography.junk_doi_prefixes`. Emits `ss_junk_filtered` with the dropped count
+    whenever the filter runs on a non-empty list, so the dashboard can confirm it's active.
+    """
+    bib = cfg.bibliography
+    if not bib.junk_venue_filter or not papers:
+        return papers
+    venue_res = [re.compile(pat, re.IGNORECASE) for pat in bib.junk_venues]
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for p in papers:
+        (dropped if _is_junk(p, venue_res, bib.junk_doi_prefixes) else kept).append(p)
+    emit({
+        "event": "ss_junk_filtered",
+        "query": query[:60],
+        "bucket": bucket,
+        "dropped": len(dropped),
+        "kept": len(kept),
+        "dropped_titles": [(p.get("title") or "")[:80] for p in dropped[:5]],
+    })
+    return kept
 
 
 async def _ss_search(
@@ -262,7 +309,9 @@ async def fetch_anchor_neighbors(
     cutoff_year = current_year - 3
 
     for paper_id in ids:
-        for paper in await _ss_paper_edges(paper_id, "citations", http, cfg, limit=per_paper):
+        citing = await _ss_paper_edges(paper_id, "citations", http, cfg, limit=per_paper)
+        citing = _drop_junk(citing, cfg, query=f"citations:{paper_id}", bucket="frontier")
+        for paper in citing:
             year = paper.get("year") or 0
             if year < cutoff_year:
                 continue
@@ -291,6 +340,7 @@ async def fetch_anchors(
     """Return (anchor_records, ss_paper_ids) for the top-N cited papers in the domain."""
     n = n if n is not None else cfg.bibliography.ss_anchors_n
     papers = await _ss_search(domain_label, http, cfg, limit=n * 4)
+    papers = _drop_junk(papers, cfg, query=domain_label, bucket="anchor")
     papers.sort(key=lambda p: p.get("citationCount") or 0, reverse=True)
     seen: set[str] = set()
     seen_dois: set[str] = set()
@@ -376,6 +426,12 @@ async def fetch_bibliography(
         year_filter=f"{cutoff_year}-{current_year}",
     )
 
+    # Junk-venue filter runs before ranking so self-uploads with inflated citation
+    # counts never compete for a slot. The 4x over-fetch absorbs the loss; the
+    # 65/35 split arithmetic is untouched.
+    foundational_raw = _drop_junk(foundational_raw, cfg, query=domain_label, bucket="foundational")
+    frontier_raw = _drop_junk(frontier_raw, cfg, query=domain_label, bucket="frontier")
+
     # Foundational: sort by raw citation count (time-tested impact, no recency penalty)
     foundational_raw.sort(key=lambda p: p.get("citationCount") or 0, reverse=True)
     # Frontier: sort by MNCS to correct recency and field-size bias
@@ -409,5 +465,58 @@ async def fetch_bibliography(
     _consume(foundational_raw, "foundational", n_history)
     _consume(frontier_raw, "frontier", n_frontier)
     return results
+
+
+# ---------------------------------------------------------------------------
+# fetch_paper_abstract — S8 tool-grounding for missing cached abstracts
+# ---------------------------------------------------------------------------
+# Additive: appended at end of file to avoid overlapping edits elsewhere in
+# this module. See CLAUDE.md's S8 note for the motivating gap (cached
+# CitationRecord.abstract == "" for some older/less-indexed SS entries).
+
+async def fetch_paper_abstract(
+    http: httpx.AsyncClient,
+    cfg: Config,
+    doi: str | None = None,
+    title: str | None = None,
+) -> str:
+    """Best-effort live abstract lookup for a single already-known paper.
+
+    Used by S8 when a cached `CitationRecord.abstract` is empty. Tries a
+    direct DOI lookup first via the SS single-paper endpoint (exact match,
+    no fuzzy-matching risk), then falls back to a title search (reusing
+    `_ss_search`) when no DOI is available or the DOI lookup comes back
+    empty.
+
+    Shares the same rate limiter, API key, and field list as the rest of
+    this module. Never raises — any failure (network, 404, missing
+    abstract) returns "" so callers can fall through to their existing
+    "no abstract available" handling unchanged.
+    """
+    headers = {"x-api-key": _SS_API_KEY} if _SS_API_KEY else {}
+    limiter = _get_ss_limiter(cfg)
+
+    if doi:
+        url = f"{_SS_PAPER_BASE}/DOI:{doi}"
+        try:
+            async with limiter:
+                resp = await http.get(url, params={"fields": _SS_FIELDS}, headers=headers)
+            if resp.status_code == 200:
+                abstract = resp.json().get("abstract") or ""
+                if abstract:
+                    return abstract
+        except Exception as exc:
+            _logger.warning("SS live abstract fetch by DOI failed for %r: %s", doi, exc)
+
+    if title:
+        try:
+            papers = await _ss_search(title, http, cfg, limit=1)
+        except Exception as exc:
+            _logger.warning("SS live abstract fetch by title failed for %r: %s", title[:60], exc)
+            return ""
+        if papers:
+            return papers[0].get("abstract") or ""
+
+    return ""
 
 

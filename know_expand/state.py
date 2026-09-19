@@ -167,18 +167,16 @@ def calculate_cost(model: str, tok_in: int | None, tok_out: int | None) -> float
     if not tok_out:
         tok_out = 0
     m = model.lower()
-    if m.startswith("geminicli/") or m.startswith("llamacpp/"):
-        return 0.0
-    
+
     in_rate = 0.0
     out_rate = 0.0
-    
+
     if "opus" in m:
-        in_rate = 15.0 / 1_000_000
-        out_rate = 75.0 / 1_000_000
+        in_rate = 5.0 / 1_000_000
+        out_rate = 25.0 / 1_000_000
     elif "sonnet" in m:
-        in_rate = 3.0 / 1_000_000
-        out_rate = 15.0 / 1_000_000
+        in_rate = 2.0 / 1_000_000
+        out_rate = 10.0 / 1_000_000
     elif "gpt-4o-mini" in m:
         in_rate = 0.15 / 1_000_000
         out_rate = 0.60 / 1_000_000
@@ -191,19 +189,28 @@ def calculate_cost(model: str, tok_in: int | None, tok_out: int | None) -> float
     elif "gemini-3.5-flash" in m:
         in_rate = 1.50 / 1_000_000
         out_rate = 9.00 / 1_000_000
-    elif "mistral-small" in m:
-        in_rate = 0.15 / 1_000_000
-        out_rate = 0.60 / 1_000_000
-    elif "llama-3.1-8b" in m:
+    elif "mistral-small-24b" in m:
         in_rate = 0.05 / 1_000_000
-        out_rate = 0.08 / 1_000_000
-    elif "llama-3.3-70b" in m or "llama-3.3-70b-versatile" in m:
-        in_rate = 0.59 / 1_000_000
-        out_rate = 0.79 / 1_000_000
+        out_rate = 0.10 / 1_000_000
+    elif "meta-llama-3.1-8b" in m:
+        in_rate = 0.03 / 1_000_000
+        out_rate = 0.05 / 1_000_000
+    elif "llama-3.3-70b" in m:
+        in_rate = 0.13 / 1_000_000
+        out_rate = 0.40 / 1_000_000
+    elif "glm-5.2" in m:
+        in_rate = 0.75 / 1_000_000
+        out_rate = 2.40 / 1_000_000
+    elif "kimi-k2.7-code" in m:
+        in_rate = 0.68 / 1_000_000
+        out_rate = 3.40 / 1_000_000
+    elif "nemotron-3-ultra" in m:
+        in_rate = 0.50 / 1_000_000
+        out_rate = 2.20 / 1_000_000
     else:
         in_rate = 1.0 / 1_000_000
         out_rate = 3.0 / 1_000_000
-        
+
     return (tok_in * in_rate) + (tok_out * out_rate)
 
 
@@ -238,7 +245,7 @@ def emit(event: dict) -> None:
             with open(audit_dir / "model_usage.jsonl", "a") as f:
                 f.write(json.dumps(stamped) + "\n")
 
-    if name in ("model_quota_switch", "model_auth_skip", "model_geminicli_skip"):
+    if name in ("model_quota_switch", "model_auth_skip"):
         if _log_dir is not None:
             state_dir = _log_dir.parent / "state"
             if state_dir.exists():

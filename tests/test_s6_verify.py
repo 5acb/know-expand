@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -14,6 +14,18 @@ from know_expand.config import (
     RateLimitConfig,
 )
 from know_expand.stages import s8_verify
+
+
+@pytest.fixture(autouse=True)
+def _no_live_abstract_fetch():
+    """None of the pre-existing tests in this file expect a live network call —
+    they predate the S8 tool-grounding fallback that fires when a cached
+    bibliography entry has an empty abstract (several fixtures here omit
+    'abstract' entirely). Keep those tests offline by making the live fetch a
+    no-op; tests that specifically exercise the live-fetch path live in
+    tests/test_s8_verify.py instead."""
+    with patch("know_expand.stages.s8_verify.fetch_paper_abstract", new=AsyncMock(return_value="")):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +210,8 @@ async def test_s8_resolve_bibliography_links():
 
 @pytest.mark.asyncio
 async def test_s8_claims_verification_entailment(tmp_path):
-    from unittest.mock import MagicMock, AsyncMock
+    from unittest.mock import AsyncMock
+    from know_expand.agents.base import EnsembleVerdict
     cfg = _make_cfg()
     state_dir = tmp_path / "state"
     state_dir.mkdir()
@@ -237,13 +250,16 @@ async def test_s8_claims_verification_entailment(tmp_path):
             )
         ]
     )
-    
-    mock_router = MagicMock()
-    mock_router.call = AsyncMock(return_value=mock_response)
-    
-    with patch("know_expand.stages.s8_verify.make_router", return_value=mock_router), \
+    mock_verdict = EnsembleVerdict(
+        result=mock_response,
+        agreed=True,
+        proposer_roles=["verifier_proposer_a", "verifier_proposer_b"],
+        proposer_results=[mock_response, mock_response],
+    )
+
+    with patch("know_expand.stages.s8_verify.ensemble_verify", new=AsyncMock(return_value=mock_verdict)), \
          patch("know_expand.stages.s8_verify.resolve_bibliography_links", return_value={"https://example.com/smith": {"resolved": True, "status_code": 200}}):
-         
+
         await s8_verify.run(state, cfg)
         
     # Read the verification report

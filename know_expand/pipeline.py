@@ -14,6 +14,7 @@ from know_expand.stages import (
     s5_research,
     s6_align,
     s7_synthesize,
+    s7b_quality_eval,
     s8_verify,
     s9_prereq,
     s10_assemble,
@@ -60,6 +61,10 @@ def build_graph(
         await s7_synthesize.run(state, cfg)
         return state
 
+    async def node_quality_eval(state: PipelineState) -> PipelineState:
+        await s7b_quality_eval.run(state, cfg)
+        return state
+
     async def node_verify(state: PipelineState) -> PipelineState:
         await s8_verify.run(state, cfg)
         return state
@@ -80,6 +85,7 @@ def build_graph(
     graph.add_node("research", node_research)
     graph.add_node("align", node_align)
     graph.add_node("synthesize", node_synthesize)
+    graph.add_node("quality_eval", node_quality_eval)
     graph.add_node("verify", node_verify)
     graph.add_node("prereq", node_prereq)
     graph.add_node("assemble", node_assemble)
@@ -112,7 +118,8 @@ def build_graph(
         graph.add_edge("audit", "research")
         graph.add_edge("research", "align")
         graph.add_edge("align", "synthesize")
-        graph.add_edge("synthesize", "prereq")
+        graph.add_edge("synthesize", "quality_eval")
+        graph.add_edge("quality_eval", "prereq")
         graph.add_edge("prereq", "verify")
         graph.add_edge("verify", "assemble")
         graph.add_edge("assemble", END)
@@ -169,7 +176,10 @@ async def run_pipeline(
 
     # Handle --resume flag
     if resume_stage is not None:
-        execution_order = [0, 2, 1, 3, 4, 5, 6, 7, 9, 8, 10]
+        # "7b" (quality_eval) runs between synthesize (7) and prereq (9); it has
+        # no numeric --resume/--stage target of its own (see s7b_quality_eval.py),
+        # but must still be cleared/re-run when resuming at or before synthesize.
+        execution_order = [0, 2, 1, 3, 4, 5, 6, 7, "7b", 9, 8, 10]
         if resume_stage in execution_order:
             resume_idx = execution_order.index(resume_stage)
             stages_data = pipeline_json.setdefault("stages", {})

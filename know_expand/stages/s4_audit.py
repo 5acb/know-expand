@@ -12,9 +12,21 @@ from know_expand.agents.base import make_router
 from know_expand.agents.schemas import GapAnalysisResult
 from know_expand.bibliography import fetch_anchor_neighbors, fetch_anchors, fetch_bibliography, reset_ss_limiter
 from know_expand.config import Config
+from know_expand.stages.s4_tools import (
+    COVERAGE_TOOL_NAME,
+    SYNONYM_TOOL_NAME,
+    coverage_tool_spec,
+    run_coverage_check,
+    run_synonym_check,
+    synonym_tool_spec,
+)
 from know_expand.state import PipelineState, emit, mark_stage_complete, stage_is_complete
 
 _logger = logging.getLogger("know_expand.s4")
+
+# Max propose->tool->observe turns in the bespoke ReAct grounding loop before
+# giving up and falling back to whatever text the model has produced so far.
+_MAX_GROUNDING_TURNS = 4
 
 _GAP_FINDER_PROMPT = """\
 You are a research gap analyst. Given the terms from a domain's knowledge graph and \
@@ -61,6 +73,32 @@ Fill in defender_argument for each gap. Return a GapAnalysisResult with \
 domain_id="{domain_id}".
 """
 
+_FINDER_REACT_SYSTEM = """\
+You are a research gap analyst investigating a knowledge domain before finalizing a gap \
+report. You have a tool, `check_recent_coverage`, that searches Semantic Scholar (and \
+arXiv as a fallback) for a query. Use it to verify that each candidate gap you are \
+considering reflects real, findable research literature — not a hallucinated, overly \
+narrow, or already-obsolete topic — before deciding to include it.
+
+Call the tool for at least one candidate gap term; call it again for every additional \
+candidate you are unsure about. When you are done investigating, respond with a concise \
+plain-text summary (not JSON): for each term you checked, state what you searched for, \
+what the tool returned, and whether you still consider it a genuine gap.
+"""
+
+_DEFENDER_REACT_SYSTEM = """\
+You are a knowledge-graph defender investigating whether gaps identified by the Gap \
+Finder are already covered by the existing graph terms. You have a tool, \
+`check_graph_synonym`, that checks a claimed gap term against the domain's existing \
+graph terms for lexical similarity and looks the term up on Wikipedia.
+
+Use the tool for each gap before asserting the graph already covers it under a \
+different name or as an alias. If the tool finds no plausible synonym or rebrand, \
+concede the gap honestly rather than inventing a defense. When you are done \
+investigating, respond with a concise plain-text summary (not JSON): for each gap, \
+state what you checked and what the tool returned.
+"""
+
 _GAP_FINDER_REBUTTAL_PROMPT = """\
 You are the original gap analyst reviewing the defender's arguments. For each gap, \
 set the verdict field:
@@ -88,6 +126,99 @@ def _anchor_summaries(anchors: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+async def _run_react_grounding(
+    agent_router,
+    messages: list[dict],
+    tool_spec: dict,
+    tool_name: str,
+    tool_fn,
+    domain_id: str,
+    role_label: str,
+    round_no: int,
+    cfg: Config,
+    max_turns: int = _MAX_GROUNDING_TURNS,
+) -> tuple[str, int]:
+    """Bespoke ReAct loop: propose -> invoke `tool_fn` -> observe -> answer.
+
+    Built directly on `QuotaAwareRouter.call_with_tools()` (a single call) rather
+    than a LangGraph StateGraph/ToolNode, to keep this stage's control flow in
+    plain, easily-testable Python. Loops until the model stops requesting the
+    tool or `max_turns` is exhausted, dispatching every requested tool call to
+    `tool_fn` and feeding the observation back as a `role: tool` message.
+
+    Returns (final_text, tool_call_count). This is entirely best-effort: any
+    exception (including "all models exhausted for agent role") is swallowed
+    and reported as ("", tool_call_count so far) so the caller can fall back
+    to the original ungrounded prompt. Nothing here can fail the S4 build.
+    """
+    call_timeout = cfg.timeouts.get("s4_gap_grounding_seconds", 90)
+    working_messages = list(messages)
+    tool_call_count = 0
+    final_text = ""
+    try:
+        for _turn in range(max_turns):
+            msg = await asyncio.wait_for(
+                agent_router.call_with_tools(working_messages, [tool_spec]),
+                timeout=call_timeout,
+            )
+            working_messages.append(msg)
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                final_text = msg.get("content", "") or ""
+                break
+            for tc in tool_calls:
+                fn = tc.get("function", {}) or {}
+                if fn.get("name") != tool_name:
+                    observation = f"Unknown tool: {fn.get('name')!r}"
+                else:
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    try:
+                        observation = await tool_fn(**args)
+                    except Exception as exc:
+                        observation = f"Tool error: {exc}"
+                tool_call_count += 1
+                working_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": observation,
+                })
+                emit({
+                    "event": f"gap_{role_label}_tool_call",
+                    "domain_id": domain_id,
+                    "round": round_no,
+                    "tool": tool_name,
+                })
+        else:
+            # Exhausted max_turns while the model kept requesting tools.
+            # working_messages[-1] is always a {"role": "tool", ...}
+            # observation at this point (the model never returned a
+            # response with no tool_calls), never model-authored text —
+            # using it as final_text would splice a raw tool-observation
+            # string into the next verdict prompt as if it were the
+            # model's own investigation summary. Leave final_text empty
+            # instead; the caller treats "" the same as any other
+            # inconclusive grounding pass.
+            final_text = ""
+            emit({
+                "event": f"gap_{role_label}_grounding_max_turns",
+                "domain_id": domain_id,
+                "round": round_no,
+                "tool_call_count": tool_call_count,
+            })
+    except Exception as exc:
+        emit({
+            "event": f"gap_{role_label}_grounding_failed",
+            "domain_id": domain_id,
+            "round": round_no,
+            "error": str(exc)[:200],
+        })
+        return "", tool_call_count
+    return final_text, tool_call_count
+
+
 async def _run_gap_loop(
     domain_id: str,
     domain_label: str,
@@ -95,9 +226,28 @@ async def _run_gap_loop(
     anchors: list[dict],
     router,
     rounds: int = 3,
+    agent_router=None,
+    http: httpx.AsyncClient | None = None,
+    cfg: Config | None = None,
+    no_bibliography_fetch: bool = False,
 ) -> GapAnalysisResult:
+    """Adversarial Gap Finder -> Defender -> Rebuttal loop.
+
+    When `agent_router`/`http`/`cfg` are available and `no_bibliography_fetch`
+    is False, the Finder and Defender each run a live-tool ReAct grounding
+    pass (see `_run_react_grounding`) before their structured verdict call:
+    the Finder checks candidate gaps against Semantic Scholar/arXiv, the
+    Defender checks claimed rebrands/synonyms against the graph terms and
+    Wikipedia. The grounding findings are spliced into the same structured
+    prompt used before, so the final `router.call(..., GapAnalysisResult)`
+    call is unchanged in shape — just better-informed. In air-gapped mode
+    (`no_bibliography_fetch=True`) or if grounding fails/produces nothing,
+    this falls back to the original ungrounded prompt so the stage never
+    blocks on a live lookup.
+    """
     terms_str = ", ".join(graph_terms)
     anchor_str = _anchor_summaries(anchors)
+    can_ground = agent_router is not None and http is not None and cfg is not None and not no_bibliography_fetch
 
     prev_gap_ids: set[str] | None = None
     termination_reason = "max_rounds"
@@ -105,23 +255,66 @@ async def _run_gap_loop(
     current_gap_ids: set[str] = set()
     rnd = 0
 
+    async def _finder_tool_fn(query: str = "") -> str:
+        return await run_coverage_check(query, http, cfg, domain_label=domain_label)
+
+    async def _defender_tool_fn(term: str = "") -> str:
+        return await run_synonym_check(term, graph_terms, http)
+
     for rnd in range(1, rounds + 1):
         emit({"event": "gap_finder_start", "domain_id": domain_id, "round": rnd, "term_count": len(graph_terms), "anchor_count": len(anchors)})
-        finder_msg = [{
-            "role": "user",
-            "content": _GAP_FINDER_PROMPT.format(
-                domain_label=domain_label,
-                domain_id=domain_id,
-                graph_terms=terms_str,
-                anchor_summaries=anchor_str,
-            ),
-        }]
+
+        finder_prompt = _GAP_FINDER_PROMPT.format(
+            domain_label=domain_label,
+            domain_id=domain_id,
+            graph_terms=terms_str,
+            anchor_summaries=anchor_str,
+        )
+        finder_tool_calls = 0
+        if can_ground:
+            emit({"event": "gap_finder_grounding_start", "domain_id": domain_id, "round": rnd})
+            grounding_text, finder_tool_calls = await _run_react_grounding(
+                agent_router,
+                [
+                    {"role": "system", "content": _FINDER_REACT_SYSTEM},
+                    {"role": "user", "content": finder_prompt},
+                ],
+                coverage_tool_spec(),
+                COVERAGE_TOOL_NAME,
+                _finder_tool_fn,
+                domain_id, "finder", rnd, cfg,
+            )
+            emit({
+                "event": "gap_finder_grounding_done",
+                "domain_id": domain_id,
+                "round": rnd,
+                "tool_calls": finder_tool_calls,
+                "grounded": bool(grounding_text),
+            })
+            if grounding_text:
+                finder_prompt = (
+                    f"{finder_prompt}\n\n"
+                    "You already investigated the candidates below using live literature "
+                    "search tools (Semantic Scholar / arXiv). Use these findings — do not "
+                    "report a gap your own search showed is already well covered:\n\n"
+                    f"{grounding_text}"
+                )
+        else:
+            emit({
+                "event": "gap_finder_grounding_skipped",
+                "domain_id": domain_id,
+                "round": rnd,
+                "reason": "no_bibliography_fetch" if no_bibliography_fetch else "agent_router_unavailable",
+            })
+
+        finder_msg = [{"role": "user", "content": finder_prompt}]
         finder_result: GapAnalysisResult = await router.call(finder_msg, GapAnalysisResult)
         emit({
             "event": "gap_finder_complete",
             "domain_id": domain_id,
             "round": rnd,
             "gap_count": len(finder_result.gaps),
+            "tool_calls_used": finder_tool_calls,
         })
 
         if not finder_result.gaps:
@@ -134,20 +327,58 @@ async def _run_gap_loop(
             [g.model_dump() for g in finder_result.gaps], indent=2
         )
         emit({"event": "gap_defender_start", "domain_id": domain_id, "round": rnd, "gap_count": len(finder_result.gaps)})
-        defender_msg = [{
-            "role": "user",
-            "content": _GAP_DEFENDER_PROMPT.format(
-                domain_label=domain_label,
-                domain_id=domain_id,
-                graph_terms=terms_str,
-                gap_findings=gap_findings_str,
-            ),
-        }]
+
+        defender_prompt = _GAP_DEFENDER_PROMPT.format(
+            domain_label=domain_label,
+            domain_id=domain_id,
+            graph_terms=terms_str,
+            gap_findings=gap_findings_str,
+        )
+        defender_tool_calls = 0
+        if can_ground:
+            emit({"event": "gap_defender_grounding_start", "domain_id": domain_id, "round": rnd})
+            grounding_text, defender_tool_calls = await _run_react_grounding(
+                agent_router,
+                [
+                    {"role": "system", "content": _DEFENDER_REACT_SYSTEM},
+                    {"role": "user", "content": defender_prompt},
+                ],
+                synonym_tool_spec(),
+                SYNONYM_TOOL_NAME,
+                _defender_tool_fn,
+                domain_id, "defender", rnd, cfg,
+            )
+            emit({
+                "event": "gap_defender_grounding_done",
+                "domain_id": domain_id,
+                "round": rnd,
+                "tool_calls": defender_tool_calls,
+                "grounded": bool(grounding_text),
+            })
+            if grounding_text:
+                defender_prompt = (
+                    f"{defender_prompt}\n\n"
+                    "You already investigated the gaps below using a live tool that checks "
+                    "the domain's existing graph terms and Wikipedia. Base your "
+                    "defender_argument on these findings — concede honestly where the tool "
+                    "found no plausible synonym or rebrand:\n\n"
+                    f"{grounding_text}"
+                )
+        else:
+            emit({
+                "event": "gap_defender_grounding_skipped",
+                "domain_id": domain_id,
+                "round": rnd,
+                "reason": "no_bibliography_fetch" if no_bibliography_fetch else "agent_router_unavailable",
+            })
+
+        defender_msg = [{"role": "user", "content": defender_prompt}]
         defender_result: GapAnalysisResult = await router.call(defender_msg, GapAnalysisResult)
         emit({
             "event": "gap_defender_complete",
             "domain_id": domain_id,
             "round": rnd,
+            "tool_calls_used": defender_tool_calls,
         })
 
         defended_gaps = defender_result.gaps if defender_result.gaps else finder_result.gaps
@@ -208,6 +439,7 @@ async def _process_domain(
     http: httpx.AsyncClient,
     domain_nodes: list[dict] | None = None,
     no_bibliography_fetch: bool = False,
+    agent_router=None,
 ) -> GapAnalysisResult:
     domain_id = domain["id"]
     domain_label = domain["label"]
@@ -252,7 +484,15 @@ async def _process_domain(
                         "domain_id": domain_id,
                         "term_count": len(terms_to_fetch),
                     })
-                    fetched = await fetch_sources_for_terms(terms_to_fetch, http, concurrency=4, domain_label=domain_label)
+                    fetched = await fetch_sources_for_terms(
+                        terms_to_fetch,
+                        http,
+                        concurrency=4,
+                        domain_label=domain_label,
+                        openalex_budget_retry_after_threshold_s=cfg.timeouts.get(
+                            "openalex_budget_retry_after_threshold_s", 600
+                        ),
+                    )
                     raw_dump = {k: [s.model_dump() for s in v] for k, v in fetched.items()}
                     sources_cache.write_text(json.dumps(raw_dump, indent=2))
                     emit({
@@ -275,6 +515,8 @@ async def _process_domain(
         gap_result = await _run_gap_loop(
             domain_id, domain_label, graph_terms, anchors, router,
             rounds=cfg.adversarial_rounds.get(depth, 3),
+            agent_router=agent_router, http=http, cfg=cfg,
+            no_bibliography_fetch=no_bibliography_fetch,
         )
         return gap_result
 
@@ -333,6 +575,8 @@ async def _process_domain(
     gap_result = await _run_gap_loop(
         domain_id, domain_label, graph_terms, anchors_dicts, router,
         rounds=cfg.adversarial_rounds.get(depth, 3),
+        agent_router=agent_router, http=http, cfg=cfg,
+        no_bibliography_fetch=no_bibliography_fetch,
     )
     emit({
         "event": "domain_complete",
@@ -414,6 +658,10 @@ async def run(state: PipelineState, cfg: Config) -> None:
     domains_by_id = {d["id"]: d["label"] for d in domains}
     depth = state["depth"]
     router = make_router("critic", cfg)
+    # "agent" role models are used only for the Finder/Defender ReAct grounding
+    # tool calls (see _run_react_grounding) — the final structured verdict
+    # always goes through the "critic" router above, unchanged.
+    agent_router = make_router("agent", cfg)
 
     emit({
         "event": "stage3_start",
@@ -444,6 +692,7 @@ async def run(state: PipelineState, cfg: Config) -> None:
                     domain, all_terms, audit_dir, depth, cfg, router, http,
                     domain_nodes=domain_node_list,
                     no_bibliography_fetch=state.get("no_bibliography_fetch", False),
+                    agent_router=agent_router,
                 )
                 gap_results.append(result)
             except Exception as exc:

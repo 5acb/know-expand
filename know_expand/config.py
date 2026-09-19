@@ -15,6 +15,23 @@ class BibliographyConfig:
     ss_retry_initial_delay: float = 30.0
     ss_max_backoff: float = 120.0
     ss_anchors_n: int = 3
+    # Junk-venue filter: drop self-upload / preprint-mill results (Zenodo, SSRN,
+    # Research Square, TechRxiv) that carry inflated citation counts and crowd
+    # peer-reviewed work out of the frontier bucket. arXiv is deliberately not
+    # listed. Regexes are matched case-insensitively against the S2 venue name.
+    junk_venue_filter: bool = True
+    junk_venues: list[str] = field(default_factory=lambda: [
+        r"zenodo",
+        r"ssrn",
+        r"research\s*square",
+        r"techrxiv",
+    ])
+    junk_doi_prefixes: list[str] = field(default_factory=lambda: [
+        "10.5281/zenodo",   # Zenodo
+        "10.2139/ssrn",     # SSRN
+        "10.21203/",        # Research Square
+        "10.36227/",        # TechRxiv
+    ])
 
 
 @dataclass
@@ -66,11 +83,6 @@ class GraphDefaultsConfig:
 
 
 @dataclass
-class LlamaCppConfig:
-    base_url: str = "http://127.0.0.1:8080"
-
-
-@dataclass
 class CriticThinkingConfig:
     budget_tokens: int = 0
 
@@ -79,7 +91,7 @@ class CriticThinkingConfig:
 class ResearchContextConfig:
     """Prompt-size controls for S5 persona prompts.
 
-    Depth-aware caps prevent the ~44k-char prompts that caused geminicli timeouts
+    Depth-aware caps prevent the ~44k-char prompts that caused provider timeouts
     while still giving deep runs more context than shallow ones.
     """
     nodes_top_n: int = 30
@@ -116,7 +128,6 @@ class Config:
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     keyword_extraction: KeywordExtractionConfig = field(default_factory=KeywordExtractionConfig)
     graph_defaults: GraphDefaultsConfig = field(default_factory=GraphDefaultsConfig)
-    llamacpp: LlamaCppConfig = field(default_factory=LlamaCppConfig)
     research_context: ResearchContextConfig = field(default_factory=ResearchContextConfig)
     critic_thinking: CriticThinkingConfig = field(default_factory=CriticThinkingConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
@@ -163,7 +174,6 @@ def load_config(
         chunking=_section("chunking", ChunkingConfig),
         keyword_extraction=_section("keyword_extraction", KeywordExtractionConfig),
         graph_defaults=_section("graph_defaults", GraphDefaultsConfig),
-        llamacpp=_section("llamacpp", LlamaCppConfig),
         research_context=_section("research_context", ResearchContextConfig),
         critic_thinking=_section("critic_thinking", CriticThinkingConfig),
         memory=_section("memory", MemoryConfig),

@@ -52,7 +52,8 @@ The reference output: a 480KB, 241-page, 81-node skill-tree document with verifi
 
 ```
 S0 Ingest → S2 Extract → S1 Assess → S3 Graph → S4 Audit → S5 Research
-         → S6 Align → S7 Synthesize → S8 Verify → S9 Prereq → S10 Assemble
+         → S6 Align → S7 Synthesize → S7b Quality Eval → S8 Verify
+         → S9 Prereq → S10 Assemble
 ```
 
 S2 Extract runs **before** S1 Assess by design: the interview must reference real terms extracted from the document, not LLM guesses. Swapping them back is a known footgun.
@@ -130,6 +131,14 @@ Input Document (text / file / URL / PDF)
 │ Adversarial critic loop                               │
 └───────────────────────────┬───────────────────────────┘
                             │  state/sections/section_synthesis.md
+                            ▼
+┌───────────────────────────────────────────────────────┐
+│ S7b: QUALITY EVAL (terminal, non-blocking)            │
+│ Agent-as-judge: 12-dimension rubric / 3 weighted cats │
+│ Scores logged only — never gates or revises           │
+└───────────────────────────┬───────────────────────────┘
+                            │  state/audit/quality_eval_{domain_id}.json
+                            │  state/audit/quality_eval.md
                             ▼
 ┌───────────────────────────────────────────────────────┐
 │ S8: VERIFY                                            │
@@ -223,11 +232,9 @@ depth: standard               # survey | standard | deep
 
 concurrency:
   default: 8                  # cloud provider semaphore
-  groq: 3                     # free-tier provider semaphore
-  mistral: 3
+  # DeepInfra gets its own tighter Semaphore(5) in code, not config.yaml
 
 timeouts:
-  geminicli_timeout_s: 600    # use cfg.timeouts.get(), not getattr()
   domain_research_s: 2700
 
 bibliography:
@@ -246,45 +253,44 @@ Models are tried in order; the `QuotaAwareRouter` falls back automatically on qu
 
 ```yaml
 roles:
-  # Slot 0: geminicli/gemini-3.5-flash  — free OAuth CLI (~1500 req/day cap)
-  # Slot 1: gemini/gemini-2.5-flash     — $0.30/$2.50/M — primary paid fallback
-  # Slot 2: gemini/gemini-3.5-flash     — $1.50/$9.00/M — quality backstop only
+  # Slot 0: gemini/gemini-2.5-flash  — $0.30/$2.50/M — cheapest quality paid provider
+  # Slot 1: deepinfra/*              — open-weight fallback tier (Meta Llama, Mistral,
+  #                                    plus GLM-5.2 / Kimi-K2.7-Code / Nemotron-3-Ultra)
+  # Slot 2: gemini/gemini-3.5-flash  — $1.50/$9.00/M — quality backstop only
   # NOTE: 3.5-flash ≠ 2.5-flash. 3.5-flash (Google I/O 2026) costs 5× more.
 
   agent:           # LangGraph ReAct graphs — require reliable tool calling
-    - "geminicli/gemini-3.5-flash"
     - "gemini/gemini-2.5-flash"
     - "gemini/gemini-3.5-flash"
-    - "groq/llama-3.3-70b-versatile"
-    - "claude-sonnet-4-6"
-    - "llamacpp/glm4"
+    - "deepinfra/moonshotai/Kimi-K2.7-Code"
+    - "deepinfra/meta-llama/Llama-3.3-70B-Instruct-Turbo"
+    - "claude-sonnet-5"
 
   researcher:      # Long output, quality matters — no cheap shortcuts
-    - "geminicli/gemini-3.5-flash"
-    - "gemini/gemini-2.5-flash"
-    - "mistral/mistral-small-latest"
+    - "claude-opus-5"
+    - "claude-sonnet-5"
+    - "gpt-4o-mini"
     - "gemini/gemini-3.5-flash"
-    - "groq/llama-3.3-70b-versatile"
-    - "claude-opus-4-7"
-    - "claude-sonnet-4-6"
-    - "llamacpp/glm4"
+    - "gemini/gemini-2.5-flash"
+    - "nvidia_nim/nemotron-3-ultra-550b-a55b"
+    - "deepinfra/zai-org/GLM-5.2"
+    - "deepinfra/mistralai/Mistral-Small-24B-Instruct-2501"
+    - "deepinfra/meta-llama/Llama-3.3-70B-Instruct-Turbo"
 
   extractor:       # Bulk structured JSON per-chunk — fast cheap model first
-    - "geminicli/gemini-3.5-flash"
-    - "groq/llama-3.1-8b-instant"
-    - "groq/llama-3.3-70b-versatile"
+    - "deepinfra/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"
+    - "deepinfra/meta-llama/Llama-3.3-70B-Instruct-Turbo"
     - "gemini/gemini-2.5-flash"
-    - "mistral/mistral-small-latest"
-    - "llamacpp/glm4"
+    - "deepinfra/mistralai/Mistral-Small-24B-Instruct-2501"
 
   classifier:      # Highest volume, simplest task
-    - "geminicli/gemini-3.5-flash"
-    - "groq/llama-3.1-8b-instant"
-    - "groq/llama-3.3-70b-versatile"
+    - "deepinfra/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"
+    - "deepinfra/meta-llama/Llama-3.3-70B-Instruct-Turbo"
     - "gemini/gemini-2.5-flash"
-    - "mistral/mistral-small-latest"
-    - "llamacpp/glm4"
+    - "deepinfra/mistralai/Mistral-Small-24B-Instruct-2501"
+    - "gpt-4o-mini"
 ```
+See [`models.yaml`](models.yaml) for the authoritative, currently-loaded lists — this block is illustrative and can drift.
 
 Override the primary model for any run without editing the file:
 ```bash
@@ -299,9 +305,9 @@ Set in `.env` or via the web UI (session only — not persisted to disk):
 |-----|---------|
 | `ANTHROPIC_API_KEY` | Claude models |
 | `OPENAI_API_KEY` | GPT models |
-| `GROQ_API_KEY` | Groq fallback |
-| `MISTRAL_API_KEY` | Mistral fallback |
-| `GEMINI_API_KEY` | Gemini API models (not geminicli) |
+| `DEEPINFRA_API_KEY` | DeepInfra open-weight fallback tier |
+| `NVIDIA_API_KEY` | NVIDIA NIM (Nemotron 3 Ultra) |
+| `GEMINI_API_KEY` | Gemini API models |
 | `SS_API_KEY` | Semantic Scholar (optional; raises rate limit from 0.1 → 1 req/s) |
 
 **Never commit `.env` or write keys to disk from the serve process.**
@@ -430,12 +436,14 @@ The bibliography is the **only citation pool Stage 5 agents may draw from.** Thi
 
 **Multi-source knowledge fetch:** Wikipedia REST / PyPI JSON / arXiv Atom fetched per term by `term_type`:
 - `tool_library` → PyPI first, then Wikipedia
-- `concept` → Wikipedia, then arXiv (2 papers)
-- `academic` → Wikipedia only (SS handles bibliography)
+- `concept` → Wikipedia, then OpenAlex fallback, then arXiv (2 papers)
+- `academic` → Wikipedia, then OpenAlex fallback, then arXiv (2 papers) if OpenAlex also came up empty
 
 Cached at `audit/sources/sources_{domain_id}.json`. Injected into S5 persona prompts with caps: 8 terms / 1 source / 400 chars.
 
 **External API rate limiting:** 8 concurrent domain fetches hit Semantic Scholar (100 req/5 min unauthenticated), Crossref, and OpenAlex simultaneously. `aiolimiter` (async token bucket) serializes at the API call level without blocking domain-level parallelism.
+
+**OpenAlex daily budget:** on top of its 10 req/s rate limit, OpenAlex enforces a small per-caller daily USD budget (observed as $0 free budget). Once exhausted it 429s every request with an `"Insufficient budget"` body until reset (~UTC midnight) — a multi-hour condition, not a transient rate limit. `sources.py` detects this (body phrase, or a `Retry-After` above `config.yaml`'s `timeouts.openalex_budget_retry_after_threshold_s`, default 600s), emits an `openalex_budget_exhausted` event, and stops calling OpenAlex for the rest of the process instead of retrying — terms fall back to arXiv instead.
 
 **Adversarial gap analysis:**
 
@@ -445,6 +453,15 @@ Cached at `audit/sources/sources_{domain_id}.json`. Injected into S5 persona pro
 | Defender | Argue each apparent gap is present under a different name |
 
 A gap survives to `gap_analysis.md` only if the Gap Finder rebuts the Defender's argument. This prevents rubber-stamping.
+
+**Tool-grounded verdicts (ReAct / CRITIC pattern):** before the Finder and Defender commit to their structured verdict, each runs a live-tool grounding pass — propose → invoke a tool → observe the result → answer (Yao et al. 2022; Gou et al. 2024). This is a bespoke `propose → tool → observe → answer` loop in `s4_audit._run_react_grounding`, built directly on `QuotaAwareRouter.call_with_tools()` (the same primitive the `agent` role uses elsewhere for LangGraph ReAct graphs) rather than LangGraph's `StateGraph`/`ToolNode` machinery — plain, easily-testable control flow for a single stage-local loop.
+
+| Role | Tool | Checks |
+|------|------|--------|
+| Gap Finder | `check_recent_coverage` (`s4_tools.py`) | Semantic Scholar search, falling back to arXiv — is this candidate gap a real, findable research topic, not a hallucinated or already-superseded one? |
+| Defender | `check_graph_synonym` (`s4_tools.py`) | Lexical-similarity scan of the domain's existing graph terms plus a Wikipedia lookup — is this "gap" already present under another name? |
+
+The grounding findings are spliced into the same structured prompt used before, so the final `router.call(..., GapAnalysisResult)` call is unchanged in shape — just better-informed. `s4_tools.py` wraps existing fetch logic only (`bibliography._ss_search`, `sources._fetch_arxiv`, `sources._fetch_wikipedia`); it adds no new HTTP client. Grounding degrades gracefully and never fails the build: it is skipped entirely in `--no-bibliography-fetch` (air-gapped) mode, and any tool error, timeout, or agent-role model exhaustion falls back to the original ungrounded prompt with an `emit()`-logged reason. This adds up to a handful of extra `agent`-role LLM calls per domain per round — a deliberate latency/cost trade for verdicts that are checked against live sources instead of asserted from parametric memory alone.
 
 **Output:** `state/audit/anchors_{domain}.json`, `state/audit/bibliography_{domain}.json`, `state/audit/gap_analysis.md`, `state/audit/corrections.md`, `state/audit/sources/sources_{domain}.json`
 
@@ -516,18 +533,45 @@ Three agents run in parallel:
 </details>
 
 <details>
+<summary><strong>S7b — Quality Evaluator</strong></summary>
+
+Terminal agent-as-judge scoring pass, adapted from the Quality Evaluator agent in ["Agentic AutoSurvey: Let LLMs Survey LLMs"](https://arxiv.org/abs/2509.18661) (arXiv 2509.18661). That paper scores generated survey content across a 12-dimension rubric in 3 weighted categories, 0-10 scale with textual justification per dimension, via a multi-stage internal reasoning process (read-through → per-dimension scoring → citation-count check → synthesis-pattern check → critical-analysis check). This stage keeps that process but scores this pipeline's own artifacts instead of a literature survey, and — like that paper's use of it — runs **after** the writer's output is final and never gates or triggers revision.
+
+**Rubric** (12 dimensions, 3 weighted categories):
+
+| Category | Weight | Dimensions |
+|---|---|---|
+| Core Quality | 60% | citation_coverage, citation_accuracy, factual_accuracy, synthesis_vs_enumeration, structural_organization, taxonomy_coherence |
+| Writing Quality | 20% | readability_at_depth, terminology_consistency |
+| Content Depth | 20% | comprehensiveness, critical_analysis, frontier_novelty, where_to_go_next_quality |
+
+Citation counts (valid/unknown keys against the domain's bibliography pool) are computed deterministically in Python and injected into the prompt — the judge is told to trust those numbers over the prose's tone. Scoring expectations adapt to the calibrated `UserProfile` depth (survey vs. standard vs. deep) rather than applying a fixed pass/fail bar.
+
+Scores every `state/sections/section_{domain_id}.md` against its `state/audit/bibliography_{domain_id}.json` and its nodes in `state/graph.json`, plus one cross-domain pass over `state/sections/section_synthesis.md`.
+
+**Output:** `state/audit/quality_eval_{domain_id}.json` (machine-readable, one per domain + `quality_eval_synthesis.json`), `state/audit/quality_eval.md` (human-readable rollup table + per-dimension justifications).
+
+Completion sentinel: `state/audit/quality_eval_{domain_id}.done`
+
+**Non-blocking, always:** never raises on a low score, never prevents S8 from running — identical philosophy to `[NEEDS_CITATION]` below.
+
+</details>
+
+<details>
 <summary><strong>S8 — Verify</strong></summary>
 
-Structural citation audit. Every citation key in the assembled document is checked against `state/audit/bibliography_{domain}.json`. Unknown keys = agent defections.
+Two checks, structural then semantic. Neither blocks the build — findings are logged for human review (`[NEEDS_CITATION]` is advisory, never a build failure).
 
-**Three-tier oracle:**
-1. Crossref REST API — journals, proceedings, books, all fields, no auth
-2. Semantic Scholar Graph API — CS/ML papers, citation counts
-3. arXiv Export API — fallback, only for domains tagged `cs.*`, `math.*`, or `physics.*`
+**1. Structural citation audit.** Every citation key (`[@key]`) in the assembled sections is checked against `state/audit/bibliography_{domain}.json`. Unknown keys and `[NEEDS_CITATION]` markers are logged to `state/audit/needs_citation.md`.
 
-`[NEEDS_CITATION]` markers are logged to `state/audit/needs_citation.md` and flagged for human review. They do not block the build.
+**2. Claim-level entailment check.** For each citing sentence (capped at 50 per run), the sentence is decomposed into atomic claims and each claim is checked against the cited paper's abstract for `supports` / `contradicts` / `neutral`. Two things ground and de-bias this step:
 
-**Acceptance criterion:** 0 `[UNVERIFIED]` tags. `[NEEDS_CITATION]` tags are acceptable.
+- **Tool-grounded abstracts.** If the cached bibliography entry has no abstract (Semantic Scholar omits them for some older/less-indexed works), `bibliography.fetch_paper_abstract()` makes a live SS lookup before giving up — DOI first, title search as fallback. Only when both the cache and the live fetch come back empty does the claim get logged as `"No abstract available for this citation."`.
+- **Ensemble adjudication, not a single model's opinion.** The decomposition/entailment call goes through `agents.base.ensemble_verify()` instead of one `classifier_router.call()`: two proposers from different model families (`verifier_proposer_a`, `verifier_proposer_b` in `models.yaml`) answer the same prompt concurrently. If they agree on the overall relation, that's the verdict — no extra cost. If they disagree, a third-family adjudicator (`verifier_adjudicator`) is shown both candidates anonymized and in a randomized order and picks or synthesizes the final verdict. See "LLM routing" below for the anti-positional-bias mechanics.
+
+Both checks write into `state/output/verification_report.json` (claims, URL/DOI resolution, summary stats including `entailment_rate`) and `state/audit/needs_citation.md` (structural findings + any `contradicts` claims as `[CITATION_MISMATCH]`).
+
+**Acceptance criterion:** `[NEEDS_CITATION]` and `contradicts` findings are acceptable — they're advisory, not build gates. Only an unhandled exception in the stage itself fails the build.
 
 </details>
 
@@ -591,7 +635,7 @@ Never ask an LLM to dynamically cluster a large raw set in one shot. The result 
 
 A model auditing a graph it just generated is grading its own homework. External anchors — real papers, real field taxonomies, real APIs — must be pulled before the audit so the auditor has something to diff against that the generator has never seen.
 
-*Consequence:* S4 fetches external anchors before any gap analysis runs.
+*Consequence:* S4 fetches external anchors before any gap analysis runs, and the Gap Finder/Defender loop itself now issues additional live tool calls per candidate gap (see "Related work" below) rather than relying solely on the pre-fetched snapshot.
 
 ### 4. Citations must be grounded before writing, not verified after
 
@@ -603,7 +647,7 @@ Agents without web access will hallucinate plausible-sounding papers. Verifying 
 
 The system must work for CS, biology, law, economics, architecture. Any component hardcoded to a specific field's citation infrastructure (e.g., arXiv) is a domain assumption, not a design choice.
 
-*Consequence:* Crossref REST API and Semantic Scholar are the global citation oracles. arXiv is a fallback for CS/Math/Physics only.
+*Consequence:* Semantic Scholar is the global citation oracle. arXiv is a fallback for CS/Math/Physics only. (Crossref has a configured rate limit in `config.yaml` but no client code currently calls it — a pre-existing gap between config and implementation, not something introduced by any of the work described in this README; treat the Crossref rate-limit entry as reserved for future use, not as an active oracle.)
 
 ### 6. Synthesis must not consume narrative
 
@@ -629,6 +673,7 @@ Critics at every step is redundancy theater — it burns tokens to resolve artif
 | S5 Research | Adversarial | Logical leaps and citation discipline |
 | S6 Align | LangGraph ReAct | Agent self-corrects against pedagogy checklist |
 | S7 Synthesize | Adversarial | Cross-domain connections are the most hallucination-prone output |
+| S7b Quality Eval | Agent-as-judge, no revision | Terminal scoring only — reports never trigger a critic loop or rewrite |
 | S8 Verify | No critic | Deterministic bibliography key lookup |
 | S9 Prereq | LangGraph ReAct | Single pass; agent identifies and inserts primers autonomously |
 | S10 Assemble | No critic | Mechanical stitching |
@@ -678,6 +723,20 @@ Sorting bibliography by citation count descending is a recency tax: a 2017 surve
 
 ---
 
+## Related work
+
+Four commitments recur across S4, S5, S7b, and S8 — mandatory tool-grounding, retrieve-then-critique, debiased multi-model judging, and bounded iterative self-correction — and each traces to a specific line of agentic-LLM research rather than being ad hoc.
+
+**Tool-grounded judging, not pure LLM-as-judge.** Every external call in the pipeline (S3 OpenAlex validation, S4's Wikipedia/PyPI/arXiv fetch, S8's citation lookup) is a Thought→Action→Observation step, not a bare completion — [ReAct](https://arxiv.org/abs/2210.03629) (Yao et al., 2022). Concretely: S4's Gap Finder and Defender each run a `propose → invoke tool → observe → answer` grounding pass (`_run_react_grounding`, `s4_audit.py:129-209`) — Finder checks candidate gaps via live Semantic Scholar/arXiv search, Defender checks claimed rebrands via graph-term similarity + Wikipedia — before either commits its structured verdict, falling back to the original ungrounded prompt (with a logged reason) only on tool/model failure or in air-gapped `--no-bibliography-fetch` mode. S8's claim-verification step similarly fetches a live abstract (`bibliography.fetch_paper_abstract`) when the cached one is empty, before ever judging entailment. This is the same discipline [Agent-as-a-Judge](https://arxiv.org/abs/2410.10934) (Zhuge et al., 2024) requires of an evaluator: it must invoke tools, not just read and score text — with the honest caveat that graceful degradation to an ungrounded call is a deliberate fallback here, not a guarantee that every verdict is tool-checked.
+
+**Retrieve, then critique the retrieval — never trust either side blind.** Principle 3 (Independent verification vectors) is this pipeline's version of [Self-RAG](https://arxiv.org/abs/2310.11511) (Asai et al., 2023) and [Corrective RAG](https://arxiv.org/abs/2401.15884) (Yan et al., 2024): S4 pre-fetches external anchors and runs an adversarial pass over them instead of trusting the generator's claims or the raw retrieval outright. The Gap Finder → Defender → Rebuttal loop itself (`s4_audit.py:210-` in `_run_gap_loop`) is [CRITIC](https://arxiv.org/abs/2305.11738) (Gou et al., 2023) applied to graph completeness — propose, defend, adjudicate as three separate calls, none trusted alone, each now additionally grounded per the paragraph above. S8's claim-verification step (`s8_verify.py`, `_CLAIM_DECOMPOSE_VERIFY_PROMPT`) decomposes prose into individually checkable claims before grounding them, the same move as [RARR](https://arxiv.org/abs/2210.08726) (Gao et al., 2022) and [Chain-of-Verification](https://arxiv.org/abs/2309.11495) (Dhuliawala et al., 2023).
+
+**Debiased multi-model judging — panels, not single-model verdicts.** S8's entailment verdict no longer comes from one classifier call: `agents.base.ensemble_verify()` fans the same prompt out to two proposer models from architecturally distinct families and, only on disagreement, escalates to a third-family adjudicator shown both candidates anonymized and in randomized order — the two concrete bias fixes (self-enhancement, positional) documented in [Zheng et al., "Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena"](https://arxiv.org/abs/2306.05685) (2023). S7b's Quality Evaluator stage (`s7b_quality_eval.py`) is adapted directly from the Quality Evaluator agent in [Agentic AutoSurvey](https://arxiv.org/abs/2509.18661) (2025): a terminal, non-gating agent-as-judge pass scoring finished output across a 12-dimension rubric in 3 weighted categories, rather than a single opaque quality score.
+
+**Iterate deliberately, with memory of what failed.** S5's Theoretician/Engineer/Practitioner fan-out into a Reconciler (`s5_research.py:112-281`) is Orchestrator-Worker at the architecture level. The `_CRITIC_PROMPT` → revised `ReconcilerOutput` step (`s5_research.py:285-347`) is a bounded [Reflexion](https://arxiv.org/abs/2303.11366) (Shinn et al., 2023) round: critique feedback must be addressed point-by-point in the revision, not silently dropped, and Principle 8's convergence rule (exit on empty issue set, stall, or explicit accept; hard round cap of 1/2/3 for survey/standard/deep) is what keeps the loop bounded rather than open-ended.
+
+---
+
 ## LLM routing
 
 ### QuotaAwareRouter (`agents/base.py`)
@@ -689,34 +748,41 @@ Tries models in order from `models.yaml` for the given role:
 | `litellm.AuthenticationError` (may be wrapped in `InstructorRetryException`) | Permanently skip model; walk exception chain with `_find_in_chain()` |
 | 429 + `Retry-After` header | Sleep exact duration; retry same model |
 | Headerless 429/503 | Exponential backoff (2s → 4s → 8s); skip after 3 consecutive failures |
-| geminicli `RuntimeError` | Permanently skip geminicli for this run; emit `model_geminicli_skip` |
 | All models exhausted | Emit `quota_exhausted`; raise `RuntimeError` |
 
 `_next_model()` checks both `self._skip` (per-router) and `_PROBED_UNAVAILABLE` (global) — a quota discovery in one coroutine immediately affects all other routers.
 
-### geminicli provider
+### DeepInfra / NVIDIA NIM providers
 
-Spawns `npx @google/gemini-cli` as a subprocess. No API key — uses cached OAuth from `~/.gemini/oauth_creds.json`. Timeout: `cfg.timeouts.get("geminicli_timeout_s", 120)` — do not use `getattr()`, `Config.timeouts` is a `dict`.
-
-`gemini/gemini-2.5-pro` (API) and `geminicli/gemini-2.5-pro` (OAuth CLI) are different providers.
+Plain litellm-native model prefixes (`deepinfra/*`, `nvidia_nim/*`) — no custom transport code, unlike the geminicli/llamacpp providers they replaced (2026-09). Auth is one env var each (`DEEPINFRA_API_KEY`, `NVIDIA_API_KEY`). DeepInfra is the consolidated open-weight fallback tier (Meta Llama, Mistral, plus Chinese-lab-authored GLM-5.2/Kimi-K2.7-Code served from DeepInfra's US infrastructure — see CLAUDE.md's "No Chinese API providers" note for why that's fine).
 
 ### Instructor modes
 
-`instructor.from_litellm()` defaults to `TOOLS` mode. Mistral and Groq return parallel tool calls for single-schema requests, which instructor rejects:
+`instructor.from_litellm()` defaults to `TOOLS` mode. The open-weight Llama/Mistral models on DeepInfra return parallel tool calls for single-schema requests, which instructor rejects:
 
 | Model | Mode | Reason |
 |-------|------|--------|
-| `mistral/*` | `instructor.Mode.JSON` | litellm works with JSON mode; `mistralai` SDK not required |
-| `groq/*` | `instructor.Mode.JSON` | Groq Llama returns parallel tool calls in TOOLS mode |
+| `deepinfra/*` | `instructor.Mode.JSON` | Open-weight Llama/Mistral models return parallel tool calls in TOOLS mode |
+| `gemini/*` | `instructor.Mode.JSON` | litellm's openai-compat translation layer needs JSON mode |
 | everything else | `instructor.Mode.TOOLS` | Default |
 
 ### Per-provider concurrency semaphores
 
-Free-tier providers (Groq, Mistral) get `asyncio.Semaphore(3)`. All other models share the global semaphore (`cfg.concurrency.default = 8`). Cloud APIs have concurrent request limits too — 16 simultaneous Opus requests will hit Anthropic's ceiling and generate 429s that the `QuotaAwareRouter` will misread as quota exhaustion without a semaphore.
+DeepInfra gets `asyncio.Semaphore(5)`. All other models share the global semaphore (`cfg.concurrency.default = 8`). Cloud APIs have concurrent request limits too — 16 simultaneous Opus requests will hit Anthropic's ceiling and generate 429s that the `QuotaAwareRouter` will misread as quota exhaustion without a semaphore.
 
 ### `probe_models()` at startup
 
-Checks env vars and binary presence only (no LLM calls). Adds unavailable models to `_PROBED_UNAVAILABLE`. Local prefixes (`llamacpp/`, `ollama/`, `lm_studio/`, `local/`) are always skipped here.
+Checks env vars only (no LLM calls, no subprocess/health-check). Adds unavailable models to `_PROBED_UNAVAILABLE`. Local prefixes (`ollama/`, `lm_studio/`, `local/`) are always skipped here.
+
+### `ensemble_verify()` — debiased LLM-as-judge panel
+
+A pure addition on top of `QuotaAwareRouter`/`make_router()` (doesn't modify either), used by S8's claim-verification step. Implements the judge-panel bias fixes from Zheng et al., ["Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena"](https://arxiv.org/abs/2306.05685):
+
+1. Two proposer roles (architecturally distinct model families, e.g. `gemini/*` vs. `gpt-4o-mini`/`deepinfra/*`) answer the same prompt concurrently via their own independent `QuotaAwareRouter`s.
+2. Agreement on `verdict_key(result)` returns immediately — no third call, so the common case costs two calls, not three.
+3. Disagreement escalates to a third-family adjudicator role, shown both candidates **anonymized** (no role/model name ever appears in the adjudicator prompt) and in a **randomized order** (independent `random.random()` coin flip per call, never a fixed order) — the two documented fixes for self-enhancement and positional bias.
+
+Returns an `EnsembleVerdict` (`result`, `agreed`, `proposer_roles`, `proposer_results`, `adjudicator_role`) so callers can log which path was taken. Raises exactly what the underlying `QuotaAwareRouter.call()` calls can raise — callers wanting "log, don't fail the build" behavior wrap it in their own `try/except`, same as a plain `router.call()`.
 
 ### Model usage audit log
 
@@ -965,6 +1031,9 @@ runs/{run_id}/
 │   │   ├── sources/sources_{domain_id}.json    S4 multi-source knowledge cache
 │   │   ├── gap_analysis.md                     S4 output
 │   │   ├── corrections.md                      S4 output
+│   │   ├── quality_eval_{domain_id}.json       S7b agent-as-judge score (machine-readable)
+│   │   ├── quality_eval_{domain_id}.done       S7b completion sentinel
+│   │   ├── quality_eval.md                     S7b rollup: all domains + synthesis, one table
 │   │   ├── needs_citation.md                   S8 output
 │   │   ├── model_usage.jsonl                   Per-call: model, tokens, cost, switches
 │   │   └── critique_{stage}_{id}.md            Adversarial loop logs
@@ -998,7 +1067,7 @@ know_expand/
   observe.py      — self-contained web server + HTML/CSS/JS dashboard (~2700 lines)
   sources.py      — multi-source knowledge fetcher: Wikipedia REST / PyPI JSON / arXiv Atom
   agents/
-    base.py       — QuotaAwareRouter, geminicli provider, _instructor_mode(), probe_models()
+    base.py       — QuotaAwareRouter, DeepInfra/NVIDIA NIM providers, _instructor_mode(), probe_models()
     schemas.py    — all Pydantic models for LLM structured outputs
   stages/
     s*.py         — one file per stage
@@ -1019,4 +1088,4 @@ style/
 - 65% foundational / 35% frontier bibliography split — non-negotiable
 - Two xelatex passes — always
 - `[NEEDS_CITATION]` is logged, never a build failure
-- `gemini/gemini-2.5-pro` and `geminicli/gemini-2.5-pro` are different providers
+- DeepInfra (`deepinfra/*`) is the consolidated open-weight fallback tier — do not reintroduce Groq/Mistral/llama.cpp/geminicli

@@ -24,9 +24,9 @@ from know_expand.config import (
     CentralityConfig,
     ConcurrencyConfig,
     Config,
-    LlamaCppConfig,
     RateLimitConfig,
 )
+from know_expand.stages.s4_tools import COVERAGE_TOOL_NAME, SYNONYM_TOOL_NAME
 from know_expand.state import new_run_id, setup_logging
 
 
@@ -93,8 +93,10 @@ def _make_cfg() -> Config:
         timeouts={"http_async_seconds": 10},
         adversarial_rounds={"gap": 1, "survey": 1, "standard": 2, "deep": 3},
         boilerplate_stop_list=[],
-        models={"critic": ["llamacpp/test-model"]},
-        llamacpp=LlamaCppConfig(base_url="http://localhost:8080"),
+        models={
+            "critic": ["deepinfra/meta-llama/Llama-3.3-70B-Instruct-Turbo"],
+            "agent": ["deepinfra/meta-llama/Llama-3.3-70B-Instruct-Turbo"],
+        },
     )
 
 
@@ -145,6 +147,38 @@ def _to_records(dicts: list[dict]) -> list[CitationRecord]:
 
 
 # ---------------------------------------------------------------------------
+# Helper: canned call_with_tools sequences for the ReAct grounding loop
+# ---------------------------------------------------------------------------
+
+def _grounding_call_sequence(tool_name: str, arg_name: str, arg_value: str, finish_text: str) -> list[dict]:
+    """One propose->tool->observe->answer round-trip: a tool-call turn followed
+    by a finishing turn with no further tool calls. Mirrors what
+    _run_react_grounding expects back from router.call_with_tools()."""
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": json.dumps({arg_name: arg_value})},
+                }
+            ],
+        },
+        {"role": "assistant", "content": finish_text, "tool_calls": None},
+    ]
+
+
+def _domain_grounding_sequence() -> list[dict]:
+    """Finder grounding (coverage tool) followed by defender grounding (synonym tool)."""
+    return (
+        _grounding_call_sequence(COVERAGE_TOOL_NAME, "query", "test query", "Finder grounding findings")
+        + _grounding_call_sequence(SYNONYM_TOOL_NAME, "term", "test term", "Defender grounding findings")
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test
 # ---------------------------------------------------------------------------
 
@@ -180,6 +214,12 @@ async def test_s3_run_writes_outputs_and_marks_complete(tmp_path):
 
     mock_router = AsyncMock()
     mock_router.call.side_effect = call_returns
+    # Two domains, each running one round of Finder + Defender ReAct grounding
+    # (a tool-call turn followed by a finishing turn) before their structured
+    # verdict call — see _run_react_grounding in s4_audit.py.
+    mock_router.call_with_tools.side_effect = (
+        _domain_grounding_sequence() + _domain_grounding_sequence()
+    )
 
     # fetch_anchors now returns (records, ss_ids) tuple
     with (
@@ -187,6 +227,12 @@ async def test_s3_run_writes_outputs_and_marks_complete(tmp_path):
         patch("know_expand.stages.s4_audit.fetch_bibliography", return_value=bib_records) as mock_fb,
         patch("know_expand.stages.s4_audit.fetch_anchor_neighbors", return_value=[]) as _mock_fn,
         patch("know_expand.stages.s4_audit.make_router", return_value=mock_router),
+        # The grounding tools wrap real HTTP fetchers (SS/arXiv/Wikipedia) —
+        # stub them out so the test never hits the network. The canned
+        # responses above don't depend on what these return.
+        patch("know_expand.stages.s4_tools._ss_search", return_value=[]),
+        patch("know_expand.stages.s4_tools._fetch_arxiv", return_value=[]),
+        patch("know_expand.stages.s4_tools._fetch_wikipedia", return_value=None),
     ):
         from know_expand.stages import s4_audit
         await s4_audit.run(state, cfg)
@@ -227,6 +273,28 @@ async def test_s3_run_writes_outputs_and_marks_complete(tmp_path):
     assert mock_router.call.call_count == 6, \
         f"Expected 6 router calls, got {mock_router.call.call_count}"
 
+    # --- ReAct grounding: Finder and Defender each ran one propose->tool->
+    # observe->answer round trip per domain (2 call_with_tools calls each) ---
+    assert mock_router.call_with_tools.call_count == 8, (
+        "Expected 8 call_with_tools invocations (2 domains x [finder grounding "
+        f"(2 turns) + defender grounding (2 turns)]), got {mock_router.call_with_tools.call_count}"
+    )
+    # The Finder's tool (coverage) and the Defender's tool (synonym) must each
+    # have actually been invoked at least once per domain before finalizing —
+    # verify via the structured calls' prompts that grounding text was
+    # spliced in, proving _run_react_grounding executed the tool call and fed
+    # its observation back before the finder/defender committed a verdict.
+    finder_call_msgs = [c.args[0] for c in mock_router.call.call_args_list[0::3]]
+    defender_call_msgs = [c.args[0] for c in mock_router.call.call_args_list[1::3]]
+    for msgs in finder_call_msgs:
+        content = msgs[0]["content"]
+        assert "Finder grounding findings" in content, \
+            "Finder's structured prompt should include the ReAct grounding findings"
+    for msgs in defender_call_msgs:
+        content = msgs[0]["content"]
+        assert "Defender grounding findings" in content, \
+            "Defender's structured prompt should include the ReAct grounding findings"
+
     # Cleanup
     shutil.rmtree(state_dir)
 
@@ -265,6 +333,8 @@ async def test_s3_skips_completed_stage(tmp_path):
     assert mock_fa.call_count == 0, "fetch_anchors should not be called when stage is complete"
     assert mock_fb.call_count == 0, "fetch_bibliography should not be called when stage is complete"
     assert mock_router.call.call_count == 0, "router should not be called when stage is complete"
+    assert mock_router.call_with_tools.call_count == 0, \
+        "no ReAct grounding calls should happen when stage is complete"
 
     shutil.rmtree(state_dir)
 
@@ -305,12 +375,18 @@ async def test_s3_domain_failure_does_not_abort_other_domains(tmp_path):
         _canned_gap_result("domain-b"),
         _canned_gap_result("domain-b"),
     ]
+    # domain-a never reaches the gap loop (fetch_anchors raises first), so only
+    # domain-b's Finder+Defender grounding round trips happen.
+    mock_router.call_with_tools.side_effect = _domain_grounding_sequence()
 
     with (
         patch("know_expand.stages.s4_audit.fetch_anchors", side_effect=maybe_fail_anchor),
         patch("know_expand.stages.s4_audit.fetch_bibliography", return_value=bib_records),
         patch("know_expand.stages.s4_audit.fetch_anchor_neighbors", return_value=[]),
         patch("know_expand.stages.s4_audit.make_router", return_value=mock_router),
+        patch("know_expand.stages.s4_tools._ss_search", return_value=[]),
+        patch("know_expand.stages.s4_tools._fetch_arxiv", return_value=[]),
+        patch("know_expand.stages.s4_tools._fetch_wikipedia", return_value=None),
     ):
         from know_expand.stages import s4_audit
         await s4_audit.run(state, cfg)
@@ -332,5 +408,12 @@ async def test_s3_domain_failure_does_not_abort_other_domains(tmp_path):
     # gap_analysis.md and corrections.md exist (even with partial results)
     assert (audit_dir / "gap_analysis.md").exists()
     assert (audit_dir / "corrections.md").exists()
+
+    # domain-b's Finder + Defender each ran one grounding round trip; domain-a
+    # never got there, so no extra grounding calls leaked from the failure.
+    assert mock_router.call_with_tools.call_count == 4, (
+        "Expected 4 call_with_tools invocations for domain-b's grounding only, "
+        f"got {mock_router.call_with_tools.call_count}"
+    )
 
     shutil.rmtree(state_dir)
