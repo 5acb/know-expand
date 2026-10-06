@@ -12,7 +12,7 @@ dependencies = [
     # NLP / extraction
     "spacy>=3.7.0",
     "keybert",
-    "sentence-transformers>=3.0.0",   # BGE-M3
+    "sentence-transformers>=5.6.0",   # BGE-M3
     "numpy>=1.26.0",
     # LLM routing + structured outputs
     "litellm>=1.40.0",
