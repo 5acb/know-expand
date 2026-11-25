@@ -25,8 +25,9 @@ _logger = logging.getLogger("know_expand.s2")
 
 _MAP_PROMPT = """\
 You are a domain expert reading a chunk of a technical document.
-Extract every substantive concept that a domain expert would recognise as load-bearing.
+Extract the {max_terms} most load-bearing substantive concepts a domain expert would recognise.
 Go beyond literal text: include implicit domain concepts implied by the content.
+Prioritise by centrality — prefer terms that recur, anchor other concepts, or are unique to this domain.
 
 Strict exclusions (return nothing for these):
 - Boilerplate structural terms: introduction, methodology, conclusion, etc.
@@ -90,18 +91,29 @@ async def _map_chunk(
     keybert_terms = {kw.lower() for kw, _ in keywords}
 
     # Signal B — LLM conceptual
-    messages = [{"role": "user", "content": _MAP_PROMPT.format(text=text[:cfg.chunking.llm_map_char_limit])}]
-    llm_result: TermInventory = await router.call(messages, TermInventory)
+    messages = [{"role": "user", "content": _MAP_PROMPT.format(
+        text=text[:cfg.chunking.llm_map_char_limit],
+        max_terms=cfg.keyword_extraction.max_terms_per_chunk,
+    )}]
+    try:
+        llm_result: TermInventory = await router.call(messages, TermInventory)
+    except Exception as exc:
+        emit({"event": "chunk_map_llm_failed", "chunk_id": chunk_id, "error": str(exc)[:200]})
+        llm_result = TermInventory(chunk_id=chunk_id, terms=[])
 
     # Merge: lexical + keybert into base set; LLM adds conceptual terms
     merged: dict[str, TermOccurrence] = {}
     for term, count in lexical.items():
+        if len(term) > 80:
+            continue  # spaCy can produce huge noun chunks from tables/code — skip
         merged[term] = TermOccurrence(
             name=term,
             occurrence_count=count,
             context_snippet=text[:100],
         )
     for term in keybert_terms:
+        if len(term) > 80:
+            continue
         if term not in merged:
             merged[term] = TermOccurrence(name=term, occurrence_count=1)
         else:

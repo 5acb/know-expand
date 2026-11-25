@@ -1,23 +1,49 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+
+_MAX_TERMS = 50
+_MAX_ALIASES = 4
+_MAX_CO_TERMS = 5
+_MAX_SNIPPET = 200
 
 # ---------------------------------------------------------------------------
 # Stage 1 — Extract
 # ---------------------------------------------------------------------------
 
 class TermOccurrence(BaseModel):
-    name: str
+    name: str = Field(default="", max_length=80)
     aliases: list[str] = Field(default_factory=list)
     co_occurring_terms: list[str] = Field(default_factory=list)
-    context_snippet: str = ""
+    context_snippet: str = Field(default="")
     occurrence_count: int = 1
+
+    @field_validator("aliases", "co_occurring_terms", mode="before")
+    @classmethod
+    def _cap_lists(cls, v):
+        if isinstance(v, list):
+            return v[:_MAX_CO_TERMS]
+        return v
+
+    @field_validator("context_snippet", mode="before")
+    @classmethod
+    def _cap_snippet(cls, v):
+        if isinstance(v, str) and len(v) > _MAX_SNIPPET:
+            return v[:_MAX_SNIPPET]
+        return v
 
 
 class TermInventory(BaseModel):
     chunk_id: str
-    terms: list[TermOccurrence]
+    terms: list[TermOccurrence] = Field(default_factory=list)
+
+    @field_validator("terms", mode="before")
+    @classmethod
+    def _cap_terms(cls, v):
+        if isinstance(v, list):
+            return v[:_MAX_TERMS]
+        return v
 
 
 class CanonicalTerm(BaseModel):

@@ -81,6 +81,7 @@ Tries models in order from `models.yaml` for the given role. Fallback rules:
 | `mistral/*` | `instructor.Mode.JSON` | `MISTRAL_STRUCTURED_OUTPUTS` requires `mistralai` SDK; litellm works with JSON mode |
 | `groq/*` | `instructor.Mode.JSON` | Groq Llama models return parallel tool calls in TOOLS mode |
 | `gemini/*` | `instructor.Mode.JSON` | `GEMINI_TOOLS` mode requires native `google-generativeai` SDK; litellm works with JSON mode |
+| `llamacpp/*` | `instructor.Mode.JSON` | GLM and other local models return parallel tool calls in TOOLS mode, which instructor rejects |
 | everything else | `instructor.Mode.TOOLS` | Default; correct for OpenAI/Anthropic |
 
 ### Per-provider concurrency semaphores

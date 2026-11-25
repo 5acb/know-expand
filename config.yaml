@@ -29,7 +29,7 @@ rate_limits:
     time_period: 1
 
 concurrency:
-  default: 8
+  default: 3  # free-tier Groq: 1K RPD cap — serialize to avoid burning daily quota in seconds
 
 timeouts:
   domain_research_seconds: 2700
@@ -57,6 +57,7 @@ keyword_extraction:
   top_n: 20
   ngram_min: 1
   ngram_max: 3
+  max_terms_per_chunk: 50
 
 graph_defaults:
   node_tier: "journeyman"
@@ -65,7 +66,8 @@ graph_defaults:
 llamacpp:
   base_url: "http://192.168.1.117:8080"
   timeout_s: 1200   # per-call timeout (20 min) — thinking models can be slow
-  concurrency: 1    # serialize: local server handles one generation at a time
+  concurrency: 1    # serialize: CPU MoE experts can't handle parallel load efficiently
+  max_output_tokens: 8192  # hard cap — prevents context-ceiling truncation on dense chunks
   # health_path: /health  (llama-server default)
 
 # S5 persona prompt sizing.

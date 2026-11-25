@@ -57,6 +57,7 @@ class KeywordExtractionConfig:
     top_n: int = 20
     ngram_min: int = 1
     ngram_max: int = 3
+    max_terms_per_chunk: int = 50
 
 
 @dataclass
@@ -70,6 +71,7 @@ class LlamaCppConfig:
     base_url: str = "http://192.168.1.117:8080"
     timeout_s: int = 1200     # per-call HTTP timeout; thinking models can take minutes
     concurrency: int = 1      # serialize calls — local server handles one at a time
+    max_output_tokens: int = 8192  # hard cap per call; prevents context-ceiling truncation
 
 
 @dataclass

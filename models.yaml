@@ -1,37 +1,38 @@
 roles:
-  # Slot 0: gemini/gemini-2.5-flash     — $0.30/$2.50 per M — cheapest quality paid fallback
-  # Slot 1: gemini/gemini-3.5-flash     — $1.50/$9.00 per M — quality backstop if 2.5-flash quota hits
+  # Cost reference (May 2026, input/output per M tokens):
+  #   groq/openai/gpt-oss-20b                          $0.075/$0.30   1000 TPS  ← bulk extraction sweet spot
+  #   groq/meta-llama/llama-4-scout-17b-16e-instruct   $0.11/$0.34    594 TPS  ← free tier: 30K TPM
+  #   groq/llama-3.1-8b-instant    $0.05/$0.08     840 TPS  ← cheapest, lower quality
+  #   groq/llama-3.3-70b-versatile $0.59/$0.79     394 TPS
+  #   mistral/mistral-small-latest $0.10/$0.30              ← Small 4, sym pricing
+  #   mistral/open-mistral-nemo    $0.02/$0.03              ← cheapest Mistral
+  #   mistral/mistral-large-latest $0.50/$1.50              ← Large 3, quality
+  #   gemini/gemini-2.5-flash-lite $0.10/$0.40     1M ctx  ← free: 15 RPM/1K RPD
+  #   gemini/gemini-2.5-flash      $0.30/$2.50     1M ctx  ← free: 10 RPM/250 RPD
+  #   gemini/gemini-3.5-flash      $1.50/$9.00     1M ctx  ← quality backstop only
+  #   claude-sonnet-4-6            $3.00/$15.00
+  #   claude-opus-4-7              $5.00/$25.00
+  #
+  # NOTE: gemini/gemini-2.0-flash REMOVED — deprecated, shuts down June 1 2026.
   # No Chinese API providers. Local = llamacpp/glm4 on foiba (192.168.1.117:8080).
   #
-  # WARNING: gemini/gemini-3.5-flash (Google I/O 2026) ≠ gemini/gemini-2.5-flash.
-  # 3.5-flash costs 5× more. Keep it as a backstop, not the primary paid fallback.
-  #
-  # Cost order:
-  #   gemini/gemini-2.5-flash  $0.30/$2.50  ← use this first
-  #   mistral-small-latest     $0.15/$0.60  256K ctx, MoE, European
-  #   groq/llama-3.1-8b        $0.05/$0.08  bulk floor (extractor/classifier only)
-  #   groq/llama-3.3-70b       $0.59/$0.79  free tier: ~500K tok/day aggregate cap
-  #   gpt-4o-mini              $0.15/$0.60
-  #   gemini/gemini-3.5-flash  $1.50/$9.00  ← quality backstop only
-  #   claude-sonnet-4-6        $3.00/$15.00
-  #   claude-opus-4-7          $5.00/$25.00 ← researcher/synthesizer only
-  #
-  # Expected cost per standard run: ~$0.73/run. Deep run: ~$1.60/run
+  # Estimated cost per standard run: ~$0.15/run (cloud only, no free-tier burndown)
 
   # Tool calling, multi-turn ReAct — correctness over cost, low volume.
   agent:
     - "gemini/gemini-2.5-flash"
-    - "gemini/gemini-3.5-flash"
     - "groq/llama-3.3-70b-versatile"
+    - "gemini/gemini-3.5-flash"
     - "claude-sonnet-4-6"
     - "llamacpp/glm4"
 
   # Long output, quality IS the product — no cheap shortcuts.
   researcher:
     - "gemini/gemini-2.5-flash"
-    - "mistral/mistral-small-latest"
-    - "gemini/gemini-3.5-flash"
+    - "mistral/mistral-large-latest"
     - "groq/llama-3.3-70b-versatile"
+    - "gemini/gemini-3.5-flash"
+    - "mistral/mistral-small-latest"
     - "claude-opus-4-7"
     - "claude-sonnet-4-6"
     - "gpt-4o"
@@ -39,9 +40,10 @@ roles:
 
   synthesizer:
     - "gemini/gemini-2.5-flash"
-    - "mistral/mistral-small-latest"
-    - "gemini/gemini-3.5-flash"
+    - "mistral/mistral-large-latest"
     - "groq/llama-3.3-70b-versatile"
+    - "gemini/gemini-3.5-flash"
+    - "mistral/mistral-small-latest"
     - "claude-opus-4-7"
     - "claude-sonnet-4-6"
     - "gpt-4o"
@@ -51,31 +53,36 @@ roles:
   critic:
     - "gemini/gemini-2.5-flash"
     - "mistral/mistral-small-latest"
+    - "groq/llama-3.3-70b-versatile"
     - "gemini/gemini-3.5-flash"
-    - "groq/llama-3.3-70b-versatile"
-    - "gpt-4o-mini"
     - "llamacpp/glm4"
 
-  # Bulk structured JSON, runs per-chunk — groq 8B first for speed/cost, then escalate.
+  # Bulk structured JSON — GPT-OSS 20B first (1000 TPS, proper JSON mode), then escalate.
   extractor:
+    - "groq/openai/gpt-oss-20b"
+    - "groq/meta-llama/llama-4-scout-17b-16e-instruct"
     - "groq/llama-3.1-8b-instant"
     - "groq/llama-3.3-70b-versatile"
-    - "gemini/gemini-2.5-flash"
+    - "gemini/gemini-2.5-flash-lite"
     - "mistral/mistral-small-latest"
+    - "gemini/gemini-2.5-flash"
     - "llamacpp/glm4"
 
-  # Highest volume, simplest task — 8B first.
+  # Highest volume, simplest task — fast cheap models first.
   classifier:
+    - "groq/openai/gpt-oss-20b"
+    - "groq/meta-llama/llama-4-scout-17b-16e-instruct"
     - "groq/llama-3.1-8b-instant"
     - "groq/llama-3.3-70b-versatile"
-    - "gemini/gemini-2.5-flash"
+    - "gemini/gemini-2.5-flash-lite"
     - "mistral/mistral-small-latest"
-    - "gpt-4o-mini"
+    - "gemini/gemini-2.5-flash"
     - "llamacpp/glm4"
 
   # Structured doc gen, benefits from large context.
   assembler:
     - "gemini/gemini-2.5-flash"
+    - "mistral/mistral-large-latest"
     - "mistral/mistral-small-latest"
     - "gemini/gemini-3.5-flash"
     - "claude-sonnet-4-6"

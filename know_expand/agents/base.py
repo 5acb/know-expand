@@ -67,7 +67,17 @@ async def _do_llamacpp_call(
     base_url: str = cfg.llamacpp.base_url
     api_base = base_url.rstrip("/") + "/v1"
 
-    client = instructor.from_litellm(litellm.acompletion)
+    # Suppress thinking for bulk structured-output roles — saves 3-5k tokens/call.
+    # /no_think is the Qwen3/GLM convention; also remind the model to output valid JSON only.
+    _NO_THINK_ROLES = {"extractor", "classifier"}
+    if role in _NO_THINK_ROLES and not any(m.get("role") == "system" for m in messages):
+        messages = [{"role": "system", "content": (
+            "/no_think\n"
+            f"Respond ONLY with a valid JSON object matching the {schema.__name__} schema. "
+            "No explanation, no markdown fences, no extra keys."
+        )}] + messages
+
+    client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
     t0 = time.monotonic()
     emit({
         "event": "llm_call_start",
@@ -83,6 +93,7 @@ async def _do_llamacpp_call(
             api_key="not-needed",
             messages=messages,
             response_model=schema,
+            max_tokens=cfg.llamacpp.max_output_tokens,
             timeout=cfg.llamacpp.timeout_s,
         )
         elapsed = time.monotonic() - t0
@@ -90,6 +101,15 @@ async def _do_llamacpp_call(
         tok_out = getattr(usage, "completion_tokens", None)
         tok_in = getattr(usage, "prompt_tokens", None)
         tok_s = round(tok_out / elapsed, 1) if tok_out and elapsed > 0 else None
+        # Extract <think>...</think> reasoning block if present
+        raw_content = ""
+        try:
+            raw_content = completion.choices[0].message.content or ""
+        except Exception:
+            pass
+        import re as _re
+        thinking_match = _re.search(r"<think>(.*?)</think>", raw_content, _re.DOTALL)
+        thinking_text = thinking_match.group(1).strip() if thinking_match else None
         emit({
             "event": "llm_call_done",
             "role": role,
@@ -99,6 +119,7 @@ async def _do_llamacpp_call(
             "tok_in": tok_in,
             "tok_out": tok_out,
             "tok_s": tok_s,
+            "thinking": thinking_text,
         })
         return result
     except Exception as exc:
@@ -241,10 +262,9 @@ def _instructor_mode(model: str):
     """Return the right instructor mode for a given model.
 
     TOOLS mode (default) sends the schema as a function definition and expects
-    exactly one tool call back.  Mistral sometimes returns parallel tool calls
-    for a single-schema request, which instructor rejects.  Groq (Llama) has
-    the same parallel-tool-call behaviour.  Use native structured-output modes
-    for both so instructor never touches the tool-calling path.
+    exactly one tool call back.  Mistral, Groq (Llama), and llamacpp-served models
+    (e.g. GLM) return parallel tool calls for single-schema requests, which
+    instructor rejects.  Use JSON mode for all of these.
     """
     import instructor
     if "mistral" in model:
@@ -257,6 +277,10 @@ def _instructor_mode(model: str):
         # gemini/ API models route through litellm, not the native Google SDK.
         # GEMINI_TOOLS mode requires model set at client-patch time (native SDK only);
         # JSON mode works fine through litellm's openai-compat translation layer.
+        return instructor.Mode.JSON
+    if model.startswith("llamacpp/"):
+        # GLM (and likely other local models) return parallel tool calls in TOOLS mode,
+        # which instructor rejects. JSON mode works correctly via the openai-compat layer.
         return instructor.Mode.JSON
     return instructor.Mode.TOOLS
 
